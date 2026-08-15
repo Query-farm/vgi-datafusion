@@ -88,6 +88,14 @@ use crate::{VgiCatalogProvider, VgiConnection, VgiScalarUdf, VgiTableFunction};
 /// # }
 /// ```
 pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
+    // DuckDB's own ATTACH spelling has to be handled before sqlparser sees it:
+    // its grammar models exactly two options (READ_ONLY, TYPE), so
+    // `(TYPE vgi, LOCATION '...')` is a *parse* error, and a parse error leaves
+    // no statement to intercept. See `parse_duckdb_attach`.
+    if let Some(spec) = parse_duckdb_attach(query) {
+        attach(ctx, &spec?).await?;
+        return ctx.read_empty();
+    }
     let state = ctx.state();
     let dialect = state.config_options().sql_parser.dialect.clone();
     let statement = state.sql_to_statement(query, &dialect)?;
@@ -108,6 +116,155 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
             let plan = state.statement_to_plan(statement).await?;
             ctx.execute_logical_plan(plan).await
         }
+    }
+}
+
+/// Parse DuckDB's `ATTACH '<catalog>' AS <alias> (TYPE vgi, LOCATION '<loc>')`.
+///
+/// `None` when the statement is not an ATTACH, so everything else is untouched.
+///
+/// # Why this is hand-parsed rather than intercepted on the AST
+///
+/// Every other statement this module handles is recognised *after* sqlparser
+/// has parsed it. That is impossible here: sqlparser's ATTACH grammar models
+/// exactly two DuckDB options, `READ_ONLY` and `TYPE`
+/// ([`AttachDuckDBDatabaseOption`]), so a `LOCATION` option is a hard parse
+/// error —
+///
+/// ```text
+/// ParserError("Expected: expected one of: ), READ_ONLY, TYPE, found: LOCATION")
+/// ```
+///
+/// — and by then there is no statement left to intercept. Since this is the
+/// spelling the entire `.test` corpus uses (248 of its ATTACHes), and since a
+/// failed ATTACH makes every later record in the file fail too, the option list
+/// is parsed directly.
+///
+/// The grammar accepted is deliberately small: the keyword, a quoted catalog
+/// name, `AS`, an alias, and an optional parenthesised list of `key value`
+/// pairs where a value may be quoted, bare, or numeric. `TYPE` is accepted and
+/// ignored; `LOCATION`/`PATH` supplies the worker.
+///
+/// [`AttachDuckDBDatabaseOption`]: datafusion::sql::sqlparser::ast::AttachDuckDBDatabaseOption
+fn parse_duckdb_attach(sql: &str) -> Option<DFResult<AttachSpec>> {
+    let trimmed = sql.trim().trim_end_matches(';');
+    let mut rest = trimmed.strip_prefix_ci("ATTACH")?;
+    rest = rest.trim_start();
+    // `IF NOT EXISTS` is legal DuckDB; re-attaching is idempotent here anyway.
+    if let Some(r) = rest.strip_prefix_ci("IF NOT EXISTS") {
+        rest = r.trim_start();
+    }
+
+    let (catalog, rest) = match take_quoted(rest) {
+        Some(v) => v,
+        // A bare (unquoted) target is not a form the corpus uses, and guessing
+        // would risk swallowing an ATTACH meant for something else.
+        None => {
+            return Some(plan_err!(
+                "ATTACH target must be a quoted string: {trimmed}"
+            ))
+        }
+    };
+    let rest = rest.trim_start();
+    let rest = match rest.strip_prefix_ci("AS") {
+        Some(r) => r.trim_start(),
+        None => return Some(plan_err!("ATTACH is missing `AS <alias>`: {trimmed}")),
+    };
+
+    let (alias, rest) = take_ident(rest);
+    if alias.is_empty() {
+        return Some(plan_err!("ATTACH is missing an alias: {trimmed}"));
+    }
+
+    let mut options = BTreeMap::new();
+    let rest = rest.trim_start();
+    if let Some(inner) = rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+        for pair in split_top_level_commas(inner) {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let (key, value) = take_ident(pair);
+            let value = value.trim();
+            let value = value
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+                .unwrap_or(value);
+            options.insert(key.to_ascii_lowercase(), value.to_string());
+        }
+    } else if !rest.is_empty() {
+        return Some(plan_err!("unexpected text after ATTACH alias: {rest}"));
+    }
+
+    // `TYPE vgi` is the DuckDB way of naming the storage extension; it carries
+    // no information here, where the only storage is VGI.
+    options.remove("type");
+
+    match options
+        .remove("location")
+        .or_else(|| options.remove("path"))
+    {
+        Some(location) if !location.is_empty() => Some(Ok(AttachSpec {
+            catalog,
+            alias,
+            location,
+            options,
+        })),
+        // No LOCATION option: this is the query-string spelling
+        // (`'example?location=…'`), where the worker rides in the target
+        // itself. Both forms are supported, so hand it to that parser rather
+        // than failing — including for its error message, which explains the
+        // form the caller was probably reaching for.
+        _ => Some(AttachSpec::parse(&catalog, &alias)),
+    }
+}
+
+/// Take a single-quoted string, returning it and the remainder.
+fn take_quoted(s: &str) -> Option<(String, &str)> {
+    let s = s.trim_start();
+    let rest = s.strip_prefix('\'')?;
+    let end = rest.find('\'')?;
+    Some((rest[..end].to_string(), &rest[end + 1..]))
+}
+
+/// Take a bare identifier, returning it and the remainder.
+fn take_ident(s: &str) -> (String, &str) {
+    let s = s.trim_start();
+    let end = s
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(s.len());
+    (s[..end].to_string(), &s[end..])
+}
+
+/// Split on commas that are not inside quotes.
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_quote = false;
+    for (i, c) in s.char_indices() {
+        match c {
+            '\'' => in_quote = !in_quote,
+            ',' if !in_quote => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+/// Case-insensitive prefix matching, for SQL keywords.
+trait StripPrefixCi {
+    fn strip_prefix_ci(&self, prefix: &str) -> Option<&str>;
+}
+
+impl StripPrefixCi for str {
+    fn strip_prefix_ci(&self, prefix: &str) -> Option<&str> {
+        let head = self.get(..prefix.len())?;
+        head.eq_ignore_ascii_case(prefix)
+            .then(|| &self[prefix.len()..])
     }
 }
 
@@ -378,19 +535,40 @@ fn register_table_functions(
                 ))
             };
 
-            // Qualified: always registered, always unambiguous.
-            let qualified = format!("{}.{}.{}", spec.alias, schema_name, function);
-            if !state.table_functions().contains_key(&qualified) {
-                ctx.register_udtf(&qualified, make());
-            }
-
-            // Short: convenience only, so never clobber.
-            let short = format!("{}_{}", spec.alias, function);
-            if !state.table_functions().contains_key(&short) {
-                ctx.register_udtf(&short, make());
+            for name in publish_names(&spec.alias, &schema_name, &function) {
+                // First-wins throughout: the two shorter forms cannot carry a
+                // schema, so a name published in two schemas collides on them,
+                // and the fully qualified form is always there as the
+                // unambiguous way to say which one you meant.
+                if !state.table_functions().contains_key(&name) {
+                    ctx.register_udtf(&name, make());
+                }
             }
         }
     }
+}
+
+/// The names one worker function is published under.
+///
+/// DataFusion's function registries are flat and session-wide — its catalog
+/// holds tables only — so the hierarchy has to live inside the key, and one
+/// function gets several keys:
+///
+/// 1. `alias.schema.function` — fully qualified and unambiguous. Two schemas
+///    publishing the same name stay distinct here and nowhere else.
+/// 2. `alias.function` — what the corpus overwhelmingly writes (95 distinct
+///    call sites against 17 fully-qualified ones), because in DuckDB the
+///    default schema is implied.
+/// 3. `alias_function` — for callers who would rather not qualify at all.
+///
+/// Only the first is guaranteed; the other two are first-wins, since neither
+/// can express which schema was meant.
+fn publish_names(alias: &str, schema: &str, function: &str) -> Vec<String> {
+    vec![
+        format!("{alias}.{schema}.{function}"),
+        format!("{alias}.{function}"),
+        format!("{alias}_{function}"),
+    ]
 }
 
 /// Publish the catalog's scalar functions into DataFusion's function registry.
@@ -426,8 +604,9 @@ fn register_scalar_functions(
                 );
                 ctx.register_udf(AsyncScalarUDF::new(Arc::new(udf)).into_scalar_udf());
             };
-            register(format!("{}.{}.{}", spec.alias, schema_name, function));
-            register(format!("{}_{}", spec.alias, function));
+            for name in publish_names(&spec.alias, schema_name, function) {
+                register(name);
+            }
         }
     }
 }
