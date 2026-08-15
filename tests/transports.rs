@@ -142,6 +142,16 @@ async fn table_functions_take_arguments() -> datafusion::error::Result<()> {
     let ctx = SessionContext::new();
     vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
 
+    // The qualified spelling — what the DuckDB corpus writes.
+    let rows = vgi_datafusion::sql(&ctx, "SELECT * FROM ex.main.sequence(10)")
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>();
+    assert_eq!(rows, 10, "a qualified call reaches the right function");
+
     let rows = vgi_datafusion::sql(&ctx, "SELECT * FROM ex_sequence(10)")
         .await?
         .collect()
@@ -207,5 +217,55 @@ async fn catalog_tables_are_queryable() -> datafusion::error::Result<()> {
         .collect()
         .await?;
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    Ok(())
+}
+
+/// Qualified calls must reach the function they name, and qualified *table*
+/// references must be left alone.
+///
+/// These are one test because they are the same guard seen from both sides: the
+/// rewrite keys on whether the relation has arguments, and getting that wrong
+/// breaks one or the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn qualified_names_resolve_without_disturbing_tables() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    // A qualified table reference has no arguments and must not be collapsed —
+    // it resolves through the catalog, not the function registry.
+    let rows = vgi_datafusion::sql(&ctx, "SELECT * FROM ex.data.ten_thousand_table LIMIT 2")
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>();
+    assert_eq!(rows, 2, "a qualified table reference still works");
+
+    // Nested in a subquery, so the walk is proven to recurse rather than only
+    // inspecting the top-level FROM.
+    let rows = vgi_datafusion::sql(
+        &ctx,
+        "SELECT count(*) AS n FROM (SELECT * FROM ex.main.sequence(4)) t",
+    )
+    .await?
+    .collect()
+    .await?
+    .iter()
+    .map(|b| b.num_rows())
+    .sum::<usize>();
+    assert_eq!(rows, 1);
+
+    // The schema is part of the key, so a name published in two schemas stays
+    // distinct — the case a bare prefix cannot express.
+    for schema in ["main", "data"] {
+        let q = format!("SELECT * FROM ex.{schema}.test_same_name_cached()");
+        vgi_datafusion::sql(&ctx, &q)
+            .await
+            .unwrap_or_else(|e| panic!("{q} failed: {e}"))
+            .collect()
+            .await?;
+    }
     Ok(())
 }

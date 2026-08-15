@@ -56,6 +56,7 @@
 //! [`AttachDuckDBDatabaseOption`]: datafusion::sql::sqlparser::ast::AttachDuckDBDatabaseOption
 
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider};
@@ -63,7 +64,9 @@ use datafusion::common::{plan_datafusion_err, plan_err, Result as DFResult};
 use datafusion::dataframe::DataFrame;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::Statement as DFStatement;
-use datafusion::sql::sqlparser::ast::{Expr, Statement as SQLStatement, Value, ValueWithSpan};
+use datafusion::sql::sqlparser::ast::{
+    Expr, Statement as SQLStatement, Value, ValueWithSpan, VisitMut,
+};
 
 use crate::{VgiCatalogProvider, VgiConnection, VgiTableFunction};
 
@@ -99,9 +102,82 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
             ctx.read_empty()
         }
         None => {
+            let mut statement = statement;
+            rewrite_qualified_table_functions(&mut statement);
             let plan = state.statement_to_plan(statement).await?;
             ctx.execute_logical_plan(plan).await
         }
+    }
+}
+
+/// Collapse `catalog.schema.f(args)` into a single dotted identifier so the
+/// call reaches the function it names.
+///
+/// # Why a rewrite is needed for table functions but not scalars
+///
+/// Both kinds live in one flat, session-wide map — DataFusion's catalog holds
+/// tables only, and `SchemaProvider` has no function surface at all. The two
+/// paths then disagree about what a qualified name means:
+///
+/// * A **scalar** call flattens the whole path into the lookup key, so
+///   `SELECT example.main.double(1)` looks up `"example.main.double"`. Register
+///   the UDF under that name and it simply resolves — no rewrite.
+/// * A **table function** call takes only the *first* identifier
+///   (`sql/src/relation/mod.rs`: `name.0.first()`), so
+///   `FROM example.main.sequence(10)` looks up `"example"`. It reaches a
+///   function — the wrong one — and `TableFunctionArgs` carries no name for the
+///   implementation to notice.
+///
+/// So the name is collapsed here, before planning, into one *unquoted*
+/// identifier whose value is the dotted path. Quoting is not an alternative:
+/// the lookup key keeps the quote marks (`'"example.main.sequence"' not found`).
+///
+/// # The guard that matters
+///
+/// Only a relation **with arguments** is rewritten. A qualified name without
+/// parentheses is an ordinary table reference — `ex.data.ten_thousand_table` —
+/// which already resolves through the catalog and must not be touched.
+///
+/// Upstream tracks the underlying gap as apache/datafusion#18021; a PR that
+/// added schema-scoped table functions (#18022) was closed in favour of #15095,
+/// which is itself dormant.
+fn rewrite_qualified_table_functions(statement: &mut DFStatement) {
+    use datafusion::sql::sqlparser::ast::{
+        Ident, ObjectName, ObjectNamePart, TableFactor, VisitorMut,
+    };
+
+    struct Collapse;
+
+    impl VisitorMut for Collapse {
+        type Break = ();
+
+        fn pre_visit_table_factor(&mut self, tf: &mut TableFactor) -> ControlFlow<()> {
+            if let TableFactor::Table {
+                name,
+                args: Some(_),
+                ..
+            } = tf
+            {
+                if name.0.len() > 1 {
+                    let dotted = name
+                        .0
+                        .iter()
+                        .filter_map(|part| part.as_ident().map(|i| i.value.clone()))
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    if !dotted.is_empty() {
+                        *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(dotted))]);
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    if let DFStatement::Statement(inner) = statement {
+        // `visit` walks the whole tree — CTEs, subqueries, joins — so nested
+        // calls are covered without hand-rolling the recursion.
+        let _ = inner.as_mut().visit(&mut Collapse);
     }
 }
 
@@ -238,35 +314,46 @@ async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
 }
 
 /// Publish the catalog's table functions so they are callable **with
-/// arguments**: `SELECT * FROM ex_sequence(10)`.
+/// arguments**: `SELECT * FROM ex.main.sequence(10)`.
 ///
 /// # Why they need a second surface at all
 ///
-/// A [`CatalogProvider`](datafusion::catalog::CatalogProvider) yields tables,
-/// and a table has no arguments. Most VGI table functions take some, and their
-/// output schema depends on them, so they cannot be reached that way — only the
-/// zero-argument ones can. DataFusion's answer is a separate registry, so a
-/// function that takes arguments is published here as well.
+/// A [`CatalogProvider`] yields tables, and a table has no arguments. Most VGI
+/// table functions take some, and their output schema depends on them, so they
+/// cannot be reached that way — only the zero-argument ones can. DataFusion's
+/// answer is a separate registry, so a function that takes arguments is
+/// published here as well.
 ///
-/// # Why the name is prefixed
+/// # Two names, two audiences
 ///
-/// That registry is **flat and global** — `register_udtf(name, …)`, with no
-/// catalog or schema qualification, and DataFusion resolves
-/// `SELECT * FROM a.b.f(1)` as a table reference rather than a call. So the
-/// worker's own coordinates cannot be spelled, and bare names would collide:
-/// the reference fixture worker alone publishes `test_same_name_cached` in two
-/// different schemas.
+/// That registry is flat and session-wide, so the hierarchy has to live *inside*
+/// the key. Each function is registered twice, pointing at the same
+/// implementation:
 ///
-/// Names are therefore `<alias>_<function>`, which is exactly what the DuckDB
-/// extension does when a worker asks for global functions — see
-/// `VgiGlobalFunctionName` and the `global_function_prefix`. Registration is
-/// **first-wins** for the same reason it is there: it is advisory, and
-/// clobbering a name someone else registered would be worse than not
-/// publishing.
+/// * **`catalog.schema.function`** — the fully qualified path as a single key.
+///   With [`rewrite_qualified_table_functions`] in front of the planner, this
+///   makes ordinary qualified SQL work, and because the schema is part of the
+///   key it disambiguates correctly: a worker publishing the same function name
+///   in two schemas gets two distinct entries.
+/// * **`<alias>_function`** — a short name for callers who would rather not
+///   qualify.
 ///
-/// A function is published whether or not it takes arguments. A zero-argument
-/// one is then reachable both ways — `ex.main.f` and `ex_f()` — which costs
-/// nothing and saves the caller having to know which kind it is.
+/// The short name is **first-wins**: it cannot carry a schema, so two schemas
+/// publishing one name collide, and clobbering a name someone else registered
+/// would be worse than not publishing. The qualified name always works.
+///
+/// # Why the short name is *not* the worker's `global_function_prefix`
+///
+/// That prefix looks like the right answer and is not. It belongs to
+/// `CatalogAttachResult::global_functions` — a set the worker explicitly
+/// nominates for publication into the host's global namespace, four of them on
+/// the reference fixture worker against 143 table functions in one schema.
+/// Applying `vgi_example_` to all of them would claim every function is one of
+/// the worker's declared globals.
+///
+/// Publishing that set under its own prefix is a real feature — the extension's
+/// `RegisterVgiGlobalFunctions` — and a follow-up here; the prefix is reserved
+/// for it. [`VgiCatalogProvider::global_function_prefix`] already carries it.
 fn register_table_functions(
     ctx: &SessionContext,
     conn: &VgiConnection,
@@ -274,24 +361,32 @@ fn register_table_functions(
     provider: &VgiCatalogProvider,
 ) {
     let state = ctx.state();
+
     for schema_name in provider.schema_names() {
         let Some(schema) = provider.schema(&schema_name) else {
             continue;
         };
         for function in schema.table_names() {
-            let visible = format!("{}_{}", spec.alias, function);
-            if state.table_functions().contains_key(&visible) {
-                continue; // first attach wins
-            }
-            ctx.register_udtf(
-                &visible,
+            let make = || {
                 Arc::new(VgiTableFunction::new(
                     conn.clone(),
                     &spec.catalog,
                     &schema_name,
                     &function,
-                )),
-            );
+                ))
+            };
+
+            // Qualified: always registered, always unambiguous.
+            let qualified = format!("{}.{}.{}", spec.alias, schema_name, function);
+            if !state.table_functions().contains_key(&qualified) {
+                ctx.register_udtf(&qualified, make());
+            }
+
+            // Short: convenience only, so never clobber.
+            let short = format!("{}_{}", spec.alias, function);
+            if !state.table_functions().contains_key(&short) {
+                ctx.register_udtf(&short, make());
+            }
         }
     }
 }

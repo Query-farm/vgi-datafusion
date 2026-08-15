@@ -176,19 +176,30 @@ fn bind_failed(name: &str) -> impl Fn(String) -> DataFusionError + '_ {
 #[derive(Debug)]
 pub struct VgiCatalogProvider {
     schemas: HashMap<String, Arc<dyn SchemaProvider>>,
+    /// The prefix the worker asked for on globally-published functions
+    /// (`global_function_prefix`), empty when it asked for none.
+    ///
+    /// A worker that already publishes globals to DuckDB has an opinion about
+    /// what they should be called; honouring it means one worker gets the same
+    /// spelling on both engines, rather than each client inventing its own.
+    global_function_prefix: String,
 }
 
 impl VgiCatalogProvider {
     /// Attach a catalog and list its schemas.
     pub async fn discover(conn: VgiConnection, catalog: &str) -> DFResult<Arc<Self>> {
         let (c, cat) = (conn.clone(), catalog.to_string());
-        let names = tokio::task::spawn_blocking(move || {
+        let (names, global_function_prefix) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
             let attached = client
                 .attach(&cat, vgi_client::AttachOptions::default())
                 .map_err(to_df)?;
+            let prefix = attached.info().global_function_prefix.clone();
             let s = client.schemas(&attached).map_err(to_df)?;
-            Ok::<_, DataFusionError>(s.into_iter().map(|s| s.name).collect::<Vec<_>>())
+            Ok::<_, DataFusionError>((
+                s.into_iter().map(|s| s.name).collect::<Vec<String>>(),
+                prefix,
+            ))
         })
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
@@ -198,7 +209,17 @@ impl VgiCatalogProvider {
             let sp = VgiSchemaProvider::discover(conn.clone(), catalog, &name).await?;
             schemas.insert(name, sp as Arc<dyn SchemaProvider>);
         }
-        Ok(Arc::new(Self { schemas }))
+        Ok(Arc::new(Self {
+            schemas,
+            global_function_prefix,
+        }))
+    }
+}
+
+impl VgiCatalogProvider {
+    /// The worker's requested prefix for globally-published functions.
+    pub fn global_function_prefix(&self) -> &str {
+        &self.global_function_prefix
     }
 }
 
