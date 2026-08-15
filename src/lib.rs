@@ -65,6 +65,7 @@ mod filters;
 mod scalar;
 mod session;
 mod table_function;
+mod table_input;
 
 pub use aggregate::VgiAggregateUdf;
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};

@@ -545,3 +545,50 @@ async fn aggregates_resolve_and_group() -> datafusion::error::Result<()> {
     assert!(vals.contains("main:9"), "group 1 wrong:\n{vals}");
     Ok(())
 }
+
+/// A table-valued argument: `f('name', (SELECT …))`.
+///
+/// The subquery becomes the call's input stream — a VGI function with a
+/// `TableInput` parameter is an exchange-mode function, not a third kind of
+/// argument — and the scalar arguments stay bind arguments. `accumulate` is
+/// also a `TableBufferingFunction`, so this exercises the Sink+Source protocol
+/// (begin → process → combine → finalize) rather than a streaming exchange;
+/// sending it a streaming INPUT phase fails outright.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_table_argument_becomes_the_input_stream() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!("ATTACH 'accumulate' AS acc (TYPE vgi, LOCATION '{w}')"),
+    )
+    .await?;
+
+    // Each call needs its own collection name: the fixture pins a schema per
+    // name, so reusing one across shapes is a bind error by design.
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT x FROM acc.main.accumulate('df_one', (SELECT * FROM (VALUES (1)) AS t(x)))",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+
+    // The column keeps the subquery's own name. The worker echoes the names the
+    // bind declared, so `col_0` here would mean the input schema was relabelled.
+    assert_eq!(batches[0].schema().field(0).name(), "x");
+
+    let rows = vgi_datafusion::sql(
+        &ctx,
+        "SELECT x FROM acc.main.accumulate('df_two', (SELECT * FROM (VALUES (1),(2),(3)) AS t(x)))",
+    )
+    .await?
+    .collect()
+    .await?
+    .iter()
+    .map(|b| b.num_rows())
+    .sum::<usize>();
+    assert_eq!(rows, 3, "every input row should come back");
+    Ok(())
+}

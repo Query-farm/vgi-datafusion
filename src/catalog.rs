@@ -43,6 +43,9 @@ pub struct VgiSchemaProvider {
     conn: VgiConnection,
     catalog: String,
     schema_name: String,
+    /// Which advertised table functions are `TableBufferingFunction`s, which
+    /// speak a different protocol from the streaming shape.
+    buffered_functions: std::collections::HashSet<String>,
     /// Every name the schema advertises — catalog **tables** and table
     /// **functions**, resolved once at attach.
     ///
@@ -79,40 +82,55 @@ impl VgiSchemaProvider {
         schema_name: &str,
     ) -> DFResult<Arc<Self>> {
         let (c, cat, sch) = (conn.clone(), catalog.to_string(), schema_name.to_string());
-        let (tables, fn_names, scalars, aggregates) = tokio::task::spawn_blocking(move || {
-            let mut client = c.connect()?;
-            let attached = client
-                .attach(&cat, vgi_client::AttachOptions::default())
-                .map_err(to_df)?;
-            let tables = client.tables(&attached, &sch).map_err(to_df)?;
-            let fns = client
-                .functions(&attached, &sch, vgi_client::FunctionKind::Table)
-                .map_err(to_df)?;
-            let scalars = client
-                .functions(&attached, &sch, vgi_client::FunctionKind::Scalar)
-                .map_err(to_df)?;
-            let aggregates = client
-                .functions(&attached, &sch, vgi_client::FunctionKind::Aggregate)
-                .map_err(to_df)?
-                .into_iter()
-                .map(|f| f.name)
-                .collect::<Vec<String>>();
-            let scalars = scalars
-                .into_iter()
-                .map(|f| {
-                    let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
-                    Ok::<_, DataFusionError>((f.name, specs))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, DataFusionError>((
-                tables,
-                fns.into_iter().map(|f| f.name).collect::<Vec<String>>(),
-                scalars,
-                aggregates,
-            ))
-        })
-        .await
-        .map_err(|e| DataFusionError::External(Box::new(e)))??;
+        let (tables, fn_names, scalars, aggregates, buffered_functions) =
+            tokio::task::spawn_blocking(move || {
+                let mut client = c.connect()?;
+                let attached = client
+                    .attach(&cat, vgi_client::AttachOptions::default())
+                    .map_err(to_df)?;
+                let tables = client.tables(&attached, &sch).map_err(to_df)?;
+                let fns = client
+                    .functions(&attached, &sch, vgi_client::FunctionKind::Table)
+                    .map_err(to_df)?;
+                // `function_type` distinguishes the three table shapes that share
+                // one listing filter; the buffered one needs the Sink+Source
+                // protocol rather than a streaming exchange.
+                //
+                // The wire carries the enum's *member name* — `TABLE_BUFFERING`,
+                // not the lowercase `table_buffering` value — the same convention
+                // that governs `FunctionKind`. Matched case-insensitively so a
+                // worker that sends either spelling is understood.
+                let buffered: std::collections::HashSet<String> = fns
+                    .iter()
+                    .filter(|f| f.function_type.0.eq_ignore_ascii_case("table_buffering"))
+                    .map(|f| f.name.clone())
+                    .collect();
+                let scalars = client
+                    .functions(&attached, &sch, vgi_client::FunctionKind::Scalar)
+                    .map_err(to_df)?;
+                let aggregates = client
+                    .functions(&attached, &sch, vgi_client::FunctionKind::Aggregate)
+                    .map_err(to_df)?
+                    .into_iter()
+                    .map(|f| f.name)
+                    .collect::<Vec<String>>();
+                let scalars = scalars
+                    .into_iter()
+                    .map(|f| {
+                        let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
+                        Ok::<_, DataFusionError>((f.name, specs))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, DataFusionError>((
+                    tables,
+                    fns.into_iter().map(|f| f.name).collect::<Vec<String>>(),
+                    scalars,
+                    aggregates,
+                    buffered,
+                ))
+            })
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
         let tables: HashMap<String, vgi_client::TableInfo> =
             tables.into_iter().map(|t| (t.name.clone(), t)).collect();
@@ -127,6 +145,7 @@ impl VgiSchemaProvider {
             tables,
             scalars,
             aggregates,
+            buffered_functions,
             bound: Mutex::new(HashMap::new()),
         }))
     }
@@ -144,6 +163,11 @@ impl VgiSchemaProvider {
     /// Aggregate functions this schema advertises.
     pub fn aggregates(&self) -> &[String] {
         &self.aggregates
+    }
+
+    /// Whether `name` is a buffered (Sink+Source) table function.
+    pub fn is_buffered(&self, name: &str) -> bool {
+        self.buffered_functions.contains(name)
     }
 
     /// Look up a memoised bind without holding the lock across an await.

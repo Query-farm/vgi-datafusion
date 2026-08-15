@@ -523,21 +523,20 @@ fn register_table_functions(
 ) {
     let state = ctx.state();
 
-    for schema_name in provider.schema_names() {
-        let Some(schema) = provider.schema(&schema_name) else {
-            continue;
-        };
-        for function in schema.table_names() {
+    for (schema_name, schema) in provider.vgi_schemas() {
+        for function in datafusion::catalog::SchemaProvider::table_names(schema.as_ref()) {
+            let buffered = schema.is_buffered(&function);
             let make = || {
                 Arc::new(VgiTableFunction::new(
                     conn.clone(),
                     &spec.catalog,
-                    &schema_name,
+                    schema_name,
                     &function,
+                    buffered,
                 ))
             };
 
-            for name in publish_names(&spec.alias, &schema_name, &function) {
+            for name in publish_names(&spec.alias, schema_name, &function) {
                 // First-wins throughout: the two shorter forms cannot carry a
                 // schema, so a name published in two schemas collides on them,
                 // and the fully qualified form is always there as the

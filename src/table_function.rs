@@ -53,6 +53,10 @@ pub struct VgiTableFunction {
     catalog: String,
     schema_name: String,
     function: String,
+    /// Whether the worker declared this a `TableBufferingFunction`. Only
+    /// consulted for a call that carries a table argument, since that is the
+    /// only shape where the two protocols diverge here.
+    buffered: bool,
 }
 
 impl VgiTableFunction {
@@ -62,12 +66,14 @@ impl VgiTableFunction {
         catalog: impl Into<String>,
         schema_name: impl Into<String>,
         function: impl Into<String>,
+        buffered: bool,
     ) -> Self {
         Self {
             conn,
             catalog: catalog.into(),
             schema_name: schema_name.into(),
             function: function.into(),
+            buffered,
         }
     }
 
@@ -79,6 +85,30 @@ impl VgiTableFunction {
 
 impl TableFunctionImpl for VgiTableFunction {
     fn call_with_args(&self, args: TableFunctionArgs) -> DFResult<Arc<dyn TableProvider>> {
+        // A TABLE argument makes this an exchange-mode call: the subquery
+        // becomes the input stream and the remaining arguments stay bind
+        // arguments, which is how the extension models it too.
+        if let Some(table_arg) = crate::table_input::TableArgument::find(args.exprs())? {
+            let scalars: Vec<Expr> = args
+                .exprs()
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != table_arg.index)
+                .map(|(_, e)| e.clone())
+                .collect();
+            let arguments = to_arguments(&self.function, &scalars)?;
+            return crate::table_input::VgiTableInputProvider::bind_blocking(
+                self.conn.clone(),
+                &self.catalog,
+                &self.schema_name,
+                &self.function,
+                arguments,
+                table_arg,
+                self.buffered,
+            )
+            .map(|p| p as Arc<dyn TableProvider>);
+        }
+
         let arguments = to_arguments(&self.function, args.exprs())?;
         VgiTableProvider::bind_blocking(
             self.conn.clone(),
