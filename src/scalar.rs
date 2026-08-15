@@ -133,7 +133,7 @@ impl VgiScalarUdf {
         let fields: Vec<Field> = arg_types
             .iter()
             .enumerate()
-            .map(|(i, t)| Field::new(format!("arg{i}"), t.clone(), true))
+            .map(|(i, t)| Field::new(format!("col_{i}"), t.clone(), true))
             .collect();
         let input_schema = Schema::new(fields);
 
@@ -235,10 +235,17 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             .iter()
             .map(|a| a.to_array(rows))
             .collect::<DFResult<_>>()?;
+        // `col_<i>`, not any other spelling: this is the wire convention the
+        // DuckDB extension uses (`vgi_scalar_function_impl.cpp` builds
+        // `input_names` as `"col_" + i`), and a worker that reads its arguments
+        // **by name** finds nothing under another one — returning a column of
+        // NULLs rather than an error. A single-argument function that reads
+        // positionally works either way, which is what made this look like it
+        // worked at all.
         let fields: Vec<Field> = columns
             .iter()
             .enumerate()
-            .map(|(i, c)| Field::new(format!("arg{i}"), c.data_type().clone(), true))
+            .map(|(i, c)| Field::new(format!("col_{i}"), c.data_type().clone(), true))
             .collect();
         let input = RecordBatch::try_new(Arc::new(Schema::new(fields.clone())), columns)?;
 

@@ -92,17 +92,84 @@ impl Bucket {
     }
 }
 
+/// How long one record may take before it is set aside.
+const RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Default)]
 struct Tally {
     files_run: usize,
     files_skipped: usize,
     executed: usize,
     failed: usize,
+    timed_out: usize,
     values_matched: usize,
+    /// Differed only in how the values are printed.
+    values_rendering: usize,
     values_differed: usize,
     buckets: BTreeMap<Bucket, usize>,
     /// One example error per bucket, so the summary is diagnosable.
     examples: BTreeMap<Bucket, (String, String)>,
+    /// Queries that ran but disagreed with DuckDB, kept in full.
+    ///
+    /// A count alone cannot distinguish "renders 42 as 42.0" from "returns the
+    /// wrong answer", and only one of those is a bug.
+    mismatches: Vec<Mismatch>,
+}
+
+/// Do two result sets agree once DuckDB's *rendering* conventions are allowed
+/// for?
+///
+/// The corpus records DuckDB's output verbatim, and three of its conventions
+/// differ from Arrow's without either being wrong:
+///
+/// * an empty string prints as `(empty)`;
+/// * struct keys are quoted — `{'lat': 3.0}` against `{lat: 3.0}`;
+/// * floats print at shortest-round-trip — `0.0003` against Arrow's
+///   `0.00030000000000000003`, which are the same double.
+///
+/// Counting those as failures would put a rendering difference and a wrong
+/// answer in the same bucket, and only one of them is worth anyone's time. So
+/// they are compared separately and reported separately.
+fn agrees_modulo_rendering(expected: &[String], got: &[String]) -> bool {
+    if expected.len() != got.len() {
+        return false;
+    }
+    expected.iter().zip(got).all(|(e, g)| {
+        let (ec, gc): (Vec<_>, Vec<_>) = (e.split('\t').collect(), g.split('\t').collect());
+        ec.len() == gc.len() && ec.iter().zip(&gc).all(|(a, b)| cells_agree(a, b))
+    })
+}
+
+fn cells_agree(expected: &str, got: &str) -> bool {
+    if expected == got {
+        return true;
+    }
+    if expected == "(empty)" && got.is_empty() {
+        return true;
+    }
+    // Same double, different number of digits.
+    if let (Ok(a), Ok(b)) = (expected.parse::<f64>(), got.parse::<f64>()) {
+        let scale = a.abs().max(b.abs()).max(1.0);
+        if (a - b).abs() <= scale * 1e-9 {
+            return true;
+        }
+    }
+    unquote_struct_keys(expected) == unquote_struct_keys(got)
+}
+
+/// Drop the quotes DuckDB puts around struct field names.
+fn unquote_struct_keys(s: &str) -> String {
+    s.replace("{'", "{")
+        .replace(", '", ", ")
+        .replace("': ", ": ")
+}
+
+/// A query that executed but produced different values.
+struct Mismatch {
+    file: String,
+    sql: String,
+    expected: Vec<String>,
+    got: Vec<String>,
 }
 
 /// Parse a `.test` file into records, or `None` when it should be skipped.
@@ -218,6 +285,12 @@ async fn run_file(path: &Path, tally: &mut Tally) {
         return;
     }
     tally.files_run += 1;
+    let file_label = path
+        .to_string_lossy()
+        .rsplit("integration/")
+        .next()
+        .unwrap_or("")
+        .to_string();
 
     let ctx = SessionContext::new();
     for record in records {
@@ -238,24 +311,47 @@ async fn run_file(path: &Path, tally: &mut Tally) {
             continue;
         }
 
-        match vgi_datafusion::sql(&ctx, &sql).await {
+        // One slow record must not dominate the report. Some fixtures move a
+        // lot of data on purpose, and this is a survey of what *works*, not a
+        // benchmark — a timeout is counted separately so it is never mistaken
+        // for a missing feature.
+        let outcome = tokio::time::timeout(RECORD_TIMEOUT, async {
+            let df = vgi_datafusion::sql(&ctx, &sql).await?;
+            df.collect().await
+        })
+        .await;
+
+        let outcome = match outcome {
+            Err(_) => {
+                tally.timed_out += 1;
+                continue;
+            }
+            Ok(o) => o,
+        };
+
+        match outcome {
             Err(e) => record_failure(tally, &sql, &e.to_string()),
-            Ok(df) => match df.collect().await {
-                Err(e) => record_failure(tally, &sql, &e.to_string()),
-                Ok(batches) => {
-                    tally.executed += 1;
-                    if let Some(expected) = expected {
-                        if !expected.is_empty() {
-                            let got = render(&batches);
-                            if got == *expected {
-                                tally.values_matched += 1;
-                            } else {
-                                tally.values_differed += 1;
-                            }
+            Ok(batches) => {
+                tally.executed += 1;
+                if let Some(expected) = expected {
+                    if !expected.is_empty() {
+                        let got = render(&batches);
+                        if got == *expected {
+                            tally.values_matched += 1;
+                        } else if agrees_modulo_rendering(expected, &got) {
+                            tally.values_rendering += 1;
+                        } else {
+                            tally.values_differed += 1;
+                            tally.mismatches.push(Mismatch {
+                                file: file_label.clone(),
+                                sql: first_line(&sql),
+                                expected: expected.clone(),
+                                got,
+                            });
                         }
                     }
                 }
-            },
+            }
         }
     }
 }
@@ -326,7 +422,7 @@ async fn main() {
         run_file(f, &mut tally).await;
     }
 
-    let total = tally.executed + tally.failed;
+    let total = tally.executed + tally.failed + tally.timed_out;
     let pct = |n: usize, d: usize| {
         if d == 0 {
             0.0
@@ -347,13 +443,43 @@ async fn main() {
         tally.failed,
         pct(tally.failed, total),
     );
-    let compared = tally.values_matched + tally.values_differed;
+    if tally.timed_out > 0 {
+        println!(
+            "         {} timed out after {:?} (not counted as failures)",
+            tally.timed_out, RECORD_TIMEOUT
+        );
+    }
+    let compared = tally.values_matched + tally.values_rendering + tally.values_differed;
+    let agreeing = tally.values_matched + tally.values_rendering;
     println!(
-        "values:  {compared} queries compared — {} matched ({:.1}%), {} differed",
+        "values:  {compared} queries compared — {agreeing} agree ({:.1}%): \
+         {} exact, {} differ only in rendering",
+        pct(agreeing, compared),
         tally.values_matched,
-        pct(tally.values_matched, compared),
-        tally.values_differed,
+        tally.values_rendering,
     );
+    println!(
+        "         {} genuinely differ ({:.1}%)",
+        tally.values_differed,
+        pct(tally.values_differed, compared)
+    );
+
+    if !tally.mismatches.is_empty() {
+        let show: usize = std::env::var("CORPUS_SHOW_DIFFS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15);
+        println!(
+            "\nvalue mismatches (showing {} of {}):",
+            show.min(tally.mismatches.len()),
+            tally.mismatches.len()
+        );
+        for m in tally.mismatches.iter().take(show) {
+            println!("\n  {} :: {}", m.file, m.sql);
+            println!("    expected: {:?}", m.expected);
+            println!("    got:      {:?}", m.got);
+        }
+    }
 
     println!("\nfailures by cause:");
     let mut buckets: Vec<_> = tally.buckets.iter().collect();
