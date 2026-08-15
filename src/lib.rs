@@ -218,22 +218,48 @@ fn conform(
         return Ok(batch);
     }
     if schema.fields().is_empty() {
+        // `count(*)`: the plan wants a row count and no columns, so whatever
+        // the worker sent is discarded and only the cardinality survives.
         return Ok(RecordBatch::try_new_with_options(
             schema.clone(),
             vec![],
             &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
         )?);
     }
-    let want = schema.fields().len();
-    if batch.num_columns() < want {
-        return Err(DataFusionError::Execution(format!(
-            "worker emitted {} columns but the plan declared {want}",
-            batch.num_columns()
-        )));
-    }
-    Ok(RecordBatch::try_new(
+
+    // Match by NAME, never by position.
+    //
+    // Projection pushdown is advisory: a worker may honour it and return
+    // exactly the requested columns, or ignore it and return all of them.
+    // Taking the first N columns positionally is correct in the first case and
+    // silently wrong in the second — `SELECT b` would receive column `a`'s
+    // values under the label `b`. That is not a hypothetical: it is what
+    // `cache/coverage.test` caught, and the shape of the result (right column
+    // count, right names, wrong data) means nothing downstream can notice.
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|want| {
+            batch.column_by_name(want.name()).cloned().ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "worker returned no column named `{}`; it emitted [{}]",
+                    want.name(),
+                    batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .map(|f| f.name().as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+        })
+        .collect::<DFResult<Vec<_>>>()?;
+
+    Ok(RecordBatch::try_new_with_options(
         schema.clone(),
-        batch.columns()[..want].to_vec(),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
     )?)
 }
 

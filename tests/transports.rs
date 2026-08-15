@@ -350,3 +350,51 @@ async fn const_parameters_reach_the_worker() -> datafusion::error::Result<()> {
     }
     Ok(())
 }
+
+/// A narrowed projection must return the columns it asked for.
+///
+/// Projection pushdown is advisory — a worker may honour it or return every
+/// column — so the scan cannot take the first N columns positionally. Doing so
+/// produced a result with the right shape, the right column names and the
+/// wrong data, which nothing downstream can detect. Caught by
+/// `cache/coverage.test`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowed_projection_returns_the_right_columns() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!("ATTACH 'example' AS ex (TYPE vgi, LOCATION '{w}')"),
+    )
+    .await?;
+
+    // The fixture's columns are deliberately distinguishable: a=i, b=i*10,
+    // c=i*100. Reading the wrong column is therefore visible in the values,
+    // which a same-typed table would hide.
+    for (q, want) in [
+        (
+            "SELECT b FROM ex.data.cache_multicol ORDER BY b",
+            vec![0i64, 10, 20, 30],
+        ),
+        (
+            "SELECT c FROM ex.data.cache_multicol ORDER BY c",
+            vec![0, 100, 200, 300],
+        ),
+    ] {
+        let batches = vgi_datafusion::sql(&ctx, q).await?.collect().await?;
+        let got: Vec<i64> = batches
+            .iter()
+            .flat_map(|b| {
+                let c = b
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                    .expect("Int64")
+                    .clone();
+                (0..c.len()).map(move |i| c.value(i))
+            })
+            .collect();
+        assert_eq!(got, want, "{q}");
+    }
+    Ok(())
+}
