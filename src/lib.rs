@@ -131,10 +131,24 @@ impl VgiConnection {
 
 /// The cheapest column to fetch when the caller wants only a row count.
 ///
-/// Prefers a fixed-width type over a variable-width one: for `count(*)` the
-/// values are thrown away, so the only thing that matters is how many bytes
-/// crossing the wire. `None` when the table has no columns at all, in which case
-/// there is nothing to narrow to.
+/// # This is DuckDB's rule, relocated
+///
+/// The DuckDB extension never faces this decision, because DuckDB resolves it in
+/// the optimizer: `remove_unused_columns.cpp` refuses to hand a table function an
+/// empty column list and substitutes `LogicalGet::GetAnyColumn()` — a virtual
+/// empty column if the scan advertises one, else rowid, else column 0. So by the
+/// time `VgiTableFunctionInitGlobal` runs, `input.column_ids` already holds
+/// exactly one entry and a `count(*)` costs one column on the wire.
+///
+/// DataFusion has no such rule: it passes `Some(vec![])` straight to
+/// `TableProvider::scan` and expects a zero-column batch carrying the row count.
+/// And forwarding `[]` to the worker is not an option — an empty projection list
+/// already means **all columns** in the VGI protocol, so it would ask for the
+/// opposite of what is wanted. Hence the same choice, made here instead.
+///
+/// The one divergence: DuckDB takes rowid-or-column-0, this takes the narrowest
+/// fixed-width column. Both send exactly one column; this one is never wider.
+/// `None` when the table has no columns at all.
 fn narrowest_column(bound: &vgi_client::BoundFunction) -> Option<i64> {
     use datafusion::arrow::datatypes::DataType;
     let schema = bound.output_schema();
