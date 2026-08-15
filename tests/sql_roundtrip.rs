@@ -147,3 +147,163 @@ async fn the_plan_names_the_remote_scan() -> datafusion::error::Result<()> {
     );
     Ok(())
 }
+
+/// Find the schema that declares `filter_echo_table_scan`.
+///
+/// It lives in a non-default schema, so the test discovers it rather than
+/// hardcoding a name that a catalog rearrangement would silently break.
+async fn filter_echo_schema(conn: &VgiConnection) -> Option<String> {
+    let c = conn.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut client = c.connect().ok()?;
+        let cat = client
+            .attach("example", vgi_client::AttachOptions::default())
+            .ok()?;
+        for s in client.schemas(&cat).ok()? {
+            let fns = client
+                .functions(&cat, &s.name, vgi_client::FunctionKind::Table)
+                .ok()?;
+            if fns.iter().any(|f| f.name == "filter_echo_table_scan") {
+                return Some(s.name);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Read the single distinct value of the `pushed_filters` column.
+fn pushed_filters(batches: &[datafusion::arrow::array::RecordBatch]) -> String {
+    use datafusion::arrow::array::StringArray;
+    for b in batches {
+        let Some(idx) = b.schema().index_of("pushed_filters").ok() else {
+            continue;
+        };
+        let col = b
+            .column(idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        if col.len() > 0 && !col.is_null(0) {
+            return col.value(0).to_string();
+        }
+    }
+    String::new()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_predicate_reaches_the_worker_and_the_rows_are_right() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let Some(schema) = filter_echo_schema(&conn).await else {
+        eprintln!("skipping: filter_echo_table_scan not in this catalog");
+        return Ok(());
+    };
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(conn, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    // The fixture generates n = 0..99 and echoes whatever filters it was handed.
+    let batches = ctx
+        .sql("SELECT n, pushed_filters FROM echo WHERE n > 90")
+        .await?
+        .collect()
+        .await?;
+
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 9, "n > 90 over 0..99 is nine rows");
+
+    let echoed = pushed_filters(&batches);
+    assert!(
+        !echoed.is_empty(),
+        "the worker reported no pushed filters — the predicate never reached it, \
+         and DataFusion filtered locally instead"
+    );
+    assert!(
+        echoed.contains('n') && echoed.contains("90"),
+        "the worker should have received a predicate on n against 90; got {echoed:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpushable_predicate_still_produces_correct_rows() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let Some(schema) = filter_echo_schema(&conn).await else {
+        return Ok(());
+    };
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(conn, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    // A column-to-column comparison cannot be expressed on the wire, so nothing
+    // is pushed — DataFusion must still return the right answer. `s` is
+    // 'row_<n>', so this matches nothing.
+    let batches = ctx
+        .sql("SELECT n FROM echo WHERE s = CAST(n AS VARCHAR)")
+        .await?
+        .collect()
+        .await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 0, "'row_<n>' never equals '<n>'");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conjunction_narrows_correctly() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let Some(schema) = filter_echo_schema(&conn).await else {
+        return Ok(());
+    };
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(conn, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    let batches = ctx
+        .sql("SELECT n FROM echo WHERE n >= 10 AND n < 20")
+        .await?
+        .collect()
+        .await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 10, "[10, 20) is ten rows");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disjunction_widens_correctly() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let Some(schema) = filter_echo_schema(&conn).await else {
+        return Ok(());
+    };
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(conn, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    // An OR is the case where pushing half the predicate would lose rows, so
+    // this is the shape most likely to expose a translation mistake.
+    let batches = ctx
+        .sql("SELECT n FROM echo WHERE n < 5 OR n > 95")
+        .await?
+        .collect()
+        .await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 9, "0..4 plus 96..99");
+    Ok(())
+}

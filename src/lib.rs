@@ -58,6 +58,7 @@ use datafusion::physical_plan::{
 use vgi_client::{AttachOptions, BindSpec, ScanOptions, VgiClient};
 
 mod catalog;
+mod filters;
 mod scalar;
 
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};
@@ -126,6 +127,37 @@ impl VgiConnection {
     pub fn label(&self) -> &str {
         &self.label
     }
+}
+
+/// The cheapest column to fetch when the caller wants only a row count.
+///
+/// Prefers a fixed-width type over a variable-width one: for `count(*)` the
+/// values are thrown away, so the only thing that matters is how many bytes
+/// crossing the wire. `None` when the table has no columns at all, in which case
+/// there is nothing to narrow to.
+fn narrowest_column(bound: &vgi_client::BoundFunction) -> Option<i64> {
+    use datafusion::arrow::datatypes::DataType;
+    let schema = bound.output_schema();
+    if schema.fields().is_empty() {
+        return None;
+    }
+    let width = |d: &DataType| -> u32 {
+        match d {
+            DataType::Boolean | DataType::Int8 | DataType::UInt8 => 1,
+            DataType::Int16 | DataType::UInt16 => 2,
+            DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Date32 => 4,
+            DataType::Int64 | DataType::UInt64 | DataType::Float64 => 8,
+            // Anything variable-width or nested is worse than any fixed-width
+            // column, whatever its declared size.
+            _ => u32::MAX,
+        }
+    };
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, f)| width(f.data_type()))
+        .map(|(i, _)| i as i64)
 }
 
 /// Make a batch match the schema its plan declared.
@@ -238,11 +270,33 @@ impl TableProvider for VgiTableProvider {
         TableType::Base
     }
 
+    /// Every filter is reported `Inexact`, so DataFusion re-applies it above the
+    /// scan and pushdown stays a pure optimisation — a worker that ignores or
+    /// mis-applies the blob still yields correct rows. Claiming `Exact` would
+    /// make every translation decision load-bearing for correctness in exchange
+    /// for saving a local filter pass.
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> DFResult<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
+        use datafusion::logical_expr::TableProviderFilterPushDown;
+        Ok(filters
+            .iter()
+            .map(|f| {
+                if filters::is_pushable(f, &self.output_schema) {
+                    TableProviderFilterPushDown::Inexact
+                } else {
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect())
+    }
+
     async fn scan(
         &self,
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         let projected = match projection {
@@ -255,6 +309,7 @@ impl TableProvider for VgiTableProvider {
             self.schema_name.clone(),
             self.function.clone(),
             projection.map(|p| p.iter().map(|i| *i as i64).collect()),
+            filters::serialize(filters, &self.output_schema)?,
             limit,
             projected,
             self.max_workers,
@@ -270,6 +325,7 @@ pub struct VgiScanExec {
     schema_name: String,
     function: String,
     projection: Option<Vec<i64>>,
+    pushdown_filters: Option<Vec<u8>>,
     limit: Option<usize>,
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
@@ -283,6 +339,7 @@ impl VgiScanExec {
         schema_name: String,
         function: String,
         projection: Option<Vec<i64>>,
+        pushdown_filters: Option<Vec<u8>>,
         limit: Option<usize>,
         schema: SchemaRef,
         partitions: usize,
@@ -302,6 +359,7 @@ impl VgiScanExec {
             schema_name,
             function,
             projection,
+            pushdown_filters,
             limit,
             schema,
             properties,
@@ -369,6 +427,7 @@ impl ExecutionPlan for VgiScanExec {
         let schema_name = self.schema_name.clone();
         let function = self.function.clone();
         let projection = self.projection.clone();
+        let pushdown_filters = self.pushdown_filters.clone();
         let limit = self.limit;
         let out_schema = self.schema.clone();
         // One handle for the blocking scan, one for the stream adapter.
@@ -388,16 +447,20 @@ impl ExecutionPlan for VgiScanExec {
                 let spec = BindSpec::table(&function).in_schema(&schema_name);
                 let bound = client.bind(&attached, &spec).map_err(to_df)?;
 
-                // An EMPTY projection is `count(*)`: DataFusion wants row
-                // counts and no columns. Pushing `[]` to the worker would be
-                // ambiguous — "no columns" reads like "unset" on the wire — so
-                // ask for everything and drop the columns here instead.
+                // An EMPTY projection is `count(*)`: DataFusion wants row counts
+                // and no columns. `[]` cannot be sent as-is — "no columns" reads
+                // like "unset" on the wire — but asking for *everything* and
+                // discarding it would drag every column across for a query that
+                // needs none. Ask for the single narrowest column instead, then
+                // drop it locally: one column on the wire rather than all of
+                // them, and the row count is preserved either way.
                 let push = match &projection {
-                    Some(p) if p.is_empty() => None,
+                    Some(p) if p.is_empty() => narrowest_column(&bound).map(|i| vec![i]),
                     other => other.clone(),
                 };
                 let opts = ScanOptions {
                     projection: push,
+                    pushdown_filters: pushdown_filters.clone(),
                     ..Default::default()
                 };
                 let mut scan = client.scan(&bound, &opts).map_err(to_df)?;
