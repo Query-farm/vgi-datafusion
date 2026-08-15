@@ -422,7 +422,23 @@ async fn run_file(path: &Path, tally: &mut Tally) {
                 tally.groups.entry(group.clone()).or_default().0 += 1;
                 if let Some(expected) = expected {
                     if !expected.is_empty() {
-                        let got = render(&batches);
+                        // `LIMIT` with no `ORDER BY` returns whichever rows
+                        // arrive first, so under repartitioning it is a
+                        // different — equally correct — subset than DuckDB's.
+                        // No comparison can tell that apart from a defect.
+                        if is_arbitrary_subset(&sql) {
+                            tally.values_unordered_subset += 1;
+                            continue;
+                        }
+                        let mut got = render(&batches);
+                        let mut expected = expected.clone();
+                        if !is_ordered(&sql) {
+                            // sqllogictest's `rowsort`: with no ORDER BY the
+                            // rows are a multiset, not a list.
+                            got.sort();
+                            expected.sort();
+                        }
+                        let expected = &expected;
                         if got == *expected {
                             tally.values_matched += 1;
                         } else if agrees_modulo_rendering(expected, &got) {
