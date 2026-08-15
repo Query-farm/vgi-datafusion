@@ -376,6 +376,7 @@ async fn run_file(path: &Path, tally: &mut Tally) {
             }
             Ok(batches) => {
                 tally.executed += 1;
+                tally.groups.entry(group.clone()).or_default().0 += 1;
                 if let Some(expected) = expected {
                     if !expected.is_empty() {
                         let got = render(&batches);

@@ -398,3 +398,39 @@ async fn a_narrowed_projection_returns_the_right_columns() -> datafusion::error:
     }
     Ok(())
 }
+
+/// A catalog table's scan function may live in another schema.
+///
+/// A worker registers function names per schema and may reuse a name across
+/// them, so a table in `data` can be scanned by a function in `main`. Binding
+/// in the table's schema alone fails outright — the reference worker answers
+/// "Function 'products_scan' is not registered in schema 'data'. It is
+/// available in: ['main']" — so the table's schema is tried first and the
+/// catalog's default schema second, which is how the extension resolves it too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_function_outside_the_tables_schema_still_binds() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!("ATTACH 'example' AS ex (TYPE vgi, LOCATION '{w}')"),
+    )
+    .await?;
+
+    for q in [
+        "SELECT count(*) FROM ex.data.products",
+        "SELECT count(*) FROM ex.data.departments",
+    ] {
+        let batches = vgi_datafusion::sql(&ctx, q)
+            .await
+            .unwrap_or_else(|e| panic!("{q} failed to plan: {e}"))
+            .collect()
+            .await?;
+        assert_eq!(
+            batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            1,
+            "{q}"
+        );
+    }
+    Ok(())
+}

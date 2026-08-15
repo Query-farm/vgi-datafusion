@@ -333,28 +333,58 @@ impl VgiTableProvider {
         let c = conn.clone();
         let cat2 = catalog.clone();
 
-        let (function, arguments, output_schema) = tokio::task::spawn_blocking(move || {
-            let mut client = c.connect()?;
-            let attached = client
-                .attach(&cat2, AttachOptions::default())
-                .map_err(to_df)?;
-            let scan = client
-                .table_scan_function(&attached, &info, None)
-                .map_err(to_df)?;
-            let arguments = Arguments::from_scan_arguments(&scan.arguments.0).map_err(to_df)?;
-            let spec = BindSpec::table(&scan.function_name)
-                .in_schema(&info.schema_name)
-                .with_arguments(arguments.clone());
-            let bound = client.bind(&attached, &spec).map_err(to_df)?;
-            Ok::<_, DataFusionError>((scan.function_name, arguments, bound.output_schema().clone()))
-        })
-        .await
-        .map_err(|e| DataFusionError::External(Box::new(e)))??;
+        let (function, function_schema, arguments, output_schema) =
+            tokio::task::spawn_blocking(move || {
+                let mut client = c.connect()?;
+                let attached = client
+                    .attach(&cat2, AttachOptions::default())
+                    .map_err(to_df)?;
+                let scan = client
+                    .table_scan_function(&attached, &info, None)
+                    .map_err(to_df)?;
+                let arguments = Arguments::from_scan_arguments(&scan.arguments.0).map_err(to_df)?;
+
+                // The scan function does not necessarily live in the table's
+                // schema. A worker registers function names per schema and may
+                // reuse one name across them, so the bind has to name the schema
+                // the function was actually found in — the extension resolves this
+                // the same way, and says so in `vgi_table_entry.cpp`. In the
+                // reference worker, tables in `data` are scanned by functions in
+                // `main`, which fails outright without this.
+                let default_schema = attached.default_schema().to_string();
+                let mut candidates = vec![info.schema_name.clone()];
+                if default_schema != info.schema_name {
+                    candidates.push(default_schema);
+                }
+
+                let mut last_err = None;
+                for schema in &candidates {
+                    let spec = BindSpec::table(&scan.function_name)
+                        .in_schema(schema)
+                        .with_arguments(arguments.clone());
+                    match client.bind(&attached, &spec) {
+                        Ok(bound) => {
+                            return Ok::<_, DataFusionError>((
+                                scan.function_name,
+                                schema.clone(),
+                                arguments,
+                                bound.output_schema().clone(),
+                            ))
+                        }
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                Err(to_df(last_err.expect("at least one candidate schema")))
+            })
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
         Ok(Arc::new(Self {
             conn,
             catalog,
-            schema_name,
+            // The scan binds in the function's schema, which may differ from
+            // the table's; the scan re-binds and must resolve identically.
+            schema_name: function_schema,
             function,
             arguments,
             raw_arguments: None,
