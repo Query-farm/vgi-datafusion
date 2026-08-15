@@ -178,3 +178,34 @@ async fn bad_table_function_arguments_explain_themselves() -> datafusion::error:
     assert!(!err.is_empty(), "{err}");
     Ok(())
 }
+
+/// Catalog tables — the other half of a schema.
+///
+/// A VGI catalog table is not a function call the user writes; the worker
+/// nominates the scan function and supplies its arguments. The fixture worker
+/// keeps 59 of these in schema `data`, and until they were exposed most of the
+/// corpus had nothing to query.
+#[tokio::test(flavor = "multi_thread")]
+async fn catalog_tables_are_queryable() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    let rows = vgi_datafusion::sql(&ctx, "SELECT * FROM ex.data.ten_thousand_table LIMIT 5")
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>();
+    assert_eq!(rows, 5, "a catalog table scans through its scan function");
+
+    // count(*) over the same table exercises the narrowest-column path against
+    // a worker-nominated scan function rather than a user-written call.
+    let batches = vgi_datafusion::sql(&ctx, "SELECT count(*) AS n FROM ex.data.ten_thousand_table")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    Ok(())
+}

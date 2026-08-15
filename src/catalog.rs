@@ -43,8 +43,17 @@ pub struct VgiSchemaProvider {
     conn: VgiConnection,
     catalog: String,
     schema_name: String,
-    /// Every function name the schema advertises, resolved once at attach.
+    /// Every name the schema advertises — catalog **tables** and table
+    /// **functions**, resolved once at attach.
+    ///
+    /// Both live in one namespace because SQL has one: `ex.data.t` does not say
+    /// which kind `t` is, and the worker guarantees the names are distinct
+    /// within a schema.
     names: Vec<String>,
+    /// Which of those names are catalog tables. They bind differently: a table
+    /// is scanned through the function the worker nominates
+    /// (`catalog_table_scan_function_get`), with the worker's own arguments.
+    tables: HashMap<String, vgi_client::TableInfo>,
     /// Bind results, memoised. An `Err` records a function that will not bind
     /// bare — most fixture functions take arguments — so it is not retried,
     /// and the worker's own reason is kept to report at plan time.
@@ -52,33 +61,48 @@ pub struct VgiSchemaProvider {
 }
 
 impl VgiSchemaProvider {
-    /// List one schema's table functions. One RPC; no binds.
+    /// List one schema's tables and table functions. Two RPCs; no binds.
     pub async fn discover(
         conn: VgiConnection,
         catalog: &str,
         schema_name: &str,
     ) -> DFResult<Arc<Self>> {
         let (c, cat, sch) = (conn.clone(), catalog.to_string(), schema_name.to_string());
-        let names = tokio::task::spawn_blocking(move || {
+        let (tables, fn_names) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
             let attached = client
                 .attach(&cat, vgi_client::AttachOptions::default())
                 .map_err(to_df)?;
+            let tables = client.tables(&attached, &sch).map_err(to_df)?;
             let fns = client
                 .functions(&attached, &sch, vgi_client::FunctionKind::Table)
                 .map_err(to_df)?;
-            Ok::<_, DataFusionError>(fns.into_iter().map(|f| f.name).collect::<Vec<_>>())
+            Ok::<_, DataFusionError>((
+                tables,
+                fns.into_iter().map(|f| f.name).collect::<Vec<String>>(),
+            ))
         })
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
+
+        let tables: HashMap<String, vgi_client::TableInfo> =
+            tables.into_iter().map(|t| (t.name.clone(), t)).collect();
+        let mut names: Vec<String> = tables.keys().cloned().collect();
+        names.extend(fn_names.into_iter().filter(|n| !tables.contains_key(n)));
 
         Ok(Arc::new(Self {
             conn,
             catalog: catalog.to_string(),
             schema_name: schema_name.to_string(),
             names,
+            tables,
             bound: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// Names that are catalog tables, not functions.
+    pub fn table_names_only(&self) -> Vec<String> {
+        self.tables.keys().cloned().collect()
     }
 
     /// Look up a memoised bind without holding the lock across an await.
@@ -104,11 +128,23 @@ impl SchemaProvider for VgiSchemaProvider {
         // Two callers racing the same cold name both bind; the loser's result
         // is dropped. That is cheaper and simpler than holding a lock across
         // the await, and binds are idempotent.
-        let bound =
-            VgiTableProvider::bind(self.conn.clone(), &self.catalog, &self.schema_name, name)
+        let bound = match self.tables.get(name) {
+            Some(info) => {
+                VgiTableProvider::bind_catalog_table(
+                    self.conn.clone(),
+                    &self.catalog,
+                    &self.schema_name,
+                    info.clone(),
+                )
                 .await
-                .map(|p| p as Arc<dyn TableProvider>)
-                .map_err(|e| e.to_string());
+            }
+            None => {
+                VgiTableProvider::bind(self.conn.clone(), &self.catalog, &self.schema_name, name)
+                    .await
+            }
+        }
+        .map(|p| p as Arc<dyn TableProvider>)
+        .map_err(|e| e.to_string());
 
         if let Ok(mut cache) = self.bound.lock() {
             cache.insert(name.to_string(), bound.clone());

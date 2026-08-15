@@ -254,6 +254,9 @@ pub struct VgiTableProvider {
     /// same type serves both. They must be re-sent at scan time: `init` echoes
     /// the bind call back, so a scan bound without them is a different call.
     arguments: Arguments,
+    /// Worker-supplied argument bytes, for a catalog table. Takes precedence
+    /// over `arguments` and is forwarded verbatim.
+    raw_arguments: Option<vgi_client::Bytes>,
     output_schema: SchemaRef,
     max_workers: usize,
 }
@@ -271,6 +274,67 @@ impl VgiTableProvider {
         function: impl Into<String>,
     ) -> DFResult<Arc<Self>> {
         Self::bind_with_arguments(conn, catalog, schema_name, function, Arguments::new()).await
+    }
+
+    /// Bind a **catalog table**.
+    ///
+    /// A VGI catalog table is not storage this client reads. It is a function
+    /// call the worker picked: `catalog_table_scan_function_get` (or an inlined
+    /// `scan_function` on the table info, saving the round trip) names the
+    /// function and supplies its arguments.
+    ///
+    /// Those arguments arrive in a **different encoding** from bind arguments —
+    /// a flat batch whose columns are the arguments (`arg_<N>` positional,
+    /// anything else named), with no `args` struct wrapper. They must therefore
+    /// be decoded and re-encoded rather than forwarded; passing the bytes
+    /// straight through fails on the worker with `Field "args" does not exist
+    /// in schema`. The DuckDB extension decodes them the same way
+    /// (`DecodeScanArguments`).
+    ///
+    /// The output schema still comes from the bind rather than from
+    /// `TableInfo::columns`. The two should agree, but the bind is what the
+    /// scan will actually produce, and a mismatch there would surface as
+    /// corrupt data rather than an error — DataFusion trusts the declared
+    /// schema.
+    pub async fn bind_catalog_table(
+        conn: VgiConnection,
+        catalog: impl Into<String>,
+        schema_name: impl Into<String>,
+        info: vgi_client::TableInfo,
+    ) -> DFResult<Arc<Self>> {
+        let catalog = catalog.into();
+        let schema_name = schema_name.into();
+        let c = conn.clone();
+        let cat2 = catalog.clone();
+
+        let (function, arguments, output_schema) = tokio::task::spawn_blocking(move || {
+            let mut client = c.connect()?;
+            let attached = client
+                .attach(&cat2, AttachOptions::default())
+                .map_err(to_df)?;
+            let scan = client
+                .table_scan_function(&attached, &info, None)
+                .map_err(to_df)?;
+            let arguments = Arguments::from_scan_arguments(&scan.arguments.0).map_err(to_df)?;
+            let spec = BindSpec::table(&scan.function_name)
+                .in_schema(&info.schema_name)
+                .with_arguments(arguments.clone());
+            let bound = client.bind(&attached, &spec).map_err(to_df)?;
+            Ok::<_, DataFusionError>((scan.function_name, arguments, bound.output_schema().clone()))
+        })
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))??;
+
+        Ok(Arc::new(Self {
+            conn,
+            catalog,
+            schema_name,
+            function,
+            arguments,
+            raw_arguments: None,
+            output_schema,
+            max_workers: 1,
+        }))
     }
 
     /// Bind a call synchronously.
@@ -307,6 +371,7 @@ impl VgiTableProvider {
             schema_name: schema_name.to_string(),
             function: function.to_string(),
             arguments,
+            raw_arguments: None,
             output_schema,
             max_workers: 1,
         }))
@@ -359,6 +424,7 @@ impl VgiTableProvider {
             schema_name,
             function,
             arguments,
+            raw_arguments: None,
             output_schema,
             max_workers,
         }))
@@ -414,6 +480,7 @@ impl TableProvider for VgiTableProvider {
             self.schema_name.clone(),
             self.function.clone(),
             self.arguments.clone(),
+            self.raw_arguments.clone(),
             projection.map(|p| p.iter().map(|i| *i as i64).collect()),
             filters::serialize(filters, &self.output_schema)?,
             limit,
@@ -433,6 +500,8 @@ pub struct VgiScanExec {
     /// The bind arguments of the call this scan came from. `init` echoes the
     /// bind back, so re-binding without them would be a different call.
     arguments: Arguments,
+    /// A catalog table's worker-supplied argument bytes, forwarded verbatim.
+    raw_arguments: Option<vgi_client::Bytes>,
     projection: Option<Vec<i64>>,
     pushdown_filters: Option<Vec<u8>>,
     limit: Option<usize>,
@@ -448,6 +517,7 @@ impl VgiScanExec {
         schema_name: String,
         function: String,
         arguments: Arguments,
+        raw_arguments: Option<vgi_client::Bytes>,
         projection: Option<Vec<i64>>,
         pushdown_filters: Option<Vec<u8>>,
         limit: Option<usize>,
@@ -469,6 +539,7 @@ impl VgiScanExec {
             schema_name,
             function,
             arguments,
+            raw_arguments,
             projection,
             pushdown_filters,
             limit,
@@ -538,6 +609,7 @@ impl ExecutionPlan for VgiScanExec {
         let schema_name = self.schema_name.clone();
         let function = self.function.clone();
         let arguments = self.arguments.clone();
+        let raw_arguments = self.raw_arguments.clone();
         let projection = self.projection.clone();
         let pushdown_filters = self.pushdown_filters.clone();
         let limit = self.limit;
@@ -556,9 +628,15 @@ impl ExecutionPlan for VgiScanExec {
                 let attached = client
                     .attach(&catalog, AttachOptions::default())
                     .map_err(to_df)?;
-                let spec = BindSpec::table(&function)
-                    .in_schema(&schema_name)
-                    .with_arguments(arguments.clone());
+                // A catalog table carries the worker's own argument bytes;
+                // anything else carries the call's typed arguments. Either way
+                // the scan must re-send exactly what the plan bound with —
+                // `init` echoes the bind call back.
+                let spec = BindSpec::table(&function).in_schema(&schema_name);
+                let spec = match &raw_arguments {
+                    Some(raw) => spec.with_raw_arguments(raw.clone()),
+                    None => spec.with_arguments(arguments.clone()),
+                };
                 let bound = client.bind(&attached, &spec).map_err(to_df)?;
 
                 // An EMPTY projection is `count(*)`: DataFusion wants row counts
