@@ -109,6 +109,20 @@ struct Tally {
     buckets: BTreeMap<Bucket, usize>,
     /// One example error per bucket, so the summary is diagnosable.
     examples: BTreeMap<Bucket, (String, String)>,
+    /// How often each distinct error shape occurred.
+    ///
+    /// A bucket labelled "other: 1550" is not actionable; the same 1550 split
+    /// into a handful of recurring messages is. Names, paths and numbers are
+    /// stripped so one root cause counts once rather than a thousand times.
+    error_shapes: BTreeMap<String, usize>,
+    /// Per top-level group (`table/`, `cache/`, …).
+    ///
+    /// The aggregate number hides the most important fact about this corpus:
+    /// whole groups test the *extension* rather than the worker — `cache/`
+    /// asserts result-cache events in `duckdb_logs`, `catalog/` queries the
+    /// `vgi_*` diagnostic functions — and no adapter can make those pass. A
+    /// per-group rate separates "not wired up yet" from "not applicable".
+    groups: BTreeMap<String, (usize, usize)>,
     /// Queries that ran but disagreed with DuckDB, kept in full.
     ///
     /// A count alone cannot distinguish "renders 42 as 42.0" from "returns the
@@ -154,7 +168,32 @@ fn cells_agree(expected: &str, got: &str) -> bool {
             return true;
         }
     }
+    if normalize_timestamp(expected) == normalize_timestamp(got) {
+        return true;
+    }
     unquote_struct_keys(expected) == unquote_struct_keys(got)
+}
+
+/// Put two timestamp spellings on common ground.
+///
+/// DuckDB separates date and time with a space and writes a zero offset as
+/// `+00`; Arrow uses ISO-8601 `T` and omits the offset on a naive timestamp.
+/// `2026-05-06 12:00:00+00` and `2026-05-06T12:00:00` are the same instant.
+///
+/// Guarded on the cell looking like a date, so an ordinary string containing a
+/// `T` is never quietly rewritten.
+fn normalize_timestamp(s: &str) -> String {
+    let looks_like_date = s.len() >= 10
+        && s.as_bytes()[..4].iter().all(u8::is_ascii_digit)
+        && s.as_bytes()[4] == b'-';
+    if !looks_like_date {
+        return s.to_string();
+    }
+    let s = s.replacen('T', " ", 1);
+    s.trim_end_matches("+00:00")
+        .trim_end_matches("+00")
+        .trim_end()
+        .to_string()
 }
 
 /// Drop the quotes DuckDB puts around struct field names.
@@ -291,6 +330,7 @@ async fn run_file(path: &Path, tally: &mut Tally) {
         .next()
         .unwrap_or("")
         .to_string();
+    let group = file_label.split('/').next().unwrap_or("?").to_string();
 
     let ctx = SessionContext::new();
     for record in records {
@@ -330,7 +370,10 @@ async fn run_file(path: &Path, tally: &mut Tally) {
         };
 
         match outcome {
-            Err(e) => record_failure(tally, &sql, &e.to_string()),
+            Err(e) => {
+                tally.groups.entry(group.clone()).or_default().1 += 1;
+                record_failure(tally, &sql, &e.to_string())
+            }
             Ok(batches) => {
                 tally.executed += 1;
                 if let Some(expected) = expected {
@@ -358,12 +401,49 @@ async fn run_file(path: &Path, tally: &mut Tally) {
 
 fn record_failure(tally: &mut Tally, sql: &str, err: &str) {
     tally.failed += 1;
+    *tally.error_shapes.entry(error_shape(err)).or_default() += 1;
     let bucket = Bucket::classify(err);
     *tally.buckets.entry(bucket).or_default() += 1;
     tally
         .examples
         .entry(bucket)
         .or_insert_with(|| (first_line(sql), first_line(err)));
+}
+
+/// Reduce an error to its shape: the message with the specifics removed.
+///
+/// Everything that varies per call site — quoted identifiers, paths, numbers —
+/// is replaced, so a thousand instances of one root cause collapse to one line.
+fn error_shape(err: &str) -> String {
+    let line = err.lines().next().unwrap_or("").trim();
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' | '`' | '"' => {
+                // Swallow the quoted run and stand in for it.
+                let close = c;
+                out.push('_');
+                for n in chars.by_ref() {
+                    if n == close {
+                        break;
+                    }
+                }
+            }
+            '0'..='9' => {
+                out.push('#');
+                while chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    chars.next();
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    if out.len() > 120 {
+        out.truncate(120);
+        out.push('…');
+    }
+    out
 }
 
 fn first_line(s: &str) -> String {
@@ -479,6 +559,21 @@ async fn main() {
             println!("    expected: {:?}", m.expected);
             println!("    got:      {:?}", m.got);
         }
+    }
+
+    println!("\nmost common failures:");
+    let mut shapes: Vec<_> = tally.error_shapes.iter().collect();
+    shapes.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    for (shape, n) in shapes.iter().take(14) {
+        println!("  {:>5}  {}", n, shape);
+    }
+
+    println!("\nby group (executed / total):");
+    let mut groups: Vec<_> = tally.groups.iter().collect();
+    groups.sort_by_key(|(_, (ok, bad))| std::cmp::Reverse(ok + bad));
+    for (name, (ok, bad)) in groups {
+        let t = ok + bad;
+        println!("  {:>5}/{:<5} {:>5.1}%  {}", ok, t, pct(*ok, t), name);
     }
 
     println!("\nfailures by cause:");
