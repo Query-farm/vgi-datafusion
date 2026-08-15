@@ -30,3 +30,11 @@ futures = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# Until vgi-rpc-client 0.22.1 is published: SubprocessTransport::close waited
+# unboundedly for a worker to exit, which deadlocks against a worker blocked
+# writing into a pipe nobody drains — the corpus harness stalling partway
+# through a long run. Fixed locally; drop this once the release lands.
+[patch.crates-io]
+vgi-rpc-client = { path = "../vgi-rpc-rust/vgi-rpc-client" }
+vgi-rpc = { path = "../vgi-rpc-rust/vgi-rpc" }
