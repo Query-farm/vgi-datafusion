@@ -562,14 +562,26 @@ fn register_table_functions(
 ///    call sites against 17 fully-qualified ones), because in DuckDB the
 ///    default schema is implied.
 /// 3. `alias_function` — for callers who would rather not qualify at all.
+/// 4. `function` — the bare name.
 ///
-/// Only the first is guaranteed; the other two are first-wins, since neither
+/// Only the first is guaranteed; the rest are first-wins, since none of them
 /// can express which schema was meant.
+///
+/// The bare name exists because the corpus leans on it heavily: a file does
+/// `USE example` and then calls `vgi_sum(...)` unqualified, which in DuckDB
+/// resolves through the current catalog. DataFusion keeps functions in a flat
+/// registry that `USE` does not touch, so without a bare registration those
+/// calls cannot resolve at all — 102 records in the aggregate group alone.
+///
+/// First-wins matters most here: the registry already holds DataFusion's
+/// built-ins, so a worker function named `sum` or `abs` is skipped rather than
+/// shadowing the engine's own.
 fn publish_names(alias: &str, schema: &str, function: &str) -> Vec<String> {
     vec![
         format!("{alias}.{schema}.{function}"),
         format!("{alias}.{function}"),
         format!("{alias}_{function}"),
+        function.to_string(),
     ]
 }
 
