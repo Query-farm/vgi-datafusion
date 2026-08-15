@@ -269,3 +269,35 @@ async fn qualified_names_resolve_without_disturbing_tables() -> datafusion::erro
     }
     Ok(())
 }
+
+/// Scalar functions, qualified and short.
+///
+/// The qualified spelling needs no rewrite — a scalar call already flattens its
+/// whole path into the lookup key — so this is the surface the corpus uses most.
+#[tokio::test(flavor = "multi_thread")]
+async fn scalar_functions_resolve() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    for q in [
+        "SELECT ex.main.double(21) AS v",
+        "SELECT ex_double(21) AS v",
+    ] {
+        let batches = vgi_datafusion::sql(&ctx, q)
+            .await
+            .unwrap_or_else(|e| panic!("{q} failed to plan: {e}"))
+            .collect()
+            .await
+            .unwrap_or_else(|e| panic!("{q} failed to run: {e}"));
+        let n: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(n, 1, "{q}");
+        let v = batches[0].column(0);
+        let v = v
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .unwrap_or_else(|| panic!("{q}: expected Int64, got {:?}", v.data_type()));
+        assert_eq!(v.value(0), 42, "{q}");
+    }
+    Ok(())
+}

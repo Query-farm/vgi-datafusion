@@ -62,13 +62,14 @@ use std::sync::Arc;
 use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider};
 use datafusion::common::{plan_datafusion_err, plan_err, Result as DFResult};
 use datafusion::dataframe::DataFrame;
+use datafusion::logical_expr::async_udf::AsyncScalarUDF;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::Statement as DFStatement;
 use datafusion::sql::sqlparser::ast::{
     Expr, Statement as SQLStatement, Value, ValueWithSpan, VisitMut,
 };
 
-use crate::{VgiCatalogProvider, VgiConnection, VgiTableFunction};
+use crate::{VgiCatalogProvider, VgiConnection, VgiScalarUdf, VgiTableFunction};
 
 /// Run one SQL statement, handling `ATTACH` and `DETACH` for VGI catalogs.
 ///
@@ -309,6 +310,7 @@ async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
     let conn = spec.connection()?;
     let provider = VgiCatalogProvider::discover(conn.clone(), &spec.catalog).await?;
     register_table_functions(ctx, &conn, spec, &provider);
+    register_scalar_functions(ctx, &conn, spec, &provider);
     ctx.register_catalog(&spec.alias, provider);
     Ok(())
 }
@@ -387,6 +389,45 @@ fn register_table_functions(
             if !state.table_functions().contains_key(&short) {
                 ctx.register_udtf(&short, make());
             }
+        }
+    }
+}
+
+/// Publish the catalog's scalar functions into DataFusion's function registry.
+///
+/// Same two-name scheme as [`register_table_functions`], and the qualified name
+/// needs **no** rewrite here: a scalar call flattens its whole qualified path
+/// into the lookup key, so registering under `catalog.schema.function` makes
+/// `SELECT ex.main.double(1)` resolve directly.
+///
+/// Each name is a separate [`VgiScalarUdf`] because DataFusion keys the registry
+/// on the UDF's own `name()`; they differ only in that key and dispatch to the
+/// same worker function.
+fn register_scalar_functions(
+    ctx: &SessionContext,
+    conn: &VgiConnection,
+    spec: &AttachSpec,
+    provider: &VgiCatalogProvider,
+) {
+    let state = ctx.state();
+
+    for (schema_name, schema) in provider.vgi_schemas() {
+        for function in schema.scalar_names() {
+            let register = |name: String| {
+                if state.scalar_functions().contains_key(&name) {
+                    return;
+                }
+                let udf = VgiScalarUdf::discovered(
+                    conn.clone(),
+                    &spec.catalog,
+                    schema_name,
+                    function,
+                    &name,
+                );
+                ctx.register_udf(AsyncScalarUDF::new(Arc::new(udf)).into_scalar_udf());
+            };
+            register(format!("{}.{}.{}", spec.alias, schema_name, function));
+            register(format!("{}_{}", spec.alias, function));
         }
     }
 }

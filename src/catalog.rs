@@ -54,6 +54,10 @@ pub struct VgiSchemaProvider {
     /// is scanned through the function the worker nominates
     /// (`catalog_table_scan_function_get`), with the worker's own arguments.
     tables: HashMap<String, vgi_client::TableInfo>,
+    /// Scalar functions in this schema. They are not tables and never appear in
+    /// [`Self::table_names`]; they are published into DataFusion's separate
+    /// function registry at attach time.
+    scalars: Vec<String>,
     /// Bind results, memoised. An `Err` records a function that will not bind
     /// bare — most fixture functions take arguments — so it is not retried,
     /// and the worker's own reason is kept to report at plan time.
@@ -68,7 +72,7 @@ impl VgiSchemaProvider {
         schema_name: &str,
     ) -> DFResult<Arc<Self>> {
         let (c, cat, sch) = (conn.clone(), catalog.to_string(), schema_name.to_string());
-        let (tables, fn_names) = tokio::task::spawn_blocking(move || {
+        let (tables, fn_names, scalars) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
             let attached = client
                 .attach(&cat, vgi_client::AttachOptions::default())
@@ -77,9 +81,13 @@ impl VgiSchemaProvider {
             let fns = client
                 .functions(&attached, &sch, vgi_client::FunctionKind::Table)
                 .map_err(to_df)?;
+            let scalars = client
+                .functions(&attached, &sch, vgi_client::FunctionKind::Scalar)
+                .map_err(to_df)?;
             Ok::<_, DataFusionError>((
                 tables,
                 fns.into_iter().map(|f| f.name).collect::<Vec<String>>(),
+                scalars.into_iter().map(|f| f.name).collect::<Vec<String>>(),
             ))
         })
         .await
@@ -96,6 +104,7 @@ impl VgiSchemaProvider {
             schema_name: schema_name.to_string(),
             names,
             tables,
+            scalars,
             bound: Mutex::new(HashMap::new()),
         }))
     }
@@ -103,6 +112,11 @@ impl VgiSchemaProvider {
     /// Names that are catalog tables, not functions.
     pub fn table_names_only(&self) -> Vec<String> {
         self.tables.keys().cloned().collect()
+    }
+
+    /// Scalar functions this schema advertises.
+    pub fn scalar_names(&self) -> &[String] {
+        &self.scalars
     }
 
     /// Look up a memoised bind without holding the lock across an await.
@@ -175,7 +189,7 @@ fn bind_failed(name: &str) -> impl Fn(String) -> DataFusionError + '_ {
 /// A whole VGI catalog.
 #[derive(Debug)]
 pub struct VgiCatalogProvider {
-    schemas: HashMap<String, Arc<dyn SchemaProvider>>,
+    schemas: HashMap<String, Arc<VgiSchemaProvider>>,
     /// The prefix the worker asked for on globally-published functions
     /// (`global_function_prefix`), empty when it asked for none.
     ///
@@ -204,10 +218,10 @@ impl VgiCatalogProvider {
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
-        let mut schemas: HashMap<String, Arc<dyn SchemaProvider>> = HashMap::new();
+        let mut schemas: HashMap<String, Arc<VgiSchemaProvider>> = HashMap::new();
         for name in names {
             let sp = VgiSchemaProvider::discover(conn.clone(), catalog, &name).await?;
-            schemas.insert(name, sp as Arc<dyn SchemaProvider>);
+            schemas.insert(name, sp);
         }
         Ok(Arc::new(Self {
             schemas,
@@ -221,6 +235,12 @@ impl VgiCatalogProvider {
     pub fn global_function_prefix(&self) -> &str {
         &self.global_function_prefix
     }
+
+    /// This catalog's schemas, concretely — the registration paths need more
+    /// than `SchemaProvider` exposes (scalar names are not tables).
+    pub fn vgi_schemas(&self) -> impl Iterator<Item = (&String, &Arc<VgiSchemaProvider>)> {
+        self.schemas.iter()
+    }
 }
 
 impl CatalogProvider for VgiCatalogProvider {
@@ -229,6 +249,8 @@ impl CatalogProvider for VgiCatalogProvider {
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.schemas.get(name).cloned()
+        self.schemas
+            .get(name)
+            .map(|s| Arc::clone(s) as Arc<dyn SchemaProvider>)
     }
 }
