@@ -60,9 +60,11 @@ use vgi_client::{AttachOptions, BindSpec, ScanOptions, VgiClient};
 mod catalog;
 mod filters;
 mod scalar;
+mod session;
 
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};
 pub use scalar::VgiScalarUdf;
+pub use session::{sql, AttachSpec};
 
 /// How to reach a VGI worker.
 ///
