@@ -58,14 +58,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use datafusion::catalog::MemoryCatalogProvider;
+use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider};
 use datafusion::common::{plan_datafusion_err, plan_err, Result as DFResult};
 use datafusion::dataframe::DataFrame;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::Statement as DFStatement;
 use datafusion::sql::sqlparser::ast::{Expr, Statement as SQLStatement, Value, ValueWithSpan};
 
-use crate::{VgiCatalogProvider, VgiConnection};
+use crate::{VgiCatalogProvider, VgiConnection, VgiTableFunction};
 
 /// Run one SQL statement, handling `ATTACH` and `DETACH` for VGI catalogs.
 ///
@@ -230,9 +230,70 @@ impl AttachSpec {
 }
 
 async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
-    let provider = VgiCatalogProvider::discover(spec.connection()?, &spec.catalog).await?;
+    let conn = spec.connection()?;
+    let provider = VgiCatalogProvider::discover(conn.clone(), &spec.catalog).await?;
+    register_table_functions(ctx, &conn, spec, &provider);
     ctx.register_catalog(&spec.alias, provider);
     Ok(())
+}
+
+/// Publish the catalog's table functions so they are callable **with
+/// arguments**: `SELECT * FROM ex_sequence(10)`.
+///
+/// # Why they need a second surface at all
+///
+/// A [`CatalogProvider`](datafusion::catalog::CatalogProvider) yields tables,
+/// and a table has no arguments. Most VGI table functions take some, and their
+/// output schema depends on them, so they cannot be reached that way — only the
+/// zero-argument ones can. DataFusion's answer is a separate registry, so a
+/// function that takes arguments is published here as well.
+///
+/// # Why the name is prefixed
+///
+/// That registry is **flat and global** — `register_udtf(name, …)`, with no
+/// catalog or schema qualification, and DataFusion resolves
+/// `SELECT * FROM a.b.f(1)` as a table reference rather than a call. So the
+/// worker's own coordinates cannot be spelled, and bare names would collide:
+/// the reference fixture worker alone publishes `test_same_name_cached` in two
+/// different schemas.
+///
+/// Names are therefore `<alias>_<function>`, which is exactly what the DuckDB
+/// extension does when a worker asks for global functions — see
+/// `VgiGlobalFunctionName` and the `global_function_prefix`. Registration is
+/// **first-wins** for the same reason it is there: it is advisory, and
+/// clobbering a name someone else registered would be worse than not
+/// publishing.
+///
+/// A function is published whether or not it takes arguments. A zero-argument
+/// one is then reachable both ways — `ex.main.f` and `ex_f()` — which costs
+/// nothing and saves the caller having to know which kind it is.
+fn register_table_functions(
+    ctx: &SessionContext,
+    conn: &VgiConnection,
+    spec: &AttachSpec,
+    provider: &VgiCatalogProvider,
+) {
+    let state = ctx.state();
+    for schema_name in provider.schema_names() {
+        let Some(schema) = provider.schema(&schema_name) else {
+            continue;
+        };
+        for function in schema.table_names() {
+            let visible = format!("{}_{}", spec.alias, function);
+            if state.table_functions().contains_key(&visible) {
+                continue; // first attach wins
+            }
+            ctx.register_udtf(
+                &visible,
+                Arc::new(VgiTableFunction::new(
+                    conn.clone(),
+                    &spec.catalog,
+                    &schema_name,
+                    &function,
+                )),
+            );
+        }
+    }
 }
 
 /// Make an attached catalog unreachable.

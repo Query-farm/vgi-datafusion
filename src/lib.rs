@@ -55,16 +55,20 @@ use datafusion::physical_plan::{
     execution_plan::{Boundedness, EmissionType},
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
-use vgi_client::{AttachOptions, BindSpec, PooledClient, ScanOptions, VgiLocation, WorkerPool};
+use vgi_client::{
+    Arguments, AttachOptions, BindSpec, PooledClient, ScanOptions, VgiLocation, WorkerPool,
+};
 
 mod catalog;
 mod filters;
 mod scalar;
 mod session;
+mod table_function;
 
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};
 pub use scalar::VgiScalarUdf;
 pub use session::{sql, AttachSpec};
+pub use table_function::VgiTableFunction;
 
 /// How to reach a VGI worker.
 ///
@@ -245,6 +249,11 @@ pub struct VgiTableProvider {
     catalog: String,
     schema_name: String,
     function: String,
+    /// The call's bind arguments. Empty for a function reached as a bare table;
+    /// populated when reached through [`VgiTableFunction`], which is why the
+    /// same type serves both. They must be re-sent at scan time: `init` echoes
+    /// the bind call back, so a scan bound without them is a different call.
+    arguments: Arguments,
     output_schema: SchemaRef,
     max_workers: usize,
 }
@@ -261,18 +270,69 @@ impl VgiTableProvider {
         schema_name: impl Into<String>,
         function: impl Into<String>,
     ) -> DFResult<Arc<Self>> {
+        Self::bind_with_arguments(conn, catalog, schema_name, function, Arguments::new()).await
+    }
+
+    /// Bind a call synchronously.
+    ///
+    /// [`TableFunctionImpl::call_with_args`] is not async, so a table function
+    /// has nowhere to await. That is fine here rather than a compromise:
+    /// `vgi_client` is a blocking client, so this is the *direct* path and the
+    /// async wrappers are the ones paying for a `spawn_blocking` hop. It does
+    /// occupy the calling thread for the duration of one bind RPC, during
+    /// planning.
+    ///
+    /// [`TableFunctionImpl::call_with_args`]: datafusion::catalog::TableFunctionImpl::call_with_args
+    pub fn bind_blocking(
+        conn: VgiConnection,
+        catalog: &str,
+        schema_name: &str,
+        function: &str,
+        arguments: Arguments,
+    ) -> DFResult<Arc<Self>> {
+        let mut client = conn.connect()?;
+        let attached = client
+            .attach(catalog, AttachOptions::default())
+            .map_err(to_df)?;
+        let spec = BindSpec::table(function)
+            .in_schema(schema_name)
+            .with_arguments(arguments.clone());
+        let bound = client.bind(&attached, &spec).map_err(to_df)?;
+        let output_schema = bound.output_schema().clone();
+        drop(client);
+
+        Ok(Arc::new(Self {
+            conn,
+            catalog: catalog.to_string(),
+            schema_name: schema_name.to_string(),
+            function: function.to_string(),
+            arguments,
+            output_schema,
+            max_workers: 1,
+        }))
+    }
+
+    /// Bind a call that carries arguments.
+    pub async fn bind_with_arguments(
+        conn: VgiConnection,
+        catalog: impl Into<String>,
+        schema_name: impl Into<String>,
+        function: impl Into<String>,
+        arguments: Arguments,
+    ) -> DFResult<Arc<Self>> {
         let catalog = catalog.into();
         let schema_name = schema_name.into();
         let function = function.into();
         let c = conn.clone();
         let (cat2, sch2, fn2) = (catalog.clone(), schema_name.clone(), function.clone());
+        let args2 = arguments.clone();
 
         let (output_schema, max_workers) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
             let attached = client
                 .attach(&cat2, AttachOptions::default())
                 .map_err(to_df)?;
-            let spec = BindSpec::table(&fn2).in_schema(&sch2);
+            let spec = BindSpec::table(&fn2).in_schema(&sch2).with_arguments(args2);
             let bound = client.bind(&attached, &spec).map_err(to_df)?;
             let schema = bound.output_schema().clone();
             // One partition, deliberately.
@@ -298,6 +358,7 @@ impl VgiTableProvider {
             catalog,
             schema_name,
             function,
+            arguments,
             output_schema,
             max_workers,
         }))
@@ -352,6 +413,7 @@ impl TableProvider for VgiTableProvider {
             self.catalog.clone(),
             self.schema_name.clone(),
             self.function.clone(),
+            self.arguments.clone(),
             projection.map(|p| p.iter().map(|i| *i as i64).collect()),
             filters::serialize(filters, &self.output_schema)?,
             limit,
@@ -368,6 +430,9 @@ pub struct VgiScanExec {
     catalog: String,
     schema_name: String,
     function: String,
+    /// The bind arguments of the call this scan came from. `init` echoes the
+    /// bind back, so re-binding without them would be a different call.
+    arguments: Arguments,
     projection: Option<Vec<i64>>,
     pushdown_filters: Option<Vec<u8>>,
     limit: Option<usize>,
@@ -382,6 +447,7 @@ impl VgiScanExec {
         catalog: String,
         schema_name: String,
         function: String,
+        arguments: Arguments,
         projection: Option<Vec<i64>>,
         pushdown_filters: Option<Vec<u8>>,
         limit: Option<usize>,
@@ -402,6 +468,7 @@ impl VgiScanExec {
             catalog,
             schema_name,
             function,
+            arguments,
             projection,
             pushdown_filters,
             limit,
@@ -470,6 +537,7 @@ impl ExecutionPlan for VgiScanExec {
         let catalog = self.catalog.clone();
         let schema_name = self.schema_name.clone();
         let function = self.function.clone();
+        let arguments = self.arguments.clone();
         let projection = self.projection.clone();
         let pushdown_filters = self.pushdown_filters.clone();
         let limit = self.limit;
@@ -488,7 +556,9 @@ impl ExecutionPlan for VgiScanExec {
                 let attached = client
                     .attach(&catalog, AttachOptions::default())
                     .map_err(to_df)?;
-                let spec = BindSpec::table(&function).in_schema(&schema_name);
+                let spec = BindSpec::table(&function)
+                    .in_schema(&schema_name)
+                    .with_arguments(arguments.clone());
                 let bound = client.bind(&attached, &spec).map_err(to_df)?;
 
                 // An EMPTY projection is `count(*)`: DataFusion wants row counts

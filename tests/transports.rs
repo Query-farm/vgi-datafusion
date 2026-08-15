@@ -131,3 +131,50 @@ async fn only_the_queried_table_is_bound() -> datafusion::error::Result<()> {
     );
     Ok(())
 }
+
+/// An argument-taking table function, reached through the UDTF registry.
+///
+/// `sequence(n)` cannot be a bare table — its output depends on `n` — so this
+/// is the surface that makes most of the worker's functions reachable at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_functions_take_arguments() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    let rows = vgi_datafusion::sql(&ctx, "SELECT * FROM ex_sequence(10)")
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>();
+    assert_eq!(rows, 10, "the argument reached the worker");
+
+    // A different argument is a different bind, not a cached provider.
+    let rows = vgi_datafusion::sql(&ctx, "SELECT * FROM ex_sequence(3)")
+        .await?
+        .collect()
+        .await?
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>();
+    assert_eq!(rows, 3);
+    Ok(())
+}
+
+/// Arguments that cannot be bound at plan time must say why.
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_table_function_arguments_explain_themselves() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    // The worker's own arity/type complaint should surface, not a generic one.
+    let err = vgi_datafusion::sql(&ctx, "SELECT * FROM ex_sequence()")
+        .await
+        .expect_err("sequence needs an argument")
+        .to_string();
+    assert!(!err.is_empty(), "{err}");
+    Ok(())
+}
