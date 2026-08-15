@@ -12,11 +12,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{Field, FieldRef};
 use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::async_udf::AsyncScalarUDFImpl;
 use datafusion::logical_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
+    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
+use vgi_client::{ArgSpecs, ArgValue, Arguments};
 
 use crate::{to_df, VgiConnection};
 
@@ -42,8 +44,16 @@ pub struct VgiScalarUdf {
     /// scalar's return type at **bind** time from the argument types, so there
     /// is nothing static to declare. See [`Self::resolve_return_type`].
     return_type: Option<DataType>,
-    /// Memoised bind-time return types, keyed on the argument types.
-    resolved: Arc<Mutex<HashMap<Vec<DataType>, DataType>>>,
+    /// What the worker declares about its parameters.
+    ///
+    /// Load-bearing for [`ArgSpec::is_const`]: a const parameter is a bind-time
+    /// constant, so its value belongs in the bind's `Arguments` and must not be
+    /// shipped as a column. A worker that finds no value for it answers with
+    /// NULLs rather than an error.
+    specs: ArgSpecs,
+    /// Memoised bind-time return types, keyed on the argument types **and** any
+    /// const values, since a worker may resolve its output type from them.
+    resolved: Arc<Mutex<HashMap<String, DataType>>>,
     batch_size: Option<usize>,
 }
 
@@ -70,6 +80,7 @@ impl VgiScalarUdf {
             registered_name: name,
             signature,
             return_type: Some(return_type),
+            specs: ArgSpecs::default(),
             resolved: Arc::new(Mutex::new(HashMap::new())),
             batch_size: None,
         }
@@ -96,6 +107,7 @@ impl VgiScalarUdf {
         schema_name: impl Into<String>,
         function: impl Into<String>,
         registered_name: impl Into<String>,
+        specs: ArgSpecs,
     ) -> Self {
         Self {
             conn,
@@ -105,9 +117,57 @@ impl VgiScalarUdf {
             registered_name: registered_name.into(),
             signature: Signature::variadic_any(Volatility::Volatile),
             return_type: None,
+            specs,
             resolved: Arc::new(Mutex::new(HashMap::new())),
             batch_size: None,
         }
+    }
+
+    /// Split a call's arguments into bind constants and per-row columns.
+    ///
+    /// The protocol's central distinction for scalars: a `ConstParam` is
+    /// resolved once at bind and never appears in the input batch, while every
+    /// other parameter is a column. Sending a const as a column leaves the
+    /// worker with no value for it — and it answers with NULLs, not an error,
+    /// so this is the difference between right answers and quietly wrong ones.
+    ///
+    /// The bind's `Arguments` carry **only the constants**, compacted in
+    /// declared order — a columnar parameter contributes nothing there, not
+    /// even a placeholder. That is the extension's contract, stated in
+    /// `vgi_scalar_function_impl.cpp`: *"Pass only the extracted const values —
+    /// non-const params come from input batch columns."* Sending placeholders
+    /// alongside shifts every constant to the wrong position, and the worker
+    /// reads a null where it expected a value, answering with a column of
+    /// NULLs rather than an error.
+    ///
+    /// `values` supplies the constants: `Some` where the planner knows the
+    /// argument is a literal. A const parameter whose value is not known yet
+    /// (return-type resolution before constant folding) becomes a typed null,
+    /// which is enough for the worker to resolve an output type.
+    fn split_arguments(
+        &self,
+        types: &[DataType],
+        values: &[Option<ArgValue>],
+    ) -> (Arguments, Vec<Field>) {
+        let mut arguments = Arguments::new();
+        let mut columns = Vec::new();
+        for (i, ty) in types.iter().enumerate() {
+            if self.specs.positional_is_const(i) {
+                let value = values
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_else(|| ArgValue::Null(ty.clone()));
+                arguments = arguments.positional(value);
+            } else {
+                columns.push(Field::new(
+                    format!("col_{}", columns.len()),
+                    ty.clone(),
+                    true,
+                ));
+            }
+        }
+        (arguments, columns)
     }
 
     /// Ask the worker what this call returns, and remember the answer.
@@ -117,25 +177,26 @@ impl VgiScalarUdf {
     /// compromise — `vgi_client` is a blocking client — and the result is
     /// memoised per argument-type list, so a query with a thousand calls to the
     /// same function pays once.
-    fn resolve_return_type(&self, arg_types: &[DataType]) -> DFResult<DataType> {
+    fn resolve_return_type(
+        &self,
+        arg_types: &[DataType],
+        values: &[Option<ArgValue>],
+    ) -> DFResult<DataType> {
         if let Some(t) = &self.return_type {
             return Ok(t.clone());
         }
+        let key = format!("{arg_types:?}|{values:?}");
         if let Ok(cache) = self.resolved.lock() {
-            if let Some(t) = cache.get(arg_types) {
+            if let Some(t) = cache.get(&key) {
                 return Ok(t.clone());
             }
         }
 
-        use datafusion::arrow::datatypes::{Field, Schema};
-        use vgi_client::{ArgValue, Arguments, AttachOptions, BindSpec, FunctionType};
+        use datafusion::arrow::datatypes::Schema;
+        use vgi_client::{AttachOptions, BindSpec, FunctionType};
 
-        let fields: Vec<Field> = arg_types
-            .iter()
-            .enumerate()
-            .map(|(i, t)| Field::new(format!("col_{i}"), t.clone(), true))
-            .collect();
-        let input_schema = Schema::new(fields);
+        let (arguments, columns) = self.split_arguments(arg_types, values);
+        let input_schema = Schema::new(columns);
 
         let mut client = self.conn.connect()?;
         let attached = client
@@ -143,11 +204,7 @@ impl VgiScalarUdf {
             .map_err(to_df)?;
         let mut spec = BindSpec::table(&self.function).in_schema(&self.schema_name);
         spec.function_type = FunctionType::Scalar;
-        let mut args = Arguments::new();
-        for t in arg_types {
-            args = args.positional(ArgValue::Placeholder(t.clone()));
-        }
-        spec.arguments = args;
+        spec.arguments = arguments;
 
         let bound = client
             .bind_with_input(&attached, &spec, &input_schema)
@@ -165,7 +222,7 @@ impl VgiScalarUdf {
             })?;
 
         if let Ok(mut cache) = self.resolved.lock() {
-            cache.insert(arg_types.to_vec(), out.clone());
+            cache.insert(key, out.clone());
         }
         Ok(out)
     }
@@ -206,7 +263,31 @@ impl ScalarUDFImpl for VgiScalarUdf {
     }
 
     fn return_type(&self, args: &[DataType]) -> DFResult<DataType> {
-        self.resolve_return_type(args)
+        // Reached only when the planner has no literal information; a const
+        // parameter then resolves as a typed null, which is enough to learn an
+        // output type. `return_field_from_args` is the richer path.
+        self.resolve_return_type(args, &[])
+    }
+
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> DFResult<FieldRef> {
+        // The hook that makes const parameters work: it carries the *values* of
+        // the literal arguments, which `return_type` cannot see, so the bind is
+        // issued with the constant the caller actually wrote.
+        let types: Vec<DataType> = args
+            .arg_fields
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect();
+        let values: Vec<Option<ArgValue>> = args
+            .scalar_arguments
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.and_then(|s| crate::table_function::scalar_to_arg(&self.function, i, s).ok())
+            })
+            .collect();
+        let out = self.resolve_return_type(&types, &values)?;
+        Ok(Arc::new(Field::new(self.name(), out, true)))
     }
 
     fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
@@ -230,10 +311,37 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
         use datafusion::arrow::datatypes::{Field, Schema};
 
         let rows = args.number_rows;
+
+        // Const parameters are resolved at bind and must not be shipped as
+        // columns; everything else is a column. See `split_arguments`.
+        let types: Vec<DataType> = args.args.iter().map(|a| a.data_type()).collect();
+        let values: Vec<Option<ArgValue>> = args
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| match a {
+                ColumnarValue::Scalar(s) => {
+                    crate::table_function::scalar_to_arg(&self.function, i, s).ok()
+                }
+                // A literal may arrive already expanded across the batch — the
+                // engine is free to materialise it — and then every row holds
+                // the same constant, so row 0 is the value the bind needs.
+                // Without this a const parameter silently becomes a typed null
+                // and the worker answers with NULLs.
+                ColumnarValue::Array(arr) if self.specs.positional_is_const(i) => {
+                    ArgValue::from_array_row0(arr.as_ref(), &self.function).ok()
+                }
+                ColumnarValue::Array(_) => None,
+            })
+            .collect();
+        let (arguments, _) = self.split_arguments(&types, &values);
+
         let columns: Vec<datafusion::arrow::array::ArrayRef> = args
             .args
             .iter()
-            .map(|a| a.to_array(rows))
+            .enumerate()
+            .filter(|(i, _)| !self.specs.positional_is_const(*i))
+            .map(|(_, a)| a.to_array(rows))
             .collect::<DFResult<_>>()?;
         // `col_<i>`, not any other spelling: this is the wire convention the
         // DuckDB extension uses (`vgi_scalar_function_impl.cpp` builds
@@ -258,23 +366,14 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
         let input_schema = Schema::new(fields);
 
         let out = tokio::task::spawn_blocking(move || {
-            use vgi_client::{
-                ArgValue, Arguments, AttachOptions, BindSpec, FunctionType, ScanOptions,
-            };
+            use vgi_client::{AttachOptions, BindSpec, FunctionType, ScanOptions};
             let mut client = conn.connect()?;
             let attached = client
                 .attach(&cat, AttachOptions::default())
                 .map_err(to_df)?;
             let mut spec = BindSpec::table(&name).in_schema(&sch);
             spec.function_type = FunctionType::Scalar;
-            // Column arguments are typed placeholders; the values ride the
-            // input batch.
-            let mut args_builder = Arguments::new();
-            for f in input_schema.fields() {
-                args_builder =
-                    args_builder.positional(ArgValue::Placeholder(f.data_type().clone()));
-            }
-            spec.arguments = args_builder;
+            spec.arguments = arguments;
 
             let bound = client
                 .bind_with_input(&attached, &spec, &input_schema)

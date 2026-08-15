@@ -54,10 +54,14 @@ pub struct VgiSchemaProvider {
     /// is scanned through the function the worker nominates
     /// (`catalog_table_scan_function_get`), with the worker's own arguments.
     tables: HashMap<String, vgi_client::TableInfo>,
-    /// Scalar functions in this schema. They are not tables and never appear in
+    /// Scalar functions in this schema, with what the worker declares about
+    /// their parameters. They are not tables and never appear in
     /// [`Self::table_names`]; they are published into DataFusion's separate
     /// function registry at attach time.
-    scalars: Vec<String>,
+    ///
+    /// The specs travel with the name because a call cannot be built without
+    /// them: a const parameter belongs in the bind, not the input batch.
+    scalars: Vec<(String, vgi_client::ArgSpecs)>,
     /// Bind results, memoised. An `Err` records a function that will not bind
     /// bare — most fixture functions take arguments — so it is not retried,
     /// and the worker's own reason is kept to report at plan time.
@@ -84,10 +88,17 @@ impl VgiSchemaProvider {
             let scalars = client
                 .functions(&attached, &sch, vgi_client::FunctionKind::Scalar)
                 .map_err(to_df)?;
+            let scalars = scalars
+                .into_iter()
+                .map(|f| {
+                    let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
+                    Ok::<_, DataFusionError>((f.name, specs))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Ok::<_, DataFusionError>((
                 tables,
                 fns.into_iter().map(|f| f.name).collect::<Vec<String>>(),
-                scalars.into_iter().map(|f| f.name).collect::<Vec<String>>(),
+                scalars,
             ))
         })
         .await
@@ -114,8 +125,8 @@ impl VgiSchemaProvider {
         self.tables.keys().cloned().collect()
     }
 
-    /// Scalar functions this schema advertises.
-    pub fn scalar_names(&self) -> &[String] {
+    /// Scalar functions this schema advertises, with their parameter specs.
+    pub fn scalars(&self) -> &[(String, vgi_client::ArgSpecs)] {
         &self.scalars
     }
 

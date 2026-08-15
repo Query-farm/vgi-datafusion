@@ -590,7 +590,7 @@ fn register_scalar_functions(
     let state = ctx.state();
 
     for (schema_name, schema) in provider.vgi_schemas() {
-        for function in schema.scalar_names() {
+        for (function, specs) in schema.scalars() {
             let register = |name: String| {
                 if state.scalar_functions().contains_key(&name) {
                     return;
@@ -601,6 +601,7 @@ fn register_scalar_functions(
                     schema_name,
                     function,
                     &name,
+                    specs.clone(),
                 );
                 ctx.register_udf(AsyncScalarUDF::new(Arc::new(udf)).into_scalar_udf());
             };

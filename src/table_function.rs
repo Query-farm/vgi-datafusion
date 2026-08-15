@@ -120,7 +120,7 @@ fn to_arg_value(function: &str, i: usize, expr: &Expr) -> DFResult<ArgValue> {
     }
 }
 
-fn scalar_to_arg(function: &str, i: usize, v: &ScalarValue) -> DFResult<ArgValue> {
+pub(crate) fn scalar_to_arg(function: &str, i: usize, v: &ScalarValue) -> DFResult<ArgValue> {
     use ScalarValue as S;
     Ok(match v {
         S::Int8(Some(n)) => ArgValue::Int(*n as i64),

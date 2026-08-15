@@ -23,6 +23,7 @@
 
 use std::time::{Duration, Instant};
 
+use datafusion::arrow::array::Array;
 use datafusion::prelude::SessionContext;
 
 fn worker() -> Option<String> {
@@ -298,6 +299,54 @@ async fn scalar_functions_resolve() -> datafusion::error::Result<()> {
             .downcast_ref::<datafusion::arrow::array::Int64Array>()
             .unwrap_or_else(|| panic!("{q}: expected Int64, got {:?}", v.data_type()));
         assert_eq!(v.value(0), 42, "{q}");
+    }
+    Ok(())
+}
+
+/// Const parameters: a bind-time constant, not a column.
+///
+/// `cached_add_const(value, addend)` declares `addend` as a `ConstParam`, so its
+/// value belongs in the bind's arguments — and the bind carries *only* the
+/// constants, compacted. Sending a placeholder for the columnar parameter too
+/// shifts the constant to the wrong slot, and the worker answers with a column
+/// of NULLs rather than an error, which is how this stayed invisible.
+#[tokio::test(flavor = "multi_thread")]
+async fn const_parameters_reach_the_worker() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!("ATTACH 'example' AS ex (TYPE vgi, LOCATION '{w}')"),
+    )
+    .await?;
+
+    // Values taken from the DuckDB corpus (scalar/per_value_edge.test), so this
+    // asserts agreement with the reference engine, not just non-nullness.
+    for (q, want) in [
+        (
+            "SELECT sum(ex.cached_add_const(x % 3, 10)) AS v FROM range(6) t(x)",
+            66i64,
+        ),
+        (
+            "SELECT sum(ex.cached_add_const(x % 3, 20)) AS v FROM range(6) t(x)",
+            126,
+        ),
+        (
+            "SELECT sum(ex.cached_add_const(x % 3, 10)) AS v FROM range(9) t(x)",
+            99,
+        ),
+    ] {
+        let batches = vgi_datafusion::sql(&ctx, q).await?.collect().await?;
+        let col = batches[0].column(0);
+        let got = col
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .unwrap_or_else(|| panic!("{q}: expected Int64, got {:?}", col.data_type()));
+        assert!(
+            !got.is_null(0),
+            "{q} returned NULL — the const never arrived"
+        );
+        assert_eq!(got.value(0), want, "{q}");
     }
     Ok(())
 }
