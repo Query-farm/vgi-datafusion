@@ -101,10 +101,20 @@ struct Tally {
     files_skipped: usize,
     executed: usize,
     failed: usize,
+    /// Records that are not about the worker protocol at all.
+    ///
+    /// Engine configuration (`SET`, `PRAGMA`, `CALL`) and the extension's own
+    /// diagnostic surface. Counting these as conformance failures overstates
+    /// the gap: `SET vgi_result_cache_max_bytes` is tuning for a feature that
+    /// exists in the DuckDB extension and nowhere else, and no adapter will
+    /// ever make it run.
+    not_applicable: usize,
     timed_out: usize,
     values_matched: usize,
     /// Differed only in how the values are printed.
     values_rendering: usize,
+    /// `LIMIT` with no `ORDER BY`: an arbitrary subset, not comparable.
+    values_unordered_subset: usize,
     values_differed: usize,
     buckets: BTreeMap<Bucket, usize>,
     /// One example error per bucket, so the summary is diagnosable.
@@ -148,6 +158,11 @@ fn agrees_modulo_rendering(expected: &[String], got: &[String]) -> bool {
     if expected.len() != got.len() {
         return false;
     }
+    rows_agree(expected, got)
+}
+
+/// Compare rows pairwise, allowing for rendering conventions.
+fn rows_agree(expected: &[String], got: &[String]) -> bool {
     expected.iter().zip(got).all(|(e, g)| {
         let (ec, gc): (Vec<_>, Vec<_>) = (e.split('\t').collect(), g.split('\t').collect());
         ec.len() == gc.len() && ec.iter().zip(&gc).all(|(a, b)| cells_agree(a, b))
@@ -172,6 +187,30 @@ fn cells_agree(expected: &str, got: &str) -> bool {
         return true;
     }
     unquote_struct_keys(expected) == unquote_struct_keys(got)
+}
+
+/// Does a query pin its row order?
+///
+/// Without `ORDER BY`, SQL guarantees nothing about order, and DataFusion
+/// really does reorder: it inserts a `RepartitionExec(RoundRobinBatch(8))`
+/// above the scan, so batches arrive interleaved. The corpus records DuckDB's
+/// order, which is deterministic in practice — comparing the two positionally
+/// would report differences that are not disagreements.
+fn is_ordered(sql: &str) -> bool {
+    sql.to_uppercase().contains("ORDER BY")
+}
+
+/// Is the result an arbitrary *subset*, so not comparable at all?
+///
+/// `LIMIT` without `ORDER BY` returns whichever rows arrive first. Under
+/// repartitioning that is a different — equally correct — subset than DuckDB's,
+/// which is what `SELECT n FROM … WHERE n >= 5000 LIMIT 5` returning
+/// 7000..7004 against an expected 5000..5004 means. Neither engine is wrong and
+/// no comparison can distinguish that from a real defect, so these are reported
+/// separately rather than counted either way.
+fn is_arbitrary_subset(sql: &str) -> bool {
+    let upper = sql.to_uppercase();
+    upper.contains("LIMIT") && !upper.contains("ORDER BY")
 }
 
 /// Put two timestamp spellings on common ground.
@@ -370,6 +409,10 @@ async fn run_file(path: &Path, tally: &mut Tally) {
         };
 
         match outcome {
+            Err(e) if not_applicable(&sql) => {
+                let _ = e;
+                tally.not_applicable += 1;
+            }
             Err(e) => {
                 tally.groups.entry(group.clone()).or_default().1 += 1;
                 record_failure(tally, &sql, &e.to_string())
@@ -409,6 +452,20 @@ fn record_failure(tally: &mut Tally, sql: &str, err: &str) {
         .examples
         .entry(bucket)
         .or_insert_with(|| (first_line(sql), first_line(err)));
+}
+
+/// Is this record about engine configuration rather than the worker protocol?
+///
+/// `SET`/`PRAGMA`/`CALL`/`RESET` configure DuckDB or the VGI *extension* —
+/// `SET vgi_result_cache_dir`, `CALL enable_logging(...)` — and have no meaning
+/// here. They are reported separately rather than counted against conformance,
+/// which would otherwise charge this adapter for not being DuckDB.
+fn not_applicable(sql: &str) -> bool {
+    let head = sql.trim_start().split_whitespace().next().unwrap_or("");
+    head.eq_ignore_ascii_case("set")
+        || head.eq_ignore_ascii_case("pragma")
+        || head.eq_ignore_ascii_case("call")
+        || head.eq_ignore_ascii_case("reset")
 }
 
 /// Reduce an error to its shape: the message with the specifics removed.
@@ -524,6 +581,12 @@ async fn main() {
         tally.failed,
         pct(tally.failed, total),
     );
+    if tally.not_applicable > 0 {
+        println!(
+            "         {} not applicable (SET / PRAGMA / CALL — engine or extension config)",
+            tally.not_applicable
+        );
+    }
     if tally.timed_out > 0 {
         println!(
             "         {} timed out after {:?} (not counted as failures)",
@@ -544,6 +607,12 @@ async fn main() {
         tally.values_differed,
         pct(tally.values_differed, compared)
     );
+    if tally.values_unordered_subset > 0 {
+        println!(
+            "         {} not comparable (LIMIT with no ORDER BY — an arbitrary subset)",
+            tally.values_unordered_subset
+        );
+    }
 
     if !tally.mismatches.is_empty() {
         let show: usize = std::env::var("CORPUS_SHOW_DIFFS")
