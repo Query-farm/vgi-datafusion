@@ -55,7 +55,7 @@ use datafusion::physical_plan::{
     execution_plan::{Boundedness, EmissionType},
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
-use vgi_client::{AttachOptions, BindSpec, ScanOptions, VgiClient};
+use vgi_client::{AttachOptions, BindSpec, PooledClient, ScanOptions, VgiLocation, WorkerPool};
 
 mod catalog;
 mod filters;
@@ -70,9 +70,16 @@ pub use session::{sql, AttachSpec};
 ///
 /// A factory rather than a connection: each scan partition opens its own, which
 /// is how a VGI scan fans out across the worker's advertised `max_workers`.
+///
+/// Connections come from a [`WorkerPool`], and that is load-bearing rather than
+/// tuning. Worker startup is ~1.8 s for the Python reference worker, and this
+/// adapter opens a connection per schema, per table bind, and per scan
+/// partition — so without reuse, attaching a catalog costs one process start
+/// per table.
 #[derive(Clone)]
 pub struct VgiConnection {
-    make: Arc<dyn Fn() -> vgi_client::Result<VgiClient> + Send + Sync>,
+    pool: WorkerPool,
+    location: VgiLocation,
     label: String,
 }
 
@@ -80,11 +87,37 @@ impl fmt::Debug for VgiConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VgiConnection")
             .field("label", &self.label)
+            .field("pool", &self.pool.stats())
             .finish()
     }
 }
 
 impl VgiConnection {
+    /// Reach a worker named the way the DuckDB extension names one.
+    ///
+    /// Accepts every `LOCATION` spelling `vgi_client` understands — a bare
+    /// command, `http://`, `unix://`, `tcp://`, `launch:` — so one string drives
+    /// both clients and a corpus written for one runs against the other.
+    pub fn from_location(location: &str) -> DFResult<Self> {
+        Ok(Self::pooled(
+            VgiLocation::parse(location).map_err(to_df)?,
+            WorkerPool::default(),
+        ))
+    }
+
+    /// Reach a parsed location through a pool you supply.
+    ///
+    /// Share one pool across catalogs pointing at the same worker and they
+    /// share its connections; pass [`vgi_client::PoolConfig::disabled`] to prove
+    /// a test does not depend on reuse (the extension's `pool false`).
+    pub fn pooled(location: VgiLocation, pool: WorkerPool) -> Self {
+        Self {
+            label: location.label(),
+            location,
+            pool,
+        }
+    }
+
     /// Spawn a worker as a child process.
     pub fn subprocess<I, S>(cmd: I) -> Self
     where
@@ -92,37 +125,26 @@ impl VgiConnection {
         S: Into<String>,
     {
         let argv: Vec<String> = cmd.into_iter().map(Into::into).collect();
-        let label = argv.first().cloned().unwrap_or_else(|| "worker".into());
-        Self {
-            make: Arc::new(move || VgiClient::connect_subprocess(&argv)),
-            label,
-        }
+        Self::pooled(VgiLocation::Subprocess(argv), WorkerPool::default())
     }
 
     /// Talk to a worker serving VGI over HTTP.
     pub fn http(base_url: impl Into<String>) -> Self {
-        let url = base_url.into();
-        let label = url.clone();
-        Self {
-            make: Arc::new(move || VgiClient::connect_http(&url)),
-            label,
-        }
+        Self::pooled(VgiLocation::Http(base_url.into()), WorkerPool::default())
     }
 
-    /// Build a connection from any factory.
-    pub fn from_fn(
-        label: impl Into<String>,
-        make: impl Fn() -> vgi_client::Result<VgiClient> + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            make: Arc::new(make),
-            label: label.into(),
-        }
+    /// Check out a connection.
+    ///
+    /// The guard derefs to [`VgiClient`] and returns the connection to the pool
+    /// when it drops, so callers keep writing `let mut client = conn.connect()?`
+    /// and get reuse for free.
+    pub fn connect(&self) -> DFResult<PooledClient> {
+        self.pool.acquire(&self.location).map_err(to_df)
     }
 
-    /// Open one connection.
-    pub fn connect(&self) -> DFResult<VgiClient> {
-        (self.make)().map_err(to_df)
+    /// The pool behind this connection, for stats or an explicit flush.
+    pub fn pool(&self) -> &WorkerPool {
+        &self.pool
     }
 
     /// A short label, for plan display.
@@ -253,14 +275,20 @@ impl VgiTableProvider {
             let spec = BindSpec::table(&fn2).in_schema(&sch2);
             let bound = client.bind(&attached, &spec).map_err(to_df)?;
             let schema = bound.output_schema().clone();
-            // `max_workers` is only known once a scan opens, so ask now and
-            // throw the stream away — a cheap probe that lets `scan` report a
-            // truthful partition count during planning.
-            let workers = client
-                .scan(&bound, &ScanOptions::default())
-                .map(|s| s.max_workers().max(1) as usize)
-                .unwrap_or(1);
-            Ok::<_, DataFusionError>((schema, workers))
+            // One partition, deliberately.
+            //
+            // `max_workers` is only readable from a scan's header, so learning
+            // it here would mean opening a scan and abandoning it — which both
+            // costs a scan per bind and leaves the connection mid-stream, so
+            // the pool would hand the next caller a broken one. (It did: binds
+            // failed with "empty IPC stream (no schema)" until this came out.)
+            //
+            // And it would buy nothing: only partition 0 reads today, so
+            // reporting the worker's `max_workers` would advertise a
+            // parallelism this operator does not have. When the fan-out lands
+            // it needs the execution id shared across partitions anyway, which
+            // is a rendezvous at `scan` time rather than a number at bind time.
+            Ok::<_, DataFusionError>((schema, 1usize))
         })
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;

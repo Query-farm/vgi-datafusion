@@ -10,7 +10,7 @@ keywords = ["vgi", "datafusion", "arrow", "sql", "federation"]
 categories = ["database", "api-bindings"]
 
 [dependencies]
-vgi-client = { path = "../vgi-rust/vgi-client" }
+vgi-client = { path = "../vgi-rust/vgi-client", features = ["unix", "launcher"] }
 vgi-protocol = { path = "../vgi-rust/vgi-protocol" }
 vgi-rpc = { version = "0.21.0", default-features = false }
 # Arrow comes from DataFusion's re-export rather than a direct dependency:

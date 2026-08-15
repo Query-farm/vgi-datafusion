@@ -218,19 +218,19 @@ impl AttachSpec {
         })
     }
 
-    /// The transport implied by `location`, matching the extension's scheme rules
-    /// for the two transports this client speaks.
-    pub fn connection(&self) -> VgiConnection {
-        if self.location.starts_with("http://") || self.location.starts_with("https://") {
-            VgiConnection::http(self.location.clone())
-        } else {
-            VgiConnection::subprocess(self.location.split_whitespace())
-        }
+    /// The transport implied by `location`.
+    ///
+    /// Delegates to [`VgiConnection::from_location`], so every scheme the
+    /// client speaks — bare command, `http://`, `unix://`, `tcp://`, `launch:`
+    /// — is reachable from SQL, and the spelling matches the DuckDB
+    /// extension's `LOCATION` exactly.
+    pub fn connection(&self) -> DFResult<VgiConnection> {
+        VgiConnection::from_location(&self.location)
     }
 }
 
 async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
-    let provider = VgiCatalogProvider::discover(spec.connection(), &spec.catalog).await?;
+    let provider = VgiCatalogProvider::discover(spec.connection()?, &spec.catalog).await?;
     ctx.register_catalog(&spec.alias, provider);
     Ok(())
 }
@@ -285,7 +285,7 @@ mod tests {
     fn location_may_carry_spaces_for_a_subprocess_argv() {
         let s = spec("example?location=uv run --project /tmp/p vgi-fixture-worker");
         assert_eq!(s.location, "uv run --project /tmp/p vgi-fixture-worker");
-        assert_eq!(s.connection().label(), "uv");
+        assert_eq!(s.connection().unwrap().label(), "uv");
     }
 
     #[test]
@@ -293,6 +293,7 @@ mod tests {
         assert_eq!(
             spec("example?location=http://127.0.0.1:8080")
                 .connection()
+                .unwrap()
                 .label(),
             "http://127.0.0.1:8080"
         );
