@@ -479,3 +479,69 @@ async fn disjunctions_push_down_or_stay_local() -> datafusion::error::Result<()>
     assert_eq!(rows(&got), 1);
     Ok(())
 }
+
+/// Aggregates, including the partial/final split DataFusion imposes.
+///
+/// A remote aggregate cannot hand over a serialisable intermediate state — VGI
+/// keeps it in the worker, and `aggregate_combine` only merges groups *within*
+/// one execution — so the accumulator's state is its own input rows, merged by
+/// concatenation. The `GROUP BY` case is what exercises that: DataFusion runs a
+/// partial pass per partition and merges, so a wrong state representation shows
+/// up as wrong sums rather than an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn aggregates_resolve_and_group() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!("ATTACH 'example' AS ex (TYPE vgi, LOCATION '{w}')"),
+    )
+    .await?;
+
+    let one = |ctx: &SessionContext, q: &'static str| {
+        let ctx = ctx.clone();
+        async move {
+            let b = vgi_datafusion::sql(&ctx, q).await?.collect().await?;
+            let col = b[0].column(0);
+            let s = datafusion::arrow::util::display::ArrayFormatter::try_new(
+                col.as_ref(),
+                &datafusion::arrow::util::display::FormatOptions::default(),
+            )?;
+            Ok::<String, datafusion::error::DataFusionError>(s.value(0).to_string())
+        }
+    };
+
+    // The fixture answers "<schema>:<sum>", so the value proves both that the
+    // aggregate ran and that it resolved in the right schema — the same name
+    // exists in two, and a flat registry would collapse them.
+    assert_eq!(
+        one(
+            &ctx,
+            "SELECT ex.main.test_same_name_agg(n) FROM range(3) t(n)"
+        )
+        .await?,
+        "main:3"
+    );
+    assert_eq!(
+        one(
+            &ctx,
+            "SELECT ex.data.test_same_name_agg(n) FROM range(3) t(n)"
+        )
+        .await?,
+        "data:3"
+    );
+
+    // GROUP BY: {0,2,4} sums to 6 and {1,3,5} to 9.
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT n % 2 AS g, ex.main.test_same_name_agg(n) AS v FROM range(6) t(n) \
+         GROUP BY g ORDER BY g",
+    )
+    .await?
+    .collect()
+    .await?;
+    let vals = datafusion::arrow::util::pretty::pretty_format_batches(&batches)?.to_string();
+    assert!(vals.contains("main:6"), "group 0 wrong:\n{vals}");
+    assert!(vals.contains("main:9"), "group 1 wrong:\n{vals}");
+    Ok(())
+}

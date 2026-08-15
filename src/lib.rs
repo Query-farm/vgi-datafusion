@@ -59,12 +59,14 @@ use vgi_client::{
     Arguments, AttachOptions, BindSpec, PooledClient, ScanOptions, VgiLocation, WorkerPool,
 };
 
+mod aggregate;
 mod catalog;
 mod filters;
 mod scalar;
 mod session;
 mod table_function;
 
+pub use aggregate::VgiAggregateUdf;
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};
 pub use scalar::VgiScalarUdf;
 pub use session::{sql, AttachSpec};

@@ -62,6 +62,9 @@ pub struct VgiSchemaProvider {
     /// The specs travel with the name because a call cannot be built without
     /// them: a const parameter belongs in the bind, not the input batch.
     scalars: Vec<(String, vgi_client::ArgSpecs)>,
+    /// Aggregate functions in this schema, published into DataFusion's
+    /// aggregate registry at attach time.
+    aggregates: Vec<String>,
     /// Bind results, memoised. An `Err` records a function that will not bind
     /// bare — most fixture functions take arguments — so it is not retried,
     /// and the worker's own reason is kept to report at plan time.
@@ -76,7 +79,7 @@ impl VgiSchemaProvider {
         schema_name: &str,
     ) -> DFResult<Arc<Self>> {
         let (c, cat, sch) = (conn.clone(), catalog.to_string(), schema_name.to_string());
-        let (tables, fn_names, scalars) = tokio::task::spawn_blocking(move || {
+        let (tables, fn_names, scalars, aggregates) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
             let attached = client
                 .attach(&cat, vgi_client::AttachOptions::default())
@@ -88,6 +91,12 @@ impl VgiSchemaProvider {
             let scalars = client
                 .functions(&attached, &sch, vgi_client::FunctionKind::Scalar)
                 .map_err(to_df)?;
+            let aggregates = client
+                .functions(&attached, &sch, vgi_client::FunctionKind::Aggregate)
+                .map_err(to_df)?
+                .into_iter()
+                .map(|f| f.name)
+                .collect::<Vec<String>>();
             let scalars = scalars
                 .into_iter()
                 .map(|f| {
@@ -99,6 +108,7 @@ impl VgiSchemaProvider {
                 tables,
                 fns.into_iter().map(|f| f.name).collect::<Vec<String>>(),
                 scalars,
+                aggregates,
             ))
         })
         .await
@@ -116,6 +126,7 @@ impl VgiSchemaProvider {
             names,
             tables,
             scalars,
+            aggregates,
             bound: Mutex::new(HashMap::new()),
         }))
     }
@@ -128,6 +139,11 @@ impl VgiSchemaProvider {
     /// Scalar functions this schema advertises, with their parameter specs.
     pub fn scalars(&self) -> &[(String, vgi_client::ArgSpecs)] {
         &self.scalars
+    }
+
+    /// Aggregate functions this schema advertises.
+    pub fn aggregates(&self) -> &[String] {
+        &self.aggregates
     }
 
     /// Look up a memoised bind without holding the lock across an await.

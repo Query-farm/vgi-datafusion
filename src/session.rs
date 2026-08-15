@@ -63,13 +63,14 @@ use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider};
 use datafusion::common::{plan_datafusion_err, plan_err, Result as DFResult};
 use datafusion::dataframe::DataFrame;
 use datafusion::logical_expr::async_udf::AsyncScalarUDF;
+use datafusion::logical_expr::AggregateUDF;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::Statement as DFStatement;
 use datafusion::sql::sqlparser::ast::{
     Expr, Statement as SQLStatement, Value, ValueWithSpan, VisitMut,
 };
 
-use crate::{VgiCatalogProvider, VgiConnection, VgiScalarUdf, VgiTableFunction};
+use crate::{VgiAggregateUdf, VgiCatalogProvider, VgiConnection, VgiScalarUdf, VgiTableFunction};
 
 /// Run one SQL statement, handling `ATTACH` and `DETACH` for VGI catalogs.
 ///
@@ -468,6 +469,7 @@ async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
     let provider = VgiCatalogProvider::discover(conn.clone(), &spec.catalog).await?;
     register_table_functions(ctx, &conn, spec, &provider);
     register_scalar_functions(ctx, &conn, spec, &provider);
+    register_aggregate_functions(ctx, &conn, spec, &provider);
     ctx.register_catalog(&spec.alias, provider);
     Ok(())
 }
@@ -607,6 +609,37 @@ fn register_scalar_functions(
             };
             for name in publish_names(&spec.alias, schema_name, function) {
                 register(name);
+            }
+        }
+    }
+}
+
+/// Publish the catalog's aggregate functions.
+///
+/// Same three-name scheme as the others, and like a scalar the qualified name
+/// needs no rewrite — an aggregate call flattens its whole path into the lookup
+/// key, so `ex.main.my_agg(x)` resolves against a registration under that name.
+fn register_aggregate_functions(
+    ctx: &SessionContext,
+    conn: &VgiConnection,
+    spec: &AttachSpec,
+    provider: &VgiCatalogProvider,
+) {
+    let state = ctx.state();
+
+    for (schema_name, schema) in provider.vgi_schemas() {
+        for function in schema.aggregates() {
+            for name in publish_names(&spec.alias, schema_name, function) {
+                if state.aggregate_functions().contains_key(&name) {
+                    continue;
+                }
+                ctx.register_udaf(AggregateUDF::new_from_impl(VgiAggregateUdf::new(
+                    conn.clone(),
+                    &spec.catalog,
+                    schema_name,
+                    function,
+                    &name,
+                )));
             }
         }
     }
