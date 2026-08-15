@@ -1,0 +1,31 @@
+[package]
+name = "vgi-datafusion"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+description = "Apache DataFusion integration for the VGI protocol — attach a remote VGI catalog and query it with SQL"
+readme = "README.md"
+keywords = ["vgi", "datafusion", "arrow", "sql", "federation"]
+categories = ["database", "api-bindings"]
+
+[dependencies]
+vgi-client = { path = "../vgi-rust/vgi-client" }
+vgi-protocol = { path = "../vgi-rust/vgi-protocol" }
+vgi-rpc = { version = "0.21.0", default-features = false }
+# Arrow comes from DataFusion's re-export rather than a direct dependency:
+# pinning it separately is how you end up with two incompatible `ArrayRef`
+# types that look identical in the error message.
+#
+# The path dependency is REQUIRED, not a convenience: released DataFusion
+# 54.1.0 is built on arrow 58, while `vgi-protocol` and the whole vgi-rust
+# workspace are on arrow 59. Those are different `ArrayRef` types, so the two
+# cannot meet. DataFusion's main branch has moved to 59.2.0, so this builds
+# against that until a release carrying it exists.
+datafusion = { path = "../datafusion/datafusion/core" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "sync"] }
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
