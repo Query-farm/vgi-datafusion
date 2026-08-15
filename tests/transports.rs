@@ -434,3 +434,48 @@ async fn a_scan_function_outside_the_tables_schema_still_binds() -> datafusion::
     }
     Ok(())
 }
+
+/// A disjunction must survive the round trip to the worker.
+///
+/// Every filter spec carries `column_name`/`column_index`, and the worker reads
+/// them before it looks at the type — so an `or` node that omitted them was a
+/// hard parse failure (`FilterDeserializationError: 'column_name'`), not a
+/// quiet fallback. A cross-column `or` has no representation in the protocol
+/// and must stay with DataFusion instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn disjunctions_push_down_or_stay_local() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!("ATTACH 'example' AS ex (TYPE vgi, LOCATION '{w}')"),
+    )
+    .await?;
+
+    let rows = |b: &[datafusion::arrow::array::RecordBatch]| -> usize {
+        b.iter().map(|x| x.num_rows()).sum()
+    };
+
+    // Same column: pushed down. 0 and 3..9 satisfy it.
+    let got = vgi_datafusion::sql(
+        &ctx,
+        "SELECT n FROM ex.filter_echo(10) WHERE n > 2 OR n < 1",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(rows(&got), 8);
+
+    // Across columns: not expressible, so DataFusion filters locally. The point
+    // is that the answer is still right — pushdown is an optimisation, and the
+    // scan reports Inexact so the predicate is re-applied above it.
+    let got = vgi_datafusion::sql(
+        &ctx,
+        "SELECT * FROM ex.data.products WHERE id = 1 OR name = 'nothing-matches-this'",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(rows(&got), 1);
+    Ok(())
+}

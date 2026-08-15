@@ -145,6 +145,44 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Build an `and`/`or` node over two already-translated children.
+    ///
+    /// # Every node carries a column, conjunctions included
+    ///
+    /// The worker reads `column_name` and `column_index` off *every* spec
+    /// before it looks at the type (`table_filter_pushdown.py`), so a
+    /// conjunction that omits them is a hard parse failure — a `KeyError`
+    /// surfacing as `FilterDeserializationError: 'column_name'`, which is what
+    /// `WHERE n > 2 OR n < 1` produced.
+    ///
+    /// The value to carry is the children's own column, because the protocol
+    /// models a conjunction as a filter *on one column* — DuckDB's
+    /// `CONJUNCTION_OR` is exactly that, and the extension passes the parent's
+    /// column through to its children.
+    ///
+    /// So a conjunction spanning two different columns has no representation
+    /// here and is not pushed down. For `AND` that costs nothing: the caller
+    /// already keeps whichever side translates, and a superset is safe under
+    /// `Inexact`. For `OR` it must be all-or-nothing, so a cross-column `OR`
+    /// stays with DataFusion.
+    fn conjunction(
+        &mut self,
+        kind: &str,
+        left: serde_json::Value,
+        right: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let name = left.get("column_name")?.as_str()?.to_string();
+        if right.get("column_name")?.as_str()? != name {
+            return None;
+        }
+        Some(serde_json::json!({
+            "type": kind,
+            "column_name": name,
+            "column_index": self.column_index(&name)?,
+            "children": [left, right],
+        }))
+    }
+
     fn binary(&mut self, left: &Expr, op: Operator, right: &Expr) -> Option<serde_json::Value> {
         // AND keeps whichever side is expressible: dropping one conjunct still
         // yields a superset, which `Inexact` makes safe.
@@ -152,7 +190,7 @@ impl<'a> Builder<'a> {
             let l = self.build(left);
             let r = self.build(right);
             return match (l, r) {
-                (Some(a), Some(b)) => Some(serde_json::json!({"type": "and", "children": [a, b]})),
+                (Some(a), Some(b)) => Some(self.conjunction("and", a, b)?),
                 (Some(a), None) | (None, Some(a)) => Some(a),
                 (None, None) => None,
             };
@@ -163,7 +201,7 @@ impl<'a> Builder<'a> {
         if op == Operator::Or {
             let l = self.build(left)?;
             let r = self.build(right)?;
-            return Some(serde_json::json!({"type": "or", "children": [l, r]}));
+            return self.conjunction("or", l, r);
         }
 
         // `col <op> literal`, or `literal <op> col` with the operator flipped.
