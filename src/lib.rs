@@ -40,8 +40,10 @@
 //! table function that takes rows. See the feasibility study for the routes
 //! around that.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
@@ -56,7 +58,8 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use vgi_client::{
-    Arguments, AttachOptions, BindSpec, PooledClient, ScanOptions, VgiLocation, WorkerPool,
+    Arguments, AttachOptions, BindSpec, PooledClient, ScanOptions, VgiClient, VgiLocation,
+    WorkerPool,
 };
 
 mod aggregate;
@@ -88,6 +91,22 @@ pub struct VgiConnection {
     pool: WorkerPool,
     location: VgiLocation,
     label: String,
+    /// Attach handles, one per catalog, established once and reused.
+    ///
+    /// `attach_opaque_data` is the worker's **session token**, not a
+    /// connection detail: a worker scopes per-attach state to it, so
+    /// re-attaching for every call starts a fresh session each time and any
+    /// state the caller accumulated is invisible to the next call. That is not
+    /// a subtle inefficiency — it silently changes results. The `accumulate`
+    /// fixture, which collects rows under a name across calls, returned only
+    /// the current call's rows until this was cached, and answered "no
+    /// accumulation named … in this session" for reads.
+    ///
+    /// Caching it is also what the extension does: it attaches once per
+    /// catalog and hands the same bytes to every worker it later talks to,
+    /// which is why the token is opaque rather than a live handle — it has to
+    /// survive being carried to a *different* pooled worker.
+    attached: Arc<Mutex<HashMap<String, vgi_client::AttachedCatalog>>>,
 }
 
 impl fmt::Debug for VgiConnection {
@@ -122,7 +141,32 @@ impl VgiConnection {
             label: location.label(),
             location,
             pool,
+            attached: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Attach `catalog`, reusing the handle from a previous attach.
+    ///
+    /// Every call site should use this rather than `client.attach(...)`
+    /// directly — see [`Self::attached`] for why a fresh attach per call is a
+    /// correctness problem and not just an extra round trip.
+    pub fn attach(
+        &self,
+        client: &mut VgiClient,
+        catalog: &str,
+    ) -> DFResult<vgi_client::AttachedCatalog> {
+        if let Ok(cache) = self.attached.lock() {
+            if let Some(handle) = cache.get(catalog) {
+                return Ok(handle.clone());
+            }
+        }
+        let handle = client
+            .attach(catalog, AttachOptions::default())
+            .map_err(to_df)?;
+        if let Ok(mut cache) = self.attached.lock() {
+            cache.insert(catalog.to_string(), handle.clone());
+        }
+        Ok(handle)
     }
 
     /// Spawn a worker as a child process.
@@ -339,9 +383,7 @@ impl VgiTableProvider {
         let (function, function_schema, arguments, output_schema) =
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
-                let attached = client
-                    .attach(&cat2, AttachOptions::default())
-                    .map_err(to_df)?;
+                let attached = c.attach(&mut client, &cat2)?;
                 let scan = client
                     .table_scan_function(&attached, &info, None)
                     .map_err(to_df)?;
@@ -414,9 +456,7 @@ impl VgiTableProvider {
         arguments: Arguments,
     ) -> DFResult<Arc<Self>> {
         let mut client = conn.connect()?;
-        let attached = client
-            .attach(catalog, AttachOptions::default())
-            .map_err(to_df)?;
+        let attached = conn.attach(&mut client, catalog)?;
         let spec = BindSpec::table(function)
             .in_schema(schema_name)
             .with_arguments(arguments.clone());
@@ -453,9 +493,7 @@ impl VgiTableProvider {
 
         let (output_schema, max_workers) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
-            let attached = client
-                .attach(&cat2, AttachOptions::default())
-                .map_err(to_df)?;
+            let attached = c.attach(&mut client, &cat2)?;
             let spec = BindSpec::table(&fn2).in_schema(&sch2).with_arguments(args2);
             let bound = client.bind(&attached, &spec).map_err(to_df)?;
             let schema = bound.output_schema().clone();
@@ -684,9 +722,7 @@ impl ExecutionPlan for VgiScanExec {
         tokio::task::spawn_blocking(move || {
             let run = || -> DFResult<()> {
                 let mut client = conn.connect()?;
-                let attached = client
-                    .attach(&catalog, AttachOptions::default())
-                    .map_err(to_df)?;
+                let attached = conn.attach(&mut client, &catalog)?;
                 // A catalog table carries the worker's own argument bytes;
                 // anything else carries the call's typed arguments. Either way
                 // the scan must re-send exactly what the plan bound with —

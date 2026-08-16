@@ -592,3 +592,59 @@ async fn a_table_argument_becomes_the_input_stream() -> datafusion::error::Resul
     assert_eq!(rows, 3, "every input row should come back");
     Ok(())
 }
+
+/// Per-attach worker state must survive across calls.
+///
+/// `attach_opaque_data` is the worker's session token, not a connection
+/// detail. Re-attaching for every call starts a fresh session, so anything the
+/// caller accumulated becomes invisible to the next call — silently wrong
+/// results rather than an error. The `accumulate` fixture collects rows under a
+/// name, which makes that visible.
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_state_persists_across_calls() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!("ATTACH 'accumulate' AS acc (TYPE vgi, LOCATION '{w}')"),
+    )
+    .await?;
+
+    let count = |ctx: &SessionContext, q: &'static str| {
+        let ctx = ctx.clone();
+        async move {
+            Ok::<usize, datafusion::error::DataFusionError>(
+                vgi_datafusion::sql(&ctx, q)
+                    .await?
+                    .collect()
+                    .await?
+                    .iter()
+                    .map(|b| b.num_rows())
+                    .sum(),
+            )
+        }
+    };
+
+    // Three successive calls under one name accumulate; the third sees all of
+    // it. With a fresh attach per call each would report only its own row.
+    for q in [
+        "SELECT x FROM acc.main.accumulate('persist', (SELECT * FROM (VALUES (1)) AS t(x)))",
+        "SELECT x FROM acc.main.accumulate('persist', (SELECT * FROM (VALUES (2)) AS t(x)))",
+    ] {
+        count(&ctx, q).await?;
+    }
+    let n = count(
+        &ctx,
+        "SELECT x FROM acc.main.accumulate('persist', (SELECT * FROM (VALUES (3)) AS t(x)))",
+    )
+    .await?;
+    assert_eq!(
+        n, 3,
+        "the accumulation lost earlier rows — attach state is not persisting"
+    );
+
+    // And a read of the same name sees them without adding any.
+    let n = count(&ctx, "SELECT x FROM acc.main.accumulate_read('persist')").await?;
+    assert_eq!(n, 3);
+    Ok(())
+}

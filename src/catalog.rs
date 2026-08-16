@@ -85,9 +85,7 @@ impl VgiSchemaProvider {
         let (tables, fn_names, scalars, aggregates, buffered_functions) =
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
-                let attached = client
-                    .attach(&cat, vgi_client::AttachOptions::default())
-                    .map_err(to_df)?;
+                let attached = c.attach(&mut client, &cat)?;
                 let tables = client.tables(&attached, &sch).map_err(to_df)?;
                 let fns = client
                     .functions(&attached, &sch, vgi_client::FunctionKind::Table)
@@ -256,9 +254,7 @@ impl VgiCatalogProvider {
         let (c, cat) = (conn.clone(), catalog.to_string());
         let (names, global_function_prefix) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
-            let attached = client
-                .attach(&cat, vgi_client::AttachOptions::default())
-                .map_err(to_df)?;
+            let attached = c.attach(&mut client, &cat)?;
             let prefix = attached.info().global_function_prefix.clone();
             let s = client.schemas(&attached).map_err(to_df)?;
             Ok::<_, DataFusionError>((

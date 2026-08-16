@@ -167,9 +167,7 @@ fn bind_output_type(
 
     let input_schema = Schema::new(input_fields(arg_types));
     let mut client = conn.connect()?;
-    let attached = client
-        .attach(catalog, AttachOptions::default())
-        .map_err(to_df)?;
+    let attached = conn.attach(&mut client, catalog)?;
     let mut spec = BindSpec::table(function).in_schema(schema_name);
     spec.function_type = FunctionType::Aggregate;
 
@@ -312,9 +310,7 @@ impl Accumulator for VgiAccumulator {
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
 
         let mut client = self.conn.connect()?;
-        let attached = client
-            .attach(&self.catalog, AttachOptions::default())
-            .map_err(to_df)?;
+        let attached = self.conn.attach(&mut client, &self.catalog)?;
         let mut spec = BindSpec::table(&self.function).in_schema(&self.schema_name);
         spec.function_type = FunctionType::Aggregate;
         let bound = client

@@ -199,9 +199,7 @@ impl VgiScalarUdf {
         let input_schema = Schema::new(columns);
 
         let mut client = self.conn.connect()?;
-        let attached = client
-            .attach(&self.catalog, AttachOptions::default())
-            .map_err(to_df)?;
+        let attached = self.conn.attach(&mut client, &self.catalog)?;
         let mut spec = BindSpec::table(&self.function).in_schema(&self.schema_name);
         spec.function_type = FunctionType::Scalar;
         spec.arguments = arguments;
@@ -368,9 +366,7 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
         let out = tokio::task::spawn_blocking(move || {
             use vgi_client::{AttachOptions, BindSpec, FunctionType, ScanOptions};
             let mut client = conn.connect()?;
-            let attached = client
-                .attach(&cat, AttachOptions::default())
-                .map_err(to_df)?;
+            let attached = conn.attach(&mut client, &cat)?;
             let mut spec = BindSpec::table(&name).in_schema(&sch);
             spec.function_type = FunctionType::Scalar;
             spec.arguments = arguments;

@@ -121,9 +121,7 @@ pub(crate) fn run_exchange(
     use vgi_client::{AttachOptions, BindSpec, ScanOptions};
 
     let mut client = conn.connect()?;
-    let attached = client
-        .attach(catalog, AttachOptions::default())
-        .map_err(to_df)?;
+    let attached = conn.attach(&mut client, catalog)?;
     let spec = BindSpec::table(function)
         .in_schema(schema_name)
         .with_arguments(arguments);
@@ -173,9 +171,7 @@ pub(crate) fn run_buffered(
     use vgi_client::{AttachOptions, BindSpec};
 
     let mut client = conn.connect()?;
-    let attached = client
-        .attach(catalog, AttachOptions::default())
-        .map_err(to_df)?;
+    let attached = conn.attach(&mut client, catalog)?;
     let spec = BindSpec::table(function)
         .in_schema(schema_name)
         .with_arguments(arguments);
@@ -247,9 +243,7 @@ impl VgiTableInputProvider {
 
         let input_schema = table_arg.input_schema();
         let mut client = conn.connect()?;
-        let attached = client
-            .attach(catalog, AttachOptions::default())
-            .map_err(to_df)?;
+        let attached = conn.attach(&mut client, catalog)?;
         let spec = BindSpec::table(function)
             .in_schema(schema_name)
             .with_arguments(arguments.clone());
