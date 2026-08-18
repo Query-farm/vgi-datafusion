@@ -307,3 +307,234 @@ async fn a_disjunction_widens_correctly() -> datafusion::error::Result<()> {
     assert_eq!(rows, 9, "0..4 plus 96..99");
     Ok(())
 }
+
+// --- splits ----------------------------------------------------------------
+//
+// A split scan is the reason this adapter can be parallel at all. Before it,
+// partition 0 did the work and the rest were empty: correct, but serial, because
+// joining an existing execution needs an execution id shared across partitions
+// and there is no rendezvous for that at planning time. A split token names its
+// own work, so each partition redeems independently and no rendezvous is needed.
+
+/// The baseline every other split assertion rests on: a split scan must return
+/// row-for-row what the same data returns unsplit. If this disagrees, nothing
+/// else about splits is meaningful.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_split_scan_returns_every_row_exactly_once() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote",
+        VgiTableProvider::bind_with_arguments(
+            conn,
+            "example",
+            "main",
+            "split_sequence",
+            vgi_client::Arguments::new()
+                .named("n", 1000i64)
+                .named("splits", 17i64),
+        )
+        .await?,
+    )?;
+
+    // count(*) and count(DISTINCT) together: a duplicated split shows up in the
+    // first, a dropped one in both, and neither shows up in a sum alone.
+    let batches = ctx
+        .sql("SELECT count(*) AS n, count(DISTINCT n) AS d FROM remote")
+        .await?
+        .collect()
+        .await?;
+    let col = |i: usize| {
+        batches[0]
+            .column(i)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("count is int64")
+            .value(0)
+    };
+    assert_eq!(col(0), 1000, "rows were lost or duplicated across splits");
+    assert_eq!(col(1), 1000, "splits overlapped: {} distinct", col(1));
+    Ok(())
+}
+
+/// Splitting must be invisible to the answer, so the split COUNT must not change
+/// it — including counts that do not divide the row count evenly, which is where
+/// an off-by-one in the range arithmetic shows up as a missing boundary row.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_split_count_does_not_change_the_answer() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+
+    for splits in [1i64, 3, 8, 37] {
+        let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "remote",
+            VgiTableProvider::bind_with_arguments(
+                conn,
+                "example",
+                "main",
+                "split_sequence",
+                vgi_client::Arguments::new()
+                    .named("n", 250i64)
+                    .named("splits", splits),
+            )
+            .await?,
+        )?;
+
+        let batches = ctx
+            .sql("SELECT count(*) AS c, sum(n) AS s FROM remote")
+            .await?
+            .collect()
+            .await?;
+        let c = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("count is int64")
+            .value(0);
+        assert_eq!(c, 250, "{splits} splits produced {c} rows, expected 250");
+    }
+    Ok(())
+}
+
+/// Zero splits is legal and means "no work" — a fully-pruned scan reaches it.
+///
+/// It must produce an EMPTY RESULT rather than an error, and the plan must still
+/// clamp to one partition: `UnknownPartitioning(0)` makes `CoalescePartitionsExec`
+/// fail outright and partition statistics assert on the index, so a literal zero
+/// would turn a legal empty answer into an internal error.
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_splits_is_an_empty_result_not_an_error() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote",
+        VgiTableProvider::bind_with_arguments(
+            conn,
+            "example",
+            "main",
+            "split_zero",
+            vgi_client::Arguments::new()
+                .named("n", 10i64)
+                .named("splits", 4i64),
+        )
+        .await?,
+    )?;
+
+    let batches = ctx.sql("SELECT * FROM remote").await?.collect().await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 0, "a zero-split plan produced {rows} rows");
+    Ok(())
+}
+
+/// A split yielding NO ROWS must not truncate the scan.
+///
+/// Distinct from zero splits and far likelier in practice — a filter pruned one —
+/// and it is the shape that silently drops every later split if an empty split is
+/// mistaken for end-of-stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_row_split_does_not_end_the_scan() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote",
+        VgiTableProvider::bind_with_arguments(
+            conn,
+            "example",
+            "main",
+            "split_empty_ranges",
+            vgi_client::Arguments::new()
+                .named("n", 120i64)
+                .named("splits", 6i64),
+        )
+        .await?,
+    )?;
+
+    let batches = ctx
+        .sql("SELECT count(*) AS c FROM remote")
+        .await?
+        .collect()
+        .await?;
+    let c = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("count is int64")
+        .value(0);
+    assert_eq!(c, 120, "an empty split truncated the scan at {c} rows");
+    Ok(())
+}
+
+/// Splits fan the scan across partitions, which is what they exist to enable
+/// here — before them this provider reported N partitions but only partition 0
+/// ever read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_split_scan_reports_more_than_one_partition() -> datafusion::error::Result<()> {
+    use datafusion::physical_plan::ExecutionPlan;
+
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+
+    let ctx = SessionContext::new();
+    let provider = VgiTableProvider::bind_with_arguments(
+        conn,
+        "example",
+        "main",
+        "split_sequence",
+        vgi_client::Arguments::new()
+            .named("n", 500i64)
+            .named("splits", 12i64),
+    )
+    .await?;
+
+    let plan = provider.scan(&ctx.state(), None, &[], None).await?;
+    let partitions = plan.properties().output_partitioning().partition_count();
+    assert!(
+        partitions > 1,
+        "a 12-split scan planned {partitions} partition(s); splits are supposed to fan out"
+    );
+    // ...but never more partitions than splits: an empty partition is legal, a
+    // plan that invents them is just waste.
+    assert!(
+        partitions <= 12,
+        "planned {partitions} partitions for 12 splits"
+    );
+    Ok(())
+}
+
+/// A worker that never opted into planning keeps its exact pre-splits behaviour.
+///
+/// The framework default is a single empty-payload split, which means "the whole
+/// scan is one unit of work" — treating that as a real plan would quietly change
+/// the execution shape of every existing worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_split_worker_is_unaffected() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote",
+        VgiTableProvider::bind(conn, "example", "main", "ten_thousand").await?,
+    )?;
+
+    let batches = ctx
+        .sql("SELECT count(*) AS c FROM remote")
+        .await?
+        .collect()
+        .await?;
+    let c = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("count is int64")
+        .value(0);
+    assert_eq!(c, 10_000);
+    Ok(())
+}

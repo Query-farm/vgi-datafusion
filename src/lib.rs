@@ -58,8 +58,8 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use vgi_client::{
-    Arguments, AttachOptions, BindSpec, PooledClient, ScanOptions, VgiClient, VgiLocation,
-    WorkerPool,
+    Arguments, AttachOptions, BindSpec, PlanOptions, PooledClient, ScanOptions, ScanSplitInfo,
+    VgiClient, VgiLocation, WorkerPool,
 };
 
 mod aggregate;
@@ -497,7 +497,8 @@ impl VgiTableProvider {
             let spec = BindSpec::table(&fn2).in_schema(&sch2).with_arguments(args2);
             let bound = client.bind(&attached, &spec).map_err(to_df)?;
             let schema = bound.output_schema().clone();
-            // One partition, deliberately.
+            // One partition at BIND time, deliberately. The real count is
+            // decided at `scan`, where splits are planned.
             //
             // `max_workers` is only readable from a scan's header, so learning
             // it here would mean opening a scan and abandoning it — which both
@@ -505,11 +506,11 @@ impl VgiTableProvider {
             // the pool would hand the next caller a broken one. (It did: binds
             // failed with "empty IPC stream (no schema)" until this came out.)
             //
-            // And it would buy nothing: only partition 0 reads today, so
-            // reporting the worker's `max_workers` would advertise a
-            // parallelism this operator does not have. When the fan-out lands
-            // it needs the execution id shared across partitions anyway, which
-            // is a rendezvous at `scan` time rather than a number at bind time.
+            // A split plan carries `max_workers` directly, so the number that
+            // matters arrives at `scan` without a wasted scan here. Without a
+            // plan, one partition is also the honest answer: joining an existing
+            // execution needs its id shared across partitions, and that
+            // rendezvous is exactly what splits remove.
             Ok::<_, DataFusionError>((schema, 1usize))
         })
         .await
@@ -526,6 +527,138 @@ impl VgiTableProvider {
             max_workers,
         }))
     }
+}
+
+/// Split planning and bin-packing.
+impl VgiTableProvider {
+    /// Divide the scan into splits and pack them into partitions.
+    ///
+    /// Returns `None` when this scan is not split-capable, which keeps the
+    /// pre-splits behaviour intact rather than making every worker implement
+    /// planning: a worker that has not opted in answers with a single
+    /// empty-payload split, which means "the whole scan is one unit of work" and
+    /// is treated here as no plan at all.
+    async fn plan_splits(
+        &self,
+        projection: Option<Vec<i64>>,
+        pushdown_filters: Option<Vec<u8>>,
+        limit: Option<usize>,
+        target_partitions: usize,
+    ) -> DFResult<Option<Vec<Vec<Vec<u8>>>>> {
+        let conn = self.conn.clone();
+        let catalog = self.catalog.clone();
+        let schema_name = self.schema_name.clone();
+        let function = self.function.clone();
+        let arguments = self.arguments.clone();
+        let raw_arguments = self.raw_arguments.clone();
+
+        // The client is blocking, so planning runs on a blocking thread rather
+        // than a tokio worker — a blocking call on the runtime would stall every
+        // other task sharing it.
+        let plan = tokio::task::spawn_blocking(move || -> DFResult<Option<vgi_client::ScanPlan>> {
+            let mut client = conn.connect()?;
+            let attached = conn.attach(&mut client, &catalog)?;
+            let spec = BindSpec::table(&function).in_schema(&schema_name);
+            let spec = match &raw_arguments {
+                Some(raw) => spec.with_raw_arguments(raw.clone()),
+                None => spec.with_arguments(arguments.clone()),
+            };
+            let bound = client.bind(&attached, &spec).map_err(to_df)?;
+
+            let opts = PlanOptions {
+                projection,
+                pushdown_filters,
+                // The parallelism FLOOR: a small but expensive table still needs
+                // one reader per partition, which a byte target alone would
+                // never give it. No byte target is sent — this provider has no
+                // basis to invent one, and sizing belongs where the knowledge
+                // is, which is the worker.
+                min_splits: Some(target_partitions as i64),
+                // Push the FULL limit into every split. Over-production is legal
+                // and the engine re-applies the limit above the coalesce, while
+                // dividing by N would under-produce under skew.
+                row_limit: limit.map(|l| l as i64),
+                ..Default::default()
+            };
+            match client.plan(&bound, &opts) {
+                Ok(plan) => Ok(Some(plan)),
+                // A worker that predates planning is not an error; it is the
+                // pre-splits path.
+                Err(_) => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))??;
+
+        let Some(plan) = plan else {
+            return Ok(None);
+        };
+
+        // The framework default for a worker that never opted in is one split
+        // carrying nothing at all. Treat that as no plan, so such a worker keeps
+        // the exact behaviour it had.
+        if plan.splits.len() == 1
+            && plan.splits[0].token.is_empty()
+            && plan.splits[0].estimated_rows.is_none()
+            && plan.splits[0].estimated_bytes.is_none()
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(pack_splits(
+            &plan.splits,
+            target_partitions,
+            plan.max_workers,
+        )))
+    }
+}
+
+/// Pack splits into partition-sized groups, weighted by byte estimate.
+///
+/// The packing is what an engine whose `partition_count()` IS its concurrency
+/// has to do: it cannot claim greedily, because the count is fixed before any
+/// reading starts. So it approximates with longest-processing-time-first, which
+/// is the standard heuristic and needs only a per-split weight.
+///
+/// `max_workers` is NORMATIVE and enforced here rather than left to the worker
+/// to refuse with a 429: over-fanning is structural for this engine, so the cap
+/// belongs at the only point that decides the fan-out.
+///
+/// A missing byte estimate degrades this to round-robin by count — which is
+/// correct, just skew-blind. That is the documented cost of not populating
+/// `estimated_bytes`, and it is why the field is described as load-bearing for
+/// packing engines specifically.
+fn pack_splits(
+    splits: &[ScanSplitInfo],
+    target_partitions: usize,
+    max_workers: Option<i64>,
+) -> Vec<Vec<Vec<u8>>> {
+    if splits.is_empty() {
+        return Vec::new();
+    }
+    let cap = match max_workers {
+        Some(m) if m > 0 => (m as usize).min(target_partitions),
+        _ => target_partitions,
+    };
+    let n = cap.min(splits.len()).max(1);
+
+    // Longest-processing-time-first: sort descending by weight, then hand each
+    // split to whichever bin is currently lightest.
+    let mut order: Vec<usize> = (0..splits.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(splits[i].estimated_bytes.unwrap_or(0)));
+
+    let mut groups: Vec<Vec<Vec<u8>>> = vec![Vec::new(); n];
+    let mut weights: Vec<i64> = vec![0; n];
+    for i in order {
+        let (lightest, _) = weights
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, w)| **w)
+            .expect("at least one bin");
+        groups[lightest].push(splits[i].token.clone());
+        weights[lightest] += splits[i].estimated_bytes.unwrap_or(1).max(1);
+    }
+    groups
 }
 
 #[async_trait]
@@ -562,7 +695,7 @@ impl TableProvider for VgiTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -571,6 +704,31 @@ impl TableProvider for VgiTableProvider {
             None => self.output_schema.clone(),
             Some(p) => Arc::new(self.output_schema.project(p)?),
         };
+        let projection_ids: Option<Vec<i64>> =
+            projection.map(|p| p.iter().map(|i| *i as i64).collect());
+        let pushdown = filters::serialize(filters, &self.output_schema)?;
+
+        // Divide the scan into named splits, then bin-pack them into partitions.
+        //
+        // Unlike an engine that hands out a fixed reader count and lets readers
+        // claim greedily, DataFusion's partition_count() IS its concurrency and
+        // is fixed at planning time — so the packing has to happen here, and
+        // max_workers has to be enforced here rather than relying on the worker
+        // to push back with a 429.
+        let target_partitions = state.config_options().execution.target_partitions.max(1);
+        let split_groups = self
+            .plan_splits(projection_ids.clone(), pushdown.clone(), limit, target_partitions)
+            .await?;
+        let partitions = match &split_groups {
+            // No plan: today's behaviour, one partition doing the work.
+            None => self.max_workers,
+            // A plan with no splits is legal and means "no work" — but it must
+            // clamp to ONE (empty) partition, because UnknownPartitioning(0)
+            // makes CoalescePartitionsExec fail outright and partition
+            // statistics assert on the index.
+            Some(groups) => groups.len().max(1),
+        };
+
         Ok(Arc::new(VgiScanExec::new(
             self.conn.clone(),
             self.catalog.clone(),
@@ -578,11 +736,12 @@ impl TableProvider for VgiTableProvider {
             self.function.clone(),
             self.arguments.clone(),
             self.raw_arguments.clone(),
-            projection.map(|p| p.iter().map(|i| *i as i64).collect()),
-            filters::serialize(filters, &self.output_schema)?,
+            projection_ids,
+            pushdown,
             limit,
             projected,
-            self.max_workers,
+            partitions,
+            split_groups,
         )))
     }
 }
@@ -604,6 +763,13 @@ pub struct VgiScanExec {
     limit: Option<usize>,
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
+    /// One group of split tokens per partition, or `None` when this scan is not
+    /// split-capable and keeps the pre-splits single-reader path.
+    ///
+    /// The groups are decided at planning time because this engine's partition
+    /// count IS its concurrency — there is no equivalent of a reader claiming
+    /// its next unit of work mid-scan.
+    split_groups: Option<Vec<Vec<Vec<u8>>>>,
 }
 
 impl VgiScanExec {
@@ -620,6 +786,7 @@ impl VgiScanExec {
         limit: Option<usize>,
         schema: SchemaRef,
         partitions: usize,
+        split_groups: Option<Vec<Vec<Vec<u8>>>>,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -642,6 +809,7 @@ impl VgiScanExec {
             limit,
             schema,
             properties,
+            split_groups,
         }
     }
 }
@@ -711,6 +879,12 @@ impl ExecutionPlan for VgiScanExec {
         let pushdown_filters = self.pushdown_filters.clone();
         let limit = self.limit;
         let out_schema = self.schema.clone();
+        // The tokens this partition redeems. An empty group is legal — a plan
+        // can pack fewer splits than partitions — and reads as no work.
+        let split_tokens: Option<Vec<Vec<u8>>> = self
+            .split_groups
+            .as_ref()
+            .map(|groups| groups.get(partition).cloned().unwrap_or_default());
         // One handle for the blocking scan, one for the stream adapter.
         let scan_schema = self.schema.clone();
 
@@ -745,21 +919,33 @@ impl ExecutionPlan for VgiScanExec {
                     Some(p) if p.is_empty() => narrowest_column(&bound).map(|i| vec![i]),
                     other => other.clone(),
                 };
+                // A split scan is genuinely parallel: each partition redeems its
+                // OWN tokens, so no partition has to learn another's execution
+                // id. That rendezvous is exactly what splits remove — a token
+                // names its work, so any process can redeem it independently.
+                //
+                // Without a plan we fall back to the pre-splits behaviour, where
+                // partition 0 does the work and the rest are empty: correct, but
+                // not parallel, because joining an existing execution WOULD need
+                // the shared id.
+                if let Some(tokens) = &split_tokens {
+                    if tokens.is_empty() {
+                        return Ok(());
+                    }
+                } else if partition > 0 {
+                    return Ok(());
+                }
+
                 let opts = ScanOptions {
                     projection: push,
                     pushdown_filters: pushdown_filters.clone(),
+                    split_tokens: split_tokens
+                        .clone()
+                        .map(|ts| ts.into_iter().map(vgi_client::LargeBytes).collect()),
+                    row_limit: limit.map(|l| l as i64),
                     ..Default::default()
                 };
                 let mut scan = client.scan(&bound, &opts).map_err(to_df)?;
-
-                // Partition 0 opens the execution; later partitions would join
-                // it with its execution id. Sharing that id across partitions
-                // needs a rendezvous this adapter does not yet have, so for now
-                // partition 0 does the work and the rest are empty — correct,
-                // just not yet parallel. See the README.
-                if partition > 0 {
-                    return Ok(());
-                }
 
                 let mut emitted = 0usize;
                 while let Some(batch) = scan.next_batch().map_err(to_df)? {
