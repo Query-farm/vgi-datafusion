@@ -74,6 +74,15 @@ impl Constant {
 struct Builder<'a> {
     schema: &'a SchemaRef,
     constants: Vec<Constant>,
+    /// Bind-schema positions of every column a spec referenced, in first-seen
+    /// order.
+    ///
+    /// The caller needs these because DataFusion may push a filter on a column
+    /// the projection does NOT include. The worker keys a pushed filter by its
+    /// position in what it emits, so unless those columns are requested too the
+    /// filter lands on whichever column happens to occupy that slot — silently
+    /// filtering on the wrong data rather than failing.
+    referenced_columns: Vec<i64>,
 }
 
 impl<'a> Builder<'a> {
@@ -87,11 +96,19 @@ impl<'a> Builder<'a> {
     /// Reported alongside the name because the wire spec carries both; the
     /// worker matches on the name, and the index is relative to the *unprojected*
     /// schema the worker itself bound.
-    fn column_index(&self, name: &str) -> Option<i64> {
-        self.schema
+    fn column_index(&mut self, name: &str) -> Option<i64> {
+        let idx = self
+            .schema
             .index_of(name)
             .ok()
-            .map(|i| i64::try_from(i).unwrap_or(0))
+            .map(|i| i64::try_from(i).unwrap_or(0))?;
+        // Recorded on the way through, so a column can only be referenced by a
+        // spec if it also reaches `filter_columns`. Deriving the two separately
+        // is what lets them drift.
+        if !self.referenced_columns.contains(&idx) {
+            self.referenced_columns.push(idx);
+        }
+        Some(idx)
     }
 
     /// Translate one predicate, or `None` if it is not expressible.
@@ -275,6 +292,7 @@ pub(crate) fn is_pushable(expr: &Expr, schema: &SchemaRef) -> bool {
     let mut b = Builder {
         schema,
         constants: Vec::new(),
+        referenced_columns: Vec::new(),
     };
     b.build(expr).is_some()
 }
@@ -283,14 +301,30 @@ pub(crate) fn is_pushable(expr: &Expr, schema: &SchemaRef) -> bool {
 ///
 /// Returns `None` when nothing could be expressed, which the caller should treat
 /// as "send no filters" rather than "send an empty filter set".
-pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Option<Vec<u8>>> {
+/// A serialized pushdown, plus the bind-schema columns it reads.
+///
+/// The two travel together on purpose. A caller holding only the blob cannot
+/// tell which columns the worker will need in order to evaluate it, and a
+/// filter on a column outside the projection then evaluates against whatever
+/// column occupies that position instead — wrong rows, no error. See
+/// `ScanOptions::filter_columns`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Pushdown {
+    /// The filter blob, or `None` when nothing was expressible.
+    pub blob: Option<Vec<u8>>,
+    /// Bind-schema positions the specs referenced, first-seen order.
+    pub columns: Vec<i64>,
+}
+
+pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown> {
     let mut b = Builder {
         schema,
         constants: Vec::new(),
+        referenced_columns: Vec::new(),
     };
     let specs: Vec<serde_json::Value> = exprs.iter().filter_map(|e| b.build(e)).collect();
     if specs.is_empty() {
-        return Ok(None);
+        return Ok(Pushdown::default());
     }
     let json = serde_json::Value::Array(specs).to_string();
 
@@ -322,7 +356,10 @@ pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Option<V
         w.write(&batch)?;
         w.finish()?;
     }
-    Ok(Some(buf))
+    Ok(Pushdown {
+        blob: Some(buf),
+        columns: b.referenced_columns,
+    })
 }
 
 #[cfg(test)]
@@ -359,7 +396,7 @@ mod tests {
     #[test]
     fn a_simple_comparison_becomes_a_constant_filter() {
         let e = col("n").gt(lit(5i64));
-        let bytes = serialize(&[e], &schema()).unwrap().expect("pushable");
+        let bytes = serialize(&[e], &schema()).unwrap().blob.expect("pushable");
         let (specs, batch) = decode(&bytes);
 
         assert_eq!(specs[0]["type"], "constant");
@@ -379,6 +416,7 @@ mod tests {
         // The worker looks for this to know it can read the blob at all.
         let bytes = serialize(&[col("n").eq(lit(1i64))], &schema())
             .unwrap()
+            .blob
             .unwrap();
         let (_, batch) = decode(&bytes);
         assert_eq!(
@@ -393,6 +431,7 @@ mod tests {
         // push the wrong operator.
         let bytes = serialize(&[lit(5i64).lt(col("n"))], &schema())
             .unwrap()
+            .blob
             .unwrap();
         let (specs, _) = decode(&bytes);
         assert_eq!(specs[0]["column_name"], "n");
@@ -409,7 +448,7 @@ mod tests {
             (col("n").gt(lit(1i64)), "gt"),
             (col("n").gt_eq(lit(1i64)), "ge"),
         ] {
-            let bytes = serialize(&[e], &schema()).unwrap().unwrap();
+            let bytes = serialize(&[e], &schema()).unwrap().blob.unwrap();
             let (specs, _) = decode(&bytes);
             assert_eq!(specs[0]["op"], want);
         }
@@ -419,6 +458,7 @@ mod tests {
     fn null_checks_carry_no_constant() {
         let bytes = serialize(&[col("n").is_null()], &schema())
             .unwrap()
+            .blob
             .unwrap();
         let (specs, batch) = decode(&bytes);
         assert_eq!(specs[0]["type"], "is_null");
@@ -426,6 +466,7 @@ mod tests {
 
         let bytes = serialize(&[col("n").is_not_null()], &schema())
             .unwrap()
+            .blob
             .unwrap();
         let (specs, _) = decode(&bytes);
         assert_eq!(specs[0]["type"], "is_not_null");
@@ -434,7 +475,7 @@ mod tests {
     #[test]
     fn an_in_list_hoists_every_element() {
         let e = col("n").in_list(vec![lit(1i64), lit(2i64), lit(3i64)], false);
-        let bytes = serialize(&[e], &schema()).unwrap().unwrap();
+        let bytes = serialize(&[e], &schema()).unwrap().blob.unwrap();
         let (specs, batch) = decode(&bytes);
         assert_eq!(specs[0]["type"], "in");
         assert_eq!(specs[0]["value_refs"].as_array().unwrap().len(), 3);
@@ -444,7 +485,7 @@ mod tests {
     #[test]
     fn a_negated_in_list_is_left_to_datafusion() {
         let e = col("n").in_list(vec![lit(1i64)], true);
-        assert!(serialize(&[e], &schema()).unwrap().is_none());
+        assert!(serialize(&[e], &schema()).unwrap().blob.is_none());
     }
 
     #[test]
@@ -454,6 +495,7 @@ mod tests {
         let e = col("n").gt(lit(5i64)).and(unsupported);
         let bytes = serialize(&[e], &schema())
             .unwrap()
+            .blob
             .expect("the pushable half survives");
         let (specs, _) = decode(&bytes);
         assert_eq!(specs[0]["type"], "constant");
@@ -468,13 +510,13 @@ mod tests {
         let unsupported = col("n").gt(col("name"));
         let e = col("n").gt(lit(5i64)).or(unsupported);
         assert!(
-            serialize(&[e], &schema()).unwrap().is_none(),
+            serialize(&[e], &schema()).unwrap().blob.is_none(),
             "half an OR must not be pushed"
         );
 
         // Both sides expressible: pushed as an or.
         let both = col("n").gt(lit(5i64)).or(col("n").lt(lit(0i64)));
-        let (specs, _) = decode(&serialize(&[both], &schema()).unwrap().unwrap());
+        let (specs, _) = decode(&serialize(&[both], &schema()).unwrap().blob.unwrap());
         assert_eq!(specs[0]["type"], "or");
         assert_eq!(specs[0]["children"].as_array().unwrap().len(), 2);
     }
@@ -484,7 +526,7 @@ mod tests {
         // `col = NULL` is not `col IS NULL`; pushing it would ask for the wrong
         // rows, and under three-valued logic it matches nothing.
         let e = col("n").eq(lit(ScalarValue::Int64(None)));
-        assert!(serialize(&[e], &schema()).unwrap().is_none());
+        assert!(serialize(&[e], &schema()).unwrap().blob.is_none());
     }
 
     #[test]
@@ -507,6 +549,7 @@ mod tests {
             &schema(),
         )
         .unwrap()
+        .blob
         .unwrap();
         let (specs, batch) = decode(&bytes);
         assert_eq!(
@@ -522,7 +565,51 @@ mod tests {
     fn nothing_pushable_serializes_to_nothing() {
         assert!(serialize(&[col("n").gt(col("name"))], &schema())
             .unwrap()
+            .blob
             .is_none());
-        assert!(serialize(&[], &schema()).unwrap().is_none());
+        assert!(serialize(&[], &schema()).unwrap().blob.is_none());
+    }
+
+    /// The columns a pushdown reads come back with it, so a caller cannot
+    /// request the blob without learning what it needs.
+    ///
+    /// This is the whole reason `Pushdown` is a struct rather than a bare blob.
+    /// The worker keys a pushed filter by the column's position in what it
+    /// EMITS, so if the projection omits a filtered column the predicate is
+    /// evaluated against whichever column takes that slot — the scan returns
+    /// wrong rows and nothing errors. A caller that only has the blob has no way
+    /// to know which columns to add.
+    #[test]
+    fn reports_the_columns_its_specs_read() {
+        // `name` is at bind index 1; a projection of [0] would leave it out.
+        let pd = serialize(&[col("name").eq(lit("x"))], &schema()).unwrap();
+        assert!(pd.blob.is_some());
+        assert_eq!(pd.columns, vec![1]);
+    }
+
+    /// Several predicates over the same column report it once, in first-seen
+    /// order — the union is a projection, and a repeat would request a
+    /// duplicate column.
+    #[test]
+    fn dedups_and_orders_reported_columns() {
+        let pd = serialize(
+            &[
+                col("name").eq(lit("x")),
+                col("n").gt(lit(1i64)),
+                col("name").not_eq(lit("y")),
+            ],
+            &schema(),
+        )
+        .unwrap();
+        assert_eq!(pd.columns, vec![1, 0]);
+    }
+
+    /// A predicate that is not expressible reports no columns either. Reporting
+    /// one here would widen the scan for a filter that never reached the worker.
+    #[test]
+    fn an_unpushable_predicate_reports_no_columns() {
+        let pd = serialize(&[col("n").eq(col("name"))], &schema()).unwrap();
+        assert!(pd.blob.is_none());
+        assert!(pd.columns.is_empty());
     }
 }

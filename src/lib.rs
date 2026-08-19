@@ -541,7 +541,9 @@ impl VgiTableProvider {
     async fn plan_splits(
         &self,
         projection: Option<Vec<i64>>,
-        pushdown_filters: Option<Vec<u8>>,
+        // The blob AND the columns it reads travel together — see
+        // filters::Pushdown. Passing the blob alone is what let the two drift.
+        pushdown: filters::Pushdown,
         limit: Option<usize>,
         target_partitions: usize,
     ) -> DFResult<Option<Vec<Vec<Vec<u8>>>>> {
@@ -555,54 +557,61 @@ impl VgiTableProvider {
         // The client is blocking, so planning runs on a blocking thread rather
         // than a tokio worker — a blocking call on the runtime would stall every
         // other task sharing it.
-        let plan = tokio::task::spawn_blocking(move || -> DFResult<Option<vgi_client::ScanPlan>> {
-            let mut client = conn.connect()?;
-            let attached = conn.attach(&mut client, &catalog)?;
-            let spec = BindSpec::table(&function).in_schema(&schema_name);
-            let spec = match &raw_arguments {
-                Some(raw) => spec.with_raw_arguments(raw.clone()),
-                None => spec.with_arguments(arguments.clone()),
-            };
-            let bound = client.bind(&attached, &spec).map_err(to_df)?;
+        let plan =
+            tokio::task::spawn_blocking(move || -> DFResult<Option<vgi_client::ScanPlan>> {
+                let mut client = conn.connect()?;
+                let attached = conn.attach(&mut client, &catalog)?;
+                let spec = BindSpec::table(&function).in_schema(&schema_name);
+                let spec = match &raw_arguments {
+                    Some(raw) => spec.with_raw_arguments(raw.clone()),
+                    None => spec.with_arguments(arguments.clone()),
+                };
+                let bound = client.bind(&attached, &spec).map_err(to_df)?;
 
-            let opts = PlanOptions {
-                projection,
-                pushdown_filters,
-                // The parallelism FLOOR: a small but expensive table still needs
-                // one reader per partition, which a byte target alone would
-                // never give it. No byte target is sent — this provider has no
-                // basis to invent one, and sizing belongs where the knowledge
-                // is, which is the worker.
-                min_splits: Some(target_partitions as i64),
-                // Push the FULL limit into every split. Over-production is legal
-                // and the engine re-applies the limit above the coalesce, while
-                // dividing by N would under-produce under skew.
-                row_limit: limit.map(|l| l as i64),
-                ..Default::default()
-            };
-            match client.plan(&bound, &opts) {
-                Ok(plan) => Ok(Some(plan)),
-                // ONLY "this worker has no such method" is the pre-splits path.
-                // Swallowing every error meant a transport failure, an auth
-                // failure, or the page-cap refusal (which VgiClient::plan raises
-                // precisely so a partial enumeration is never scanned) all
-                // silently became a serial full scan — with the diagnostic
-                // discarded, and for a split-only worker an error pointing at a
-                // setting this engine does not have.
-                Err(e) if e.error_type == "MethodNotImplementedError" => Ok(None),
-                Err(e) => {
-                    // A connection that saw an error must not go back to the pool:
-                    // recycling one that failed mid-protocol hands the next caller
-                    // a worker in an unknown state. The swallow above is what made
-                    // that reachable — before it, the error propagated and took the
-                    // query with it.
-                    client.poison();
-                    Err(to_df(e))
+                let opts = PlanOptions {
+                    projection,
+                    pushdown_filters: pushdown.blob,
+                    // Columns the filter reads but the projection may omit. The
+                    // worker keys a pushed filter by its position in what it emits,
+                    // so without these a filter on an unprojected column evaluates
+                    // against whichever column lands in that slot instead — wrong
+                    // rows, silently.
+                    filter_columns: Some(pushdown.columns),
+                    // The parallelism FLOOR: a small but expensive table still needs
+                    // one reader per partition, which a byte target alone would
+                    // never give it. No byte target is sent — this provider has no
+                    // basis to invent one, and sizing belongs where the knowledge
+                    // is, which is the worker.
+                    min_splits: Some(target_partitions as i64),
+                    // Push the FULL limit into every split. Over-production is legal
+                    // and the engine re-applies the limit above the coalesce, while
+                    // dividing by N would under-produce under skew.
+                    row_limit: limit.map(|l| l as i64),
+                    ..Default::default()
+                };
+                match client.plan(&bound, &opts) {
+                    Ok(plan) => Ok(Some(plan)),
+                    // ONLY "this worker has no such method" is the pre-splits path.
+                    // Swallowing every error meant a transport failure, an auth
+                    // failure, or the page-cap refusal (which VgiClient::plan raises
+                    // precisely so a partial enumeration is never scanned) all
+                    // silently became a serial full scan — with the diagnostic
+                    // discarded, and for a split-only worker an error pointing at a
+                    // setting this engine does not have.
+                    Err(e) if e.error_type == "MethodNotImplementedError" => Ok(None),
+                    Err(e) => {
+                        // A connection that saw an error must not go back to the pool:
+                        // recycling one that failed mid-protocol hands the next caller
+                        // a worker in an unknown state. The swallow above is what made
+                        // that reachable — before it, the error propagated and took the
+                        // query with it.
+                        client.poison();
+                        Err(to_df(e))
+                    }
                 }
-            }
-        })
-        .await
-        .map_err(|e| DataFusionError::External(Box::new(e)))??;
+            })
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
         let Some(plan) = plan else {
             return Ok(None);
@@ -754,7 +763,12 @@ impl TableProvider for VgiTableProvider {
         // to push back with a 429.
         let target_partitions = state.config_options().execution.target_partitions.max(1);
         let split_groups = self
-            .plan_splits(projection_ids.clone(), pushdown.clone(), limit, target_partitions)
+            .plan_splits(
+                projection_ids.clone(),
+                pushdown.clone(),
+                limit,
+                target_partitions,
+            )
             .await?;
         let partitions = match &split_groups {
             // No plan: today's behaviour, one partition doing the work.
@@ -796,7 +810,7 @@ pub struct VgiScanExec {
     /// A catalog table's worker-supplied argument bytes, forwarded verbatim.
     raw_arguments: Option<vgi_client::Bytes>,
     projection: Option<Vec<i64>>,
-    pushdown_filters: Option<Vec<u8>>,
+    pushdown: filters::Pushdown,
     limit: Option<usize>,
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
@@ -819,7 +833,7 @@ impl VgiScanExec {
         arguments: Arguments,
         raw_arguments: Option<vgi_client::Bytes>,
         projection: Option<Vec<i64>>,
-        pushdown_filters: Option<Vec<u8>>,
+        pushdown: filters::Pushdown,
         limit: Option<usize>,
         schema: SchemaRef,
         partitions: usize,
@@ -842,7 +856,7 @@ impl VgiScanExec {
             arguments,
             raw_arguments,
             projection,
-            pushdown_filters,
+            pushdown,
             limit,
             schema,
             properties,
@@ -913,7 +927,7 @@ impl ExecutionPlan for VgiScanExec {
         let arguments = self.arguments.clone();
         let raw_arguments = self.raw_arguments.clone();
         let projection = self.projection.clone();
-        let pushdown_filters = self.pushdown_filters.clone();
+        let pushdown = self.pushdown.clone();
         let limit = self.limit;
         let out_schema = self.schema.clone();
         // The tokens this partition redeems. An empty group is legal — a plan
@@ -975,7 +989,11 @@ impl ExecutionPlan for VgiScanExec {
 
                 let opts = ScanOptions {
                     projection: push,
-                    pushdown_filters: pushdown_filters.clone(),
+                    pushdown_filters: pushdown.blob.clone(),
+                    // See PlanOptions above: the filter's columns must be
+                    // requested even when the projection omits them, or the
+                    // worker evaluates the predicate against the wrong column.
+                    filter_columns: Some(pushdown.columns.clone()),
                     split_tokens: split_tokens
                         .clone()
                         .map(|ts| ts.into_iter().map(vgi_client::LargeBytes).collect()),

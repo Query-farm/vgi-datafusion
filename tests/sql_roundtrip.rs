@@ -258,6 +258,69 @@ async fn an_unpushable_predicate_still_produces_correct_rows() -> datafusion::er
     Ok(())
 }
 
+/// A filter on a column the projection does NOT include still filters on that
+/// column.
+///
+/// This is the case that fails silently rather than loudly. The worker keys a
+/// pushed filter by the column's position in what it EMITS, so if the scan asks
+/// only for `n` while the filter names `s`, the predicate is evaluated against
+/// whichever column occupies that slot — `n` — and the query returns a
+/// confidently wrong answer with no error anywhere. The fix is that the scan
+/// requests the UNION of projected and filter-referenced columns and trims back
+/// afterwards, so the reported schema is unchanged.
+///
+/// `s` is 'row_<n>', so this matches exactly one row.
+///
+/// NOT a discriminating test of the fix, and it is worth saying so rather than
+/// leaving someone to assume otherwise: with the union removed this still
+/// passes. Two things mask it here — the example worker resolves a pushed
+/// filter by column NAME before falling back to the index
+/// (`vgi/src/pushdown.rs`), and this provider reports every filter `Inexact`,
+/// so DataFusion re-applies it above the scan. The mis-keying only bites a
+/// worker that resolves by index. What this test does hold is the answer, which
+/// is worth a regression either way; the discriminating coverage is
+/// `filters::tests::reports_the_columns_its_specs_read` and the stub-transport
+/// tests in vgi-client that assert the requested column order on the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filter_on_an_unprojected_column_still_filters_that_column(
+) -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let Some(schema) = filter_echo_schema(&conn).await else {
+        return Ok(());
+    };
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(conn, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    let batches = ctx
+        .sql("SELECT n FROM echo WHERE s = 'row_7'")
+        .await?
+        .collect()
+        .await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 1, "exactly the row whose s is 'row_7'");
+
+    let col = batches
+        .iter()
+        .find(|b| b.num_rows() > 0)
+        .map(|b| b.column(0).clone())
+        .expect("one row");
+    let ns = col
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("n is int64");
+    assert_eq!(
+        ns.value(0),
+        7,
+        "and it is row 7, not whatever landed in slot 0"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_conjunction_narrows_correctly() -> datafusion::error::Result<()> {
     let worker = skip_without_worker!();
