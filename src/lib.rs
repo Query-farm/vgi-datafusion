@@ -582,9 +582,23 @@ impl VgiTableProvider {
             };
             match client.plan(&bound, &opts) {
                 Ok(plan) => Ok(Some(plan)),
-                // A worker that predates planning is not an error; it is the
-                // pre-splits path.
-                Err(_) => Ok(None),
+                // ONLY "this worker has no such method" is the pre-splits path.
+                // Swallowing every error meant a transport failure, an auth
+                // failure, or the page-cap refusal (which VgiClient::plan raises
+                // precisely so a partial enumeration is never scanned) all
+                // silently became a serial full scan — with the diagnostic
+                // discarded, and for a split-only worker an error pointing at a
+                // setting this engine does not have.
+                Err(e) if e.error_type == "MethodNotImplementedError" => Ok(None),
+                Err(e) => {
+                    // A connection that saw an error must not go back to the pool:
+                    // recycling one that failed mid-protocol hands the next caller
+                    // a worker in an unknown state. The swallow above is what made
+                    // that reachable — before it, the error propagated and took the
+                    // query with it.
+                    client.poison();
+                    Err(to_df(e))
+                }
             }
         })
         .await
@@ -603,6 +617,29 @@ impl VgiTableProvider {
             && plan.splits[0].estimated_bytes.is_none()
         {
             return Ok(None);
+        }
+
+        // An UNBOUNDED split is a shard read forever. A DataFusion task must
+        // terminate, and the plan below declares Boundedness::Bounded — which
+        // frees the optimizer to put a SortExec or a hash aggregate above the
+        // scan, buffering a stream that never ends. So refuse, rather than plan
+        // a query that hangs with no error and no memory ceiling.
+        //
+        // The predicate needs BOTH positions: `end_position: None` alone is also
+        // the default for every ordinary batch split, so refusing on that would
+        // reject every worker. A split that names where it starts and not where
+        // it stops is the one making an unbounded claim.
+        if let Some(unbounded) = plan
+            .splits
+            .iter()
+            .position(|s| s.start_position.is_some() && s.end_position.is_none())
+        {
+            return Err(DataFusionError::NotImplemented(format!(
+                "VGI function '{}' planned split {} as unbounded (it names a start position \
+                 and no end). This engine's tasks must terminate, so an endless split cannot \
+                 be scheduled.",
+                self.function, unbounded
+            )));
         }
 
         Ok(Some(pack_splits(
