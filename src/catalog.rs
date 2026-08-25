@@ -37,7 +37,7 @@ use datafusion::common::pruning::PrunableStatistics;
 use datafusion::common::{Constraints, DFSchema, DataFusionError, Result as DFResult, Statistics};
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType, Volatility};
-use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::ExecutionPlan;
 
@@ -172,10 +172,12 @@ impl VgiCatalogTableProvider {
         let Ok(df_schema) = DFSchema::try_from(self.output_schema.as_ref().clone()) else {
             return Ok(false);
         };
-        let Ok(predicate) = state.create_physical_expr(&filter, &df_schema) else {
+        let Ok(predicate) = state.create_physical_expr(filter, &df_schema) else {
             return Ok(false);
         };
-        let Ok(predicate) = PruningPredicate::try_new(predicate, Arc::clone(&self.output_schema))
+        let Some(predicate) = PruningPredicateBuilder::new()
+            .with_file_schema(Arc::clone(&self.output_schema))
+            .build(predicate)
         else {
             return Ok(false);
         };
