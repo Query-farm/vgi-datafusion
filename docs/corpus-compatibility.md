@@ -79,25 +79,29 @@ separate because transport equivalence is itself part of completion.
 The canonical EC2 subprocess run of the 327-file normal corpus contains 4,114
 measured positive records. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
-`duckdb_functions()`, and `vgi_function_arguments()` compatibility views backed
-by adapter state and the worker's retained discovery metadata.
+`duckdb_functions()`, `vgi_function_arguments()`, and
+`vgi_table_statistics()` compatibility views backed by adapter state and the
+worker's retained discovery metadata. Catalog and bound-function column
+statistics also feed DataFusion's existing pruning API.
 
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 2,936 / 4,114 (71.4%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 1,858 / 2,101 (88.4%) |
-| Exact results | 1,567 | 1,821 |
-| Rendering-equivalent results | 37 | 37 |
-| Genuine value differences | 149 | 243 |
+| Records executed | 2,473 / 4,114 (60.1%) | 2,999 / 4,114 (72.9%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 1,945 / 2,162 (90.0%) |
+| Exact results | 1,567 | 1,882 |
+| Rendering-equivalent results | 37 | 63 |
+| Genuine value differences | 149 | 217 |
 | DuckDB/extension configuration records reported separately | 607 | 607 |
 | Timeouts | 0 | 0 |
 
-The larger mismatch count is expected evidence, not a regression: 348 more
+The larger mismatch count is expected evidence, not a regression: 409 more
 queries now reach result comparison instead of failing during planning. The
 regression gate separately guarantees that no previously agreeing check was
 lost. `cache/basic.test` is now fully executable with all 14 value checks
-exact.
+exact. The two catalog/function statistics files are also complete: all 91
+positive records execute and all 89 query results agree (63 exact and 26
+engine-plan rendering equivalents).
 
 The deferred writable corpus under `../vgi/test_deferred/writable` is tracked
 as a future input, not mixed into this baseline. Six `.test_slow` files are also
@@ -110,12 +114,12 @@ The following order maximizes useful coverage while keeping new DataFusion
 engine work to a minimum:
 
 1. **Corpus adaptation and classification.** DuckDB/extension-surface failures
-   fell from 678 to 121; 118 parser failures remain. Continue with reviewable
+   fell from 678 to 70; 118 parser failures remain. Continue with reviewable
    equivalents for metadata queries, struct extraction, and harmless dialect
    differences. Keep extension settings and DuckDB storage internals
    `out_of_scope` where DataFusion has no semantic equivalent.
 2. **Advertised function publication and binding.** The largest error shape is
-   now 189 instances of `table function ... not found`, down from 655. Resolve
+   now 138 instances of `table function ... not found`, down from 655. Resolve
    the remainder by capability area, prioritizing functions that map to an
    existing DataFusion table-provider or UDTF API.
 3. **Result cache breadth.** Memory producer/split caching, conditional
@@ -131,9 +135,9 @@ engine work to a minimum:
 5. **Catalog objects.** Macros, broader views, and multi-branch catalogs need
    publication or a documented SQL adaptation. Function inventory, overloads,
    argument docs/constraints, tags, categories, and global nominations now use
-   retained worker metadata. Current execution is 58/90 for catalog, 4/19 for
-   macros, and 2/14 for views.
-6. **Secrets and authenticated fixtures.** Twenty-two failures explicitly lack
+   retained worker metadata. Current execution is 64/90 for catalog, 4/19 for
+   macros, and 5/14 for views.
+6. **Secrets and authenticated fixtures.** Twenty-four failures explicitly lack
    a `VgiSecretResolver`. Add deterministic corpus resolvers before judging the
    worker behavior; keep real OAuth and external-service tests in the blocked
    fixture lane.
@@ -145,9 +149,10 @@ engine work to a minimum:
    translation. Writable tables (`INSERT`, `UPDATE`, `DELETE`, `RETURNING`) need
    mutation RPC wrappers and transaction/cache invalidation semantics and are
    currently `not_started`.
-9. **Remaining optimizer hints.** ORDER BY, TABLESAMPLE, late materialization,
-   large hash-lookup filters, and multi-column dynamic membership remain
-   explicit partial features.
+9. **Remaining optimizer hints.** Catalog and bound-function min/max pruning
+   now use DataFusion's existing pruning builder. ORDER BY, TABLESAMPLE, late
+   materialization, large hash-lookup filters, and multi-column dynamic
+   membership remain explicit partial features.
 
 Focused regression contracts for projection pushdown, narrow-bind mismatch,
 and unary error propagation are already marked `complete`; they establish the

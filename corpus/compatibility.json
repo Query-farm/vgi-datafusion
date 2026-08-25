@@ -72,7 +72,7 @@
       "title": "Catalogs, views, macros, and global functions",
       "status": "partial",
       "groups": ["catalog", "view", "macro", "global_functions", "schema_reconcile.test"],
-      "remaining": ["table macro publication", "multi-branch catalogs", "broader view translation", "catalog/table statistics and database metadata adaptations"]
+      "remaining": ["table macro publication", "multi-branch catalogs", "broader view translation", "database metadata adaptations"]
     },
     {
       "id": "attach_settings",
