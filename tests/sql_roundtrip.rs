@@ -171,6 +171,21 @@ async fn worker_function_metadata_is_queryable_and_detaches() -> datafusion::err
 
     let batches = vgi_datafusion::sql(
         &ctx,
+        "SELECT count(*), min(value), max(value) FROM ex.data.numbers",
+    )
+    .await?
+    .collect()
+    .await?;
+    let numbers = datafusion::arrow::util::pretty::pretty_format_batches(&batches)?.to_string();
+    for expected in ["100", "0", "99"] {
+        assert!(
+            numbers.contains(expected),
+            "missing {expected} from {numbers}"
+        );
+    }
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
         "SELECT count(*) FROM vgi_table_statistics('ex', 'data', 'versioned_data')",
     )
     .await?

@@ -466,6 +466,7 @@ fn function_capabilities(
 fn conform(
     batch: datafusion::arrow::array::RecordBatch,
     schema: &SchemaRef,
+    column_mapping: Option<&HashMap<String, String>>,
 ) -> DFResult<datafusion::arrow::array::RecordBatch> {
     use datafusion::arrow::array::{RecordBatch, RecordBatchOptions};
 
@@ -495,9 +496,12 @@ fn conform(
         .fields()
         .iter()
         .map(|want| {
-            batch.column_by_name(want.name()).cloned().ok_or_else(|| {
+            let worker_name = column_mapping
+                .and_then(|mapping| mapping.get(want.name()))
+                .unwrap_or_else(|| want.name());
+            batch.column_by_name(worker_name).cloned().ok_or_else(|| {
                 DataFusionError::Execution(format!(
-                    "worker returned no column named `{}`; it emitted [{}]",
+                    "worker returned no column named `{worker_name}` for catalog column `{}`; it emitted [{}]",
                     want.name(),
                     batch
                         .schema()
@@ -712,6 +716,9 @@ pub struct VgiTableProvider {
     /// DataFusion has no native representation for VGI check, foreign-key, or
     /// standalone NOT NULL metadata.
     constraints: Option<Constraints>,
+    /// Catalog column name -> backing function column name when the table
+    /// deliberately renames a function's positional output.
+    column_mapping: Option<Arc<HashMap<String, String>>>,
     max_workers: usize,
 }
 
@@ -719,9 +726,9 @@ impl VgiTableProvider {
     /// Use a catalog-declared schema after binding its scan function.
     ///
     /// VGI table discovery is the SQL catalog contract. Bind schemas may carry
-    /// different nullability or field metadata, but names and Arrow data types
-    /// must still agree before the catalog schema can safely drive projection
-    /// and batch conformance.
+    /// different names, nullability, or field metadata. Types and positions
+    /// must agree; the catalog names are authoritative and worker batches are
+    /// renamed by the positional mapping retained here.
     pub(crate) fn with_declared_schema(
         mut self: Arc<Self>,
         declared: SchemaRef,
@@ -732,18 +739,23 @@ impl VgiTableProvider {
                 .fields()
                 .iter()
                 .zip(declared.fields())
-                .all(|(bound, catalog)| {
-                    bound.name() == catalog.name() && bound.data_type() == catalog.data_type()
-                });
+                .all(|(bound, catalog)| bound.data_type() == catalog.data_type());
         if !compatible {
             return Err(DataFusionError::Plan(format!(
                 "VGI catalog schema {:?} is incompatible with scan bind schema {:?}",
                 declared, self.output_schema
             )));
         }
-        Arc::get_mut(&mut self)
-            .expect("freshly bound VGI provider has one owner")
-            .output_schema = declared;
+        let provider = Arc::get_mut(&mut self).expect("freshly bound VGI provider has one owner");
+        provider.column_mapping = Some(Arc::new(
+            declared
+                .fields()
+                .iter()
+                .zip(provider.output_schema.fields())
+                .map(|(catalog, bound)| (catalog.name().clone(), bound.name().clone()))
+                .collect(),
+        ));
+        provider.output_schema = declared;
         Ok(self)
     }
 
@@ -893,6 +905,7 @@ impl VgiTableProvider {
             catalog_version,
             at,
             constraints,
+            column_mapping: None,
             max_workers: 1,
         }))
     }
@@ -939,6 +952,7 @@ impl VgiTableProvider {
             catalog_version,
             at: None,
             constraints: None,
+            column_mapping: None,
             max_workers: 1,
         }))
     }
@@ -1506,6 +1520,7 @@ impl TableProvider for VgiTableProvider {
             split_groups,
             self.catalog_version,
             self.at.clone(),
+            self.column_mapping.clone(),
         )))
     }
 }
@@ -1547,6 +1562,7 @@ pub struct VgiScanExec {
     cache_probe: OnceLock<Option<vgi_client::CachedEntry>>,
     cache_capture: Option<Arc<ScanCacheCapture>>,
     at: Option<vgi_client::At>,
+    column_mapping: Option<Arc<HashMap<String, String>>>,
 }
 
 impl VgiScanExec {
@@ -1567,6 +1583,7 @@ impl VgiScanExec {
         split_groups: Option<PlannedSplits>,
         catalog_version: i64,
         at: Option<vgi_client::At>,
+        column_mapping: Option<Arc<HashMap<String, String>>>,
     ) -> Self {
         let split_output_ordering = split_groups
             .as_ref()
@@ -1683,6 +1700,7 @@ impl VgiScanExec {
             cache_probe: OnceLock::new(),
             cache_capture,
             at,
+            column_mapping,
         }
     }
 
@@ -2336,6 +2354,7 @@ impl ExecutionPlan for VgiScanExec {
             .map(|planned| planned.plan.clone());
         // One handle for the blocking scan, one for the stream adapter.
         let scan_schema = self.schema.clone();
+        let column_mapping = self.column_mapping.clone();
         let cache_capture = self.cache_capture.clone();
         if let Some(capture) = &cache_capture {
             capture.start(partition);
@@ -2495,7 +2514,7 @@ impl ExecutionPlan for VgiScanExec {
                     // DataFusion requires every batch to match the declared
                     // schema exactly, so conform rather than trusting the
                     // worker to have honoured the projection.
-                    let batch = conform(batch, &scan_schema)?;
+                    let batch = conform(batch, &scan_schema, column_mapping.as_deref())?;
                     let batch = match limit {
                         Some(l) if emitted + batch.num_rows() > l => {
                             batch.slice(0, l.saturating_sub(emitted))
