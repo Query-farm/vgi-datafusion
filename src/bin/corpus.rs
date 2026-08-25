@@ -210,6 +210,7 @@ struct Area {
 ///
 /// * an empty string prints as `(empty)`;
 /// * struct keys are quoted — `{'lat': 3.0}` against `{lat: 3.0}`;
+/// * map entries use `=` — `{a=1}` against Arrow's `{a: 1}`;
 /// * floats print at shortest-round-trip — `0.0003` against Arrow's
 ///   `0.00030000000000000003`, which are the same double.
 ///
@@ -259,8 +260,8 @@ fn explain_rows_agree(expected: &[String], got: &[String]) -> bool {
 }
 
 #[cfg(test)]
-mod explain_rendering_tests {
-    use super::agrees_modulo_rendering;
+mod rendering_tests {
+    use super::{agrees_modulo_rendering, cells_agree};
 
     #[test]
     fn matches_equivalent_datafusion_plan_nodes_without_masking_missing_pruning() {
@@ -289,6 +290,22 @@ mod explain_rendering_tests {
             &scan,
         ));
     }
+
+    #[test]
+    fn matches_maps_and_non_finite_floats_without_masking_value_changes() {
+        assert!(cells_agree("{a=1, b=[2, 3]}", "{a: 1, b: [2, 3]}"));
+        assert!(cells_agree(
+            "{outer={inner=42}, labels=[x=y, z]}",
+            "{outer: {inner: 42}, labels: [x=y, z]}"
+        ));
+        assert!(cells_agree(
+            "{'2024-01-01 00:00:00'=a}",
+            "{2024-01-01T00:00:00: a}"
+        ));
+        assert!(cells_agree("nan", "NaN"));
+        assert!(!cells_agree("{a=1}", "{a: 2}"));
+        assert!(!cells_agree("nan", "1"));
+    }
 }
 
 /// Compare rows pairwise, allowing for rendering conventions.
@@ -308,6 +325,9 @@ fn cells_agree(expected: &str, got: &str) -> bool {
     }
     // Same double, different number of digits.
     if let (Ok(a), Ok(b)) = (expected.parse::<f64>(), got.parse::<f64>()) {
+        if a == b || (a.is_nan() && b.is_nan()) {
+            return true;
+        }
         let scale = a.abs().max(b.abs()).max(1.0);
         if (a - b).abs() <= scale * 1e-9 {
             return true;
@@ -316,7 +336,7 @@ fn cells_agree(expected: &str, got: &str) -> bool {
     if normalize_timestamp(expected) == normalize_timestamp(got) {
         return true;
     }
-    unquote_struct_keys(expected) == unquote_struct_keys(got)
+    normalize_composite(expected) == normalize_composite(got)
 }
 
 /// Does a query pin its row order?
@@ -365,11 +385,97 @@ fn normalize_timestamp(s: &str) -> String {
         .to_string()
 }
 
-/// Drop the quotes DuckDB puts around struct field names.
-fn unquote_struct_keys(s: &str) -> String {
-    s.replace("{'", "{")
+/// Put DuckDB and Arrow composite-value renderings on common ground.
+fn normalize_composite(s: &str) -> String {
+    let normalized = normalize_map_separators(s)
+        .replace("{'", "{")
         .replace(", '", ", ")
-        .replace("': ", ": ")
+        .replace("': ", ": ");
+    normalize_embedded_timestamps(&normalized)
+}
+
+fn normalize_embedded_timestamps(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    for (i, ch) in s.char_indices() {
+        let embedded_timestamp = ch == 'T'
+            && i >= 10
+            && i + 2 < bytes.len()
+            && bytes[i - 10..i - 6].iter().all(u8::is_ascii_digit)
+            && bytes[i - 6] == b'-'
+            && bytes[i - 5..i - 3].iter().all(u8::is_ascii_digit)
+            && bytes[i - 3] == b'-'
+            && bytes[i - 2..i].iter().all(u8::is_ascii_digit)
+            && bytes[i + 1..i + 3].iter().all(u8::is_ascii_digit);
+        out.push(if embedded_timestamp { ' ' } else { ch });
+    }
+    out
+}
+
+/// Change DuckDB's map-entry `=` to Arrow's `:` without touching equals signs
+/// inside quoted keys/values or later in an unquoted value.
+///
+/// Each `{...}` level tracks whether it is still waiting for that entry's
+/// first separator. This also handles nested maps and structs while ensuring a
+/// genuine value difference remains a difference.
+fn normalize_map_separators(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    // (waiting for this map/struct entry's separator, square-bracket depth at
+    // which the `{` opened). A comma inside a list value must not begin a new
+    // map entry.
+    let mut frames: Vec<(bool, usize)> = Vec::new();
+    let mut square_depth = 0usize;
+    let mut quoted = false;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            out.push(ch);
+            if quoted && chars.peek() == Some(&'\'') {
+                out.push(chars.next().expect("peeked escaped quote"));
+            } else {
+                quoted = !quoted;
+            }
+            continue;
+        }
+        if !quoted {
+            match ch {
+                '{' => frames.push((true, square_depth)),
+                '}' => {
+                    frames.pop();
+                }
+                ',' => {
+                    if let Some((waiting, entry_depth)) = frames.last_mut() {
+                        if square_depth == *entry_depth {
+                            *waiting = true;
+                        }
+                    }
+                }
+                ':' => {
+                    if let Some((waiting, _)) = frames.last_mut() {
+                        *waiting = false;
+                    }
+                }
+                '=' if frames.last().is_some_and(|(waiting, entry_depth)| {
+                    *waiting && square_depth == *entry_depth
+                }) =>
+                {
+                    out.push(':');
+                    if chars.peek().is_none_or(|next| !next.is_whitespace()) {
+                        out.push(' ');
+                    }
+                    if let Some((waiting, _)) = frames.last_mut() {
+                        *waiting = false;
+                    }
+                    continue;
+                }
+                '[' => square_depth += 1,
+                ']' => square_depth = square_depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// A query that executed but produced different values.
