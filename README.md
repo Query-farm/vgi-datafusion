@@ -59,6 +59,41 @@ ATTACH 'open_meteo?location=https://vgi-open-meteo.rusty-bb6.workers.dev' AS m;
 The alias becomes a DataFusion catalog, so remote objects are addressed as
 `m.<schema>.<function-or-table>`. `DETACH m;` removes it from the session.
 
+HTTP attachments automatically follow an RFC 9728 OAuth challenge. The CLI
+prints a device URL and code, then retries the attach after approval; access and
+refresh tokens remain in the shared attachment state and are not persisted by
+the adapter. A static bearer or previously-issued refresh token can also be
+seeded with DuckDB-compatible options:
+
+```sql
+-- Interactive OAuth is automatic:
+ATTACH 'volcanos' (
+  TYPE vgi,
+  LOCATION 'https://vgi-volcanos.fly.dev/'
+);
+
+-- Explicit credentials (do not put these in checked-in SQL):
+ATTACH 'private' AS p (
+  TYPE vgi,
+  LOCATION 'https://worker.example/',
+  bearer_token '...'
+);
+```
+
+`oauth_refresh_token` is mutually exclusive with `bearer_token`. Credential
+values are redacted from adapter/client debug output, and authenticated pool
+entries are isolated by their shared auth state.
+
+VGI worker-declared attach options are also accepted directly in the option
+list. The adapter discovers their Arrow types, evaluates constant SQL values,
+casts them to the declared schema, enforces required/unknown options, and sends
+one typed row to `catalog_attach`. Local options currently implemented are
+`pool`, `pool_max`, `pool_timeout`, `worker_debug`,
+`launcher_idle_timeout`, `launcher_state_dir`, `data_version_spec`, and
+`implementation_version`. Launcher options are rejected outside a `launch:`
+LOCATION. Cache, secret, companion, and global-function options fail explicitly
+until those integrations exist.
+
 Run the complete Open-Meteo example with a labelled 30-second timeout around
 each interaction:
 

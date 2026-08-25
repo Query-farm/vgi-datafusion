@@ -59,6 +59,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use datafusion::arrow::array::{ArrayRef, BinaryArray, LargeBinaryArray};
+use datafusion::arrow::compute::cast;
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::MemoryCatalogProvider;
 use datafusion::common::{plan_datafusion_err, plan_err, Result as DFResult};
 use datafusion::dataframe::DataFrame;
@@ -67,7 +71,7 @@ use datafusion::logical_expr::AggregateUDF;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
-    Expr, Statement as SQLStatement, Value, ValueWithSpan, VisitMut,
+    Expr, Statement as SQLStatement, Value, ValueWithSpan, VisitMut, Visitor,
 };
 
 use crate::{VgiAggregateUdf, VgiCatalogProvider, VgiConnection, VgiScalarUdf, VgiTableFunction};
@@ -184,15 +188,16 @@ fn parse_duckdb_attach(sql: &str) -> Option<DFResult<AttachSpec>> {
         }
     };
     let rest = rest.trim_start();
-    let rest = match rest.strip_prefix_ci("AS") {
-        Some(r) => r.trim_start(),
-        None => return Some(plan_err!("ATTACH is missing `AS <alias>`: {trimmed}")),
+    let (alias, rest) = match rest.strip_prefix_ci("AS") {
+        Some(r) => {
+            let (alias, rest) = take_ident(r.trim_start());
+            if alias.is_empty() {
+                return Some(plan_err!("ATTACH is missing an alias: {trimmed}"));
+            }
+            (alias, rest)
+        }
+        None => (catalog.clone(), rest),
     };
-
-    let (alias, rest) = take_ident(rest);
-    if alias.is_empty() {
-        return Some(plan_err!("ATTACH is missing an alias: {trimmed}"));
-    }
 
     let mut options = BTreeMap::new();
     let rest = rest.trim_start();
@@ -203,11 +208,18 @@ fn parse_duckdb_attach(sql: &str) -> Option<DFResult<AttachSpec>> {
                 continue;
             }
             let (key, value) = take_ident(pair);
-            let value = value.trim();
+            if key.is_empty() {
+                return Some(plan_err!("ATTACH option has no name: {pair}"));
+            }
             let value = value
-                .strip_prefix('\'')
-                .and_then(|v| v.strip_suffix('\''))
-                .unwrap_or(value);
+                .trim_start()
+                .strip_prefix(":=")
+                .or_else(|| value.trim_start().strip_prefix('='))
+                .unwrap_or(value.trim_start())
+                .trim();
+            if value.is_empty() {
+                return Some(plan_err!("ATTACH option `{key}` has no value"));
+            }
             options.insert(key.to_ascii_lowercase(), value.to_string());
         }
     } else if !rest.is_empty() {
@@ -216,18 +228,30 @@ fn parse_duckdb_attach(sql: &str) -> Option<DFResult<AttachSpec>> {
 
     // `TYPE vgi` is the DuckDB way of naming the storage extension; it carries
     // no information here, where the only storage is VGI.
-    options.remove("type");
+    if let Some(kind) = options.remove("type") {
+        let kind = match option_string(&kind) {
+            Ok(kind) => kind,
+            Err(error) => return Some(Err(error)),
+        };
+        if !kind.eq_ignore_ascii_case("vgi") {
+            return Some(plan_err!("unsupported ATTACH TYPE {kind:?}; expected VGI"));
+        }
+    }
 
     match options
         .remove("location")
         .or_else(|| options.remove("path"))
     {
-        Some(location) if !location.is_empty() => Some(Ok(AttachSpec {
-            catalog,
-            alias,
-            location,
-            options,
-        })),
+        Some(location) => match option_string(&location) {
+            Ok(location) if !location.is_empty() => Some(Ok(AttachSpec {
+                catalog,
+                alias,
+                location,
+                options,
+            })),
+            Ok(_) => Some(plan_err!("ATTACH `location` is empty")),
+            Err(error) => Some(Err(error)),
+        },
         // No LOCATION option: this is the query-string spelling
         // (`'example?location=…'`), where the worker rides in the target
         // itself. Both forms are supported, so hand it to that parser rather
@@ -241,8 +265,20 @@ fn parse_duckdb_attach(sql: &str) -> Option<DFResult<AttachSpec>> {
 fn take_quoted(s: &str) -> Option<(String, &str)> {
     let s = s.trim_start();
     let rest = s.strip_prefix('\'')?;
-    let end = rest.find('\'')?;
-    Some((rest[..end].to_string(), &rest[end + 1..]))
+    let mut out = String::new();
+    let mut chars = rest.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '\'' {
+            if chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                out.push('\'');
+                chars.next();
+                continue;
+            }
+            return Some((out, &rest[index + ch.len_utf8()..]));
+        }
+        out.push(ch);
+    }
+    None
 }
 
 /// Take a bare identifier, returning it and the remainder.
@@ -258,11 +294,27 @@ fn take_ident(s: &str) -> (String, &str) {
 fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
-    let mut in_quote = false;
-    for (i, c) in s.char_indices() {
+    let mut quote = None;
+    let mut depth = 0usize;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if let Some(q) = quote {
+            if c == q {
+                if chars.peek().is_some_and(|(_, next)| *next == q) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            } else if c == '\\' && q == '"' {
+                chars.next();
+            }
+            continue;
+        }
         match c {
-            '\'' => in_quote = !in_quote,
-            ',' if !in_quote => {
+            '\'' | '"' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
                 out.push(&s[start..i]);
                 start = i + 1;
             }
@@ -271,6 +323,27 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     }
     out.push(&s[start..]);
     out
+}
+
+fn option_string(raw: &str) -> DFResult<String> {
+    let raw = raw.trim();
+    if raw.starts_with('\'') {
+        let Some((value, rest)) = take_quoted(raw) else {
+            return plan_err!("unterminated ATTACH string value");
+        };
+        if !rest.trim().is_empty() {
+            return plan_err!("unexpected text after ATTACH string value: {rest}");
+        }
+        Ok(value)
+    } else if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+        Ok(raw[1..raw.len() - 1].replace("\"\"", "\""))
+    } else {
+        Ok(raw.to_string())
+    }
+}
+
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Case-insensitive prefix matching, for SQL keywords.
@@ -562,7 +635,7 @@ fn string_literal(expr: &Expr) -> DFResult<String> {
 }
 
 /// A parsed `ATTACH` target.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct AttachSpec {
     /// The VGI catalog name to attach — the part before `?`.
     pub catalog: String,
@@ -572,6 +645,18 @@ pub struct AttachSpec {
     pub location: String,
     /// Every other option, verbatim.
     pub options: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for AttachSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let option_names = self.options.keys().collect::<Vec<_>>();
+        f.debug_struct("AttachSpec")
+            .field("catalog", &self.catalog)
+            .field("alias", &self.alias)
+            .field("location", &self.location)
+            .field("option_names", &option_names)
+            .finish()
+    }
 }
 
 impl AttachSpec {
@@ -595,7 +680,7 @@ impl AttachSpec {
             let Some((k, v)) = pair.split_once('=') else {
                 return plan_err!("ATTACH option {pair:?} is not key=value");
             };
-            options.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+            options.insert(k.trim().to_ascii_lowercase(), sql_string(v.trim()));
         }
 
         let location = options.remove("location").ok_or_else(|| {
@@ -604,6 +689,7 @@ impl AttachSpec {
                  write ATTACH '{catalog}?location=<worker>' AS {alias}"
             )
         })?;
+        let location = option_string(&location)?;
         if location.is_empty() {
             return plan_err!("ATTACH `location` is empty");
         }
@@ -623,12 +709,105 @@ impl AttachSpec {
     /// — is reachable from SQL, and the spelling matches the DuckDB
     /// extension's `LOCATION` exactly.
     pub fn connection(&self) -> DFResult<VgiConnection> {
-        VgiConnection::from_location(&self.location)
+        use std::time::Duration;
+        use vgi_client::{PoolConfig, WorkerPool};
+
+        let bool_option = |name: &str, default: bool| -> DFResult<bool> {
+            let Some(raw) = self.options.get(name) else {
+                return Ok(default);
+            };
+            option_string(raw)?.parse::<bool>().map_err(|_| {
+                datafusion::common::plan_datafusion_err!(
+                    "ATTACH option `{name}` must be true or false"
+                )
+            })
+        };
+        let integer_option = |name: &str| -> DFResult<Option<u64>> {
+            self.options
+                .get(name)
+                .map(|raw| {
+                    option_string(raw)?.parse::<u64>().map_err(|_| {
+                        datafusion::common::plan_datafusion_err!(
+                            "ATTACH option `{name}` must be a non-negative integer"
+                        )
+                    })
+                })
+                .transpose()
+        };
+
+        let location = vgi_client::VgiLocation::parse(&self.location).map_err(crate::to_df)?;
+        let worker_debug = bool_option("worker_debug", false)?;
+        let launcher_idle_timeout =
+            integer_option("launcher_idle_timeout")?.map(Duration::from_secs);
+        let launcher_state_dir = self
+            .options
+            .get("launcher_state_dir")
+            .map(|raw| option_string(raw))
+            .transpose()?;
+        if launcher_state_dir.as_deref() == Some("") {
+            return plan_err!("launcher_state_dir, if set, must not be empty");
+        }
+        if (launcher_idle_timeout.is_some() || launcher_state_dir.is_some())
+            && !matches!(location, vgi_client::VgiLocation::Launch(_))
+        {
+            return plan_err!(
+                "launcher_idle_timeout / launcher_state_dir are only valid for `launch:` LOCATIONs"
+            );
+        }
+        let use_pool = bool_option("pool", true)?;
+        let pool = if !use_pool {
+            WorkerPool::new(PoolConfig::disabled())
+        } else {
+            let defaults = PoolConfig::default();
+            WorkerPool::new(PoolConfig {
+                max_idle: integer_option("pool_max")?
+                    .map(|v| v as usize)
+                    .unwrap_or(defaults.max_idle),
+                idle_timeout: integer_option("pool_timeout")?
+                    .map(Duration::from_secs)
+                    .unwrap_or(defaults.idle_timeout),
+            })
+        };
+        let mut connection = VgiConnection::pooled(location, pool).with_connection_options(
+            vgi_client::ConnectionOptions {
+                worker_debug,
+                launcher_idle_timeout,
+                launcher_state_dir: launcher_state_dir.map(Into::into),
+            },
+        );
+
+        let bearer = self
+            .options
+            .get("bearer_token")
+            .map(|v| option_string(v))
+            .transpose()?;
+        let refresh = self
+            .options
+            .get("oauth_refresh_token")
+            .map(|v| option_string(v))
+            .transpose()?;
+        if bearer.is_some() && refresh.is_some() {
+            return plan_err!("cannot specify both bearer_token and oauth_refresh_token");
+        }
+        if let Some(token) = bearer {
+            connection =
+                connection.with_auth(Arc::new(vgi_client::auth::BearerAuth::new(token)))?;
+        } else if let Some(token) = refresh {
+            let auth = vgi_client::auth::OAuthAuth::new(
+                Box::new(vgi_client::auth::oauth::UreqTransport),
+                Box::new(vgi_client::auth::StderrInteraction),
+            )
+            .with_refresh_token(token);
+            connection = connection.with_auth(Arc::new(auth))?;
+        }
+        Ok(connection)
     }
 }
 
 async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
-    let conn = spec.connection()?;
+    let mut conn = spec.connection()?;
+    let options = build_attach_options(ctx, &conn, spec).await?;
+    conn = conn.with_catalog_attach_options(&spec.catalog, options);
     let provider = VgiCatalogProvider::discover(conn.clone(), &spec.catalog).await?;
     register_table_functions(ctx, &conn, spec, &provider);
     register_scalar_functions(ctx, &conn, spec, &provider);
@@ -636,6 +815,229 @@ async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
     register_scalar_macros(ctx, spec, &provider);
     ctx.register_catalog(&spec.alias, provider);
     Ok(())
+}
+
+const IMPLEMENTED_LOCAL_OPTIONS: &[&str] = &[
+    "pool",
+    "pool_max",
+    "pool_timeout",
+    "worker_debug",
+    "launcher_idle_timeout",
+    "launcher_state_dir",
+    "data_version_spec",
+    "implementation_version",
+    "bearer_token",
+    "oauth_refresh_token",
+];
+
+const UNAVAILABLE_LOCAL_OPTIONS: &[&str] = &[
+    "cache",
+    "secrets",
+    "attach_companions",
+    "attach_companion_secrets",
+    "global_functions",
+];
+
+async fn build_attach_options(
+    ctx: &SessionContext,
+    conn: &VgiConnection,
+    spec: &AttachSpec,
+) -> DFResult<vgi_client::AttachOptions> {
+    for name in UNAVAILABLE_LOCAL_OPTIONS {
+        if spec.options.contains_key(*name) {
+            return plan_err!("ATTACH option `{name}` is not supported by vgi-datafusion yet");
+        }
+    }
+
+    let string = |name: &str| -> DFResult<Option<String>> {
+        spec.options
+            .get(name)
+            .map(|raw| option_string(raw))
+            .transpose()
+    };
+    let mut out = vgi_client::AttachOptions {
+        options: None,
+        data_version_spec: string("data_version_spec")?,
+        implementation_version: string("implementation_version")?,
+    };
+    let worker_values = spec
+        .options
+        .iter()
+        .filter(|(name, _)| !IMPLEMENTED_LOCAL_OPTIONS.contains(&name.as_str()))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if worker_values.is_empty() {
+        return Ok(out);
+    }
+
+    let c = conn.clone();
+    let catalog_name = spec.catalog.clone();
+    let catalog = tokio::task::spawn_blocking(move || {
+        let mut client = c.connect()?;
+        client
+            .catalogs()
+            .map_err(crate::to_df)?
+            .into_iter()
+            .find(|info| info.name == catalog_name)
+            .ok_or_else(|| {
+                datafusion::common::DataFusionError::Plan(format!(
+                    "worker exposes no catalog named `{catalog_name}`"
+                ))
+            })
+    })
+    .await
+    .map_err(|e| datafusion::common::DataFusionError::External(Box::new(e)))??;
+    let specs = vgi_client::decode_attach_option_specs(&catalog).map_err(crate::to_df)?;
+    let accepted = specs
+        .iter()
+        .map(|spec| spec.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    for name in worker_values.keys() {
+        if !specs
+            .iter()
+            .any(|spec| spec.name.eq_ignore_ascii_case(name))
+        {
+            return plan_err!(
+                "unknown ATTACH option `{name}` for catalog `{}`; accepted worker options: {}",
+                spec.catalog,
+                if accepted.is_empty() {
+                    "(none)"
+                } else {
+                    &accepted
+                }
+            );
+        }
+    }
+    let missing = specs
+        .iter()
+        .filter(|decl| {
+            decl.required
+                && !worker_values
+                    .keys()
+                    .any(|name| decl.name.eq_ignore_ascii_case(name))
+        })
+        .map(|decl| format!("`{}`", decl.name))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return plan_err!(
+            "catalog `{}` requires ATTACH option(s) {}",
+            spec.catalog,
+            missing.join(", ")
+        );
+    }
+
+    let mut fields = Vec::with_capacity(worker_values.len());
+    let mut arrays = Vec::with_capacity(worker_values.len());
+    for (name, raw) in worker_values {
+        let declared = specs
+            .iter()
+            .find(|decl| decl.name.eq_ignore_ascii_case(&name))
+            .expect("validated above");
+        let array = evaluate_attach_option(ctx, &declared.name, &raw, &declared.data_type).await?;
+        fields.push(Field::new(&declared.name, declared.data_type.clone(), true));
+        arrays.push(array);
+    }
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|error| {
+        datafusion::common::DataFusionError::Plan(format!(
+            "could not build VGI ATTACH options: {error}"
+        ))
+    })?;
+    out.options = Some(vgi_client::encode_attach_options(&batch).map_err(crate::to_df)?);
+    Ok(out)
+}
+
+async fn evaluate_attach_option(
+    ctx: &SessionContext,
+    name: &str,
+    raw: &str,
+    data_type: &DataType,
+) -> DFResult<ArrayRef> {
+    validate_constant_option(name, raw)?;
+    if matches!(data_type, DataType::Binary | DataType::LargeBinary) {
+        if let Some(bytes) = blob_literal(raw)? {
+            return Ok(match data_type {
+                DataType::Binary => Arc::new(BinaryArray::from(vec![Some(bytes.as_slice())])),
+                DataType::LargeBinary => {
+                    Arc::new(LargeBinaryArray::from(vec![Some(bytes.as_slice())]))
+                }
+                _ => unreachable!(),
+            });
+        }
+    }
+
+    let query = format!("SELECT {raw} AS __vgi_attach_value");
+    let batches = ctx.sql(&query).await?.collect().await?;
+    if batches.len() != 1 || batches[0].num_rows() != 1 || batches[0].num_columns() != 1 {
+        return plan_err!("ATTACH option `{name}` must evaluate to exactly one value");
+    }
+    cast(batches[0].column(0), data_type).map_err(|error| {
+        datafusion::common::DataFusionError::Plan(format!(
+            "cannot cast ATTACH option `{name}` to {data_type}: {error}"
+        ))
+    })
+}
+
+fn validate_constant_option(name: &str, raw: &str) -> DFResult<()> {
+    let mut statements = DFParser::parse_sql(&format!("SELECT {raw}"))?;
+    let Some(DFStatement::Statement(statement)) = statements.pop_front() else {
+        return plan_err!("ATTACH option `{name}` is not a SQL value expression");
+    };
+    struct ConstantsOnly;
+    impl Visitor for ConstantsOnly {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+            match expr {
+                Expr::Identifier(_)
+                | Expr::CompoundIdentifier(_)
+                | Expr::Function(_)
+                | Expr::Subquery(_)
+                | Expr::Exists { .. }
+                | Expr::InSubquery { .. } => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+    if let ControlFlow::Break(()) =
+        datafusion::sql::sqlparser::ast::Visit::visit(statement.as_ref(), &mut ConstantsOnly)
+    {
+        return plan_err!(
+            "ATTACH option `{name}` must be a constant literal, cast, list, or struct expression"
+        );
+    }
+    Ok(())
+}
+
+fn blob_literal(raw: &str) -> DFResult<Option<Vec<u8>>> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let suffix = if lower.ends_with("::blob") {
+        "::blob"
+    } else if lower.ends_with("::binary") {
+        "::binary"
+    } else {
+        return Ok(None);
+    };
+    let value = option_string(raw.trim()[..raw.trim().len() - suffix.len()].trim())?;
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 3 < bytes.len() && bytes[i] == b'\\' && bytes[i + 1] == b'x' {
+            let hex = std::str::from_utf8(&bytes[i + 2..i + 4]).map_err(|_| {
+                datafusion::common::DataFusionError::Plan("invalid BLOB escape".to_string())
+            })?;
+            out.push(u8::from_str_radix(hex, 16).map_err(|_| {
+                datafusion::common::DataFusionError::Plan(format!("invalid BLOB escape `\\x{hex}`"))
+            })?);
+            i += 4;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(Some(out))
 }
 
 fn register_scalar_macros(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalogProvider) {
@@ -884,8 +1286,8 @@ mod tests {
     #[test]
     fn keeps_extra_options_and_lowercases_keys() {
         let s = spec("example?location=w&Pool=false&cache=true");
-        assert_eq!(s.options.get("pool").map(String::as_str), Some("false"));
-        assert_eq!(s.options.get("cache").map(String::as_str), Some("true"));
+        assert_eq!(s.options.get("pool").map(String::as_str), Some("'false'"));
+        assert_eq!(s.options.get("cache").map(String::as_str), Some("'true'"));
         // `location` is consumed, not left in the bag.
         assert!(!s.options.contains_key("location"));
     }
@@ -919,5 +1321,59 @@ mod tests {
         assert!(AttachSpec::parse("example?location=w&bare", "ex").is_err());
         assert!(AttachSpec::parse("?location=w", "ex").is_err());
         assert!(AttachSpec::parse("example?location=", "ex").is_err());
+    }
+
+    #[test]
+    fn launcher_options_are_scoped_and_validated() {
+        let accepted = spec(
+            "example?location=launch:worker&launcher_idle_timeout=0&launcher_state_dir=/tmp/vgi-state&worker_debug=true",
+        );
+        accepted.connection().expect("valid launcher options");
+
+        let err = spec("example?location=worker&launcher_idle_timeout=60")
+            .connection()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only valid for `launch:`"), "{err}");
+
+        let err = spec("example?location=launch:worker&launcher_state_dir=")
+            .connection()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must not be empty"), "{err}");
+
+        let err = spec("example?location=launch:worker&launcher_idle_timeout=-1")
+            .connection()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-negative integer"), "{err}");
+    }
+
+    #[test]
+    fn duckdb_attach_defaults_alias_and_keeps_nested_values() {
+        let parsed = parse_duckdb_attach(
+            "ATTACH 'example' (TYPE vgi, LOCATION 'worker', opt_list [1, 2], opt_struct {'a': 3, 'b': 'x,y'})",
+        )
+        .expect("recognized")
+        .expect("parsed");
+        assert_eq!(parsed.alias, "example");
+        assert_eq!(parsed.location, "worker");
+        assert_eq!(parsed.options.get("opt_list").unwrap(), "[1, 2]");
+        assert_eq!(
+            parsed.options.get("opt_struct").unwrap(),
+            "{'a': 3, 'b': 'x,y'}"
+        );
+    }
+
+    #[test]
+    fn attach_debug_redacts_values() {
+        let parsed = parse_duckdb_attach(
+            "ATTACH 'example' (TYPE vgi, LOCATION 'https://example', bearer_token 'sentinel-secret')",
+        )
+        .unwrap()
+        .unwrap();
+        let debug = format!("{parsed:?}");
+        assert!(!debug.contains("sentinel-secret"), "{debug}");
+        assert!(debug.contains("bearer_token"), "{debug}");
     }
 }

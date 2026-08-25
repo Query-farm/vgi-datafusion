@@ -93,7 +93,12 @@ pub use table_function::VgiTableFunction;
 pub struct VgiConnection {
     pool: WorkerPool,
     location: VgiLocation,
+    connection_options: vgi_client::ConnectionOptions,
     label: String,
+    /// Shared authentication state for every HTTP client in this attachment.
+    auth: Option<Arc<dyn vgi_client::auth::CatalogAuth>>,
+    /// Per-catalog options used when the session handle is first established.
+    attach_options: Arc<HashMap<String, AttachOptions>>,
     /// Attach handles, one per catalog, established once and reused.
     ///
     /// `attach_opaque_data` is the worker's **session token**, not a
@@ -140,12 +145,58 @@ impl VgiConnection {
     /// share its connections; pass [`vgi_client::PoolConfig::disabled`] to prove
     /// a test does not depend on reuse (the extension's `pool false`).
     pub fn pooled(location: VgiLocation, pool: WorkerPool) -> Self {
+        let auth = matches!(location, VgiLocation::Http(_)).then(|| {
+            Arc::new(vgi_client::auth::OAuthAuth::new(
+                Box::new(vgi_client::auth::oauth::UreqTransport),
+                Box::new(vgi_client::auth::StderrInteraction),
+            )) as Arc<dyn vgi_client::auth::CatalogAuth>
+        });
         Self {
             label: location.label(),
             location,
             pool,
+            connection_options: vgi_client::ConnectionOptions::default(),
+            auth,
+            attach_options: Arc::new(HashMap::new()),
             attached: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Use explicit authentication state for this HTTP connection factory.
+    ///
+    /// Clones share the same state, so OAuth login and refresh are single-flight
+    /// across catalog discovery and parallel scan partitions.
+    pub fn with_auth(mut self, auth: Arc<dyn vgi_client::auth::CatalogAuth>) -> DFResult<Self> {
+        if !matches!(self.location, VgiLocation::Http(_)) {
+            return Err(DataFusionError::Plan(
+                "VGI authentication requires an HTTP(S) LOCATION".to_string(),
+            ));
+        }
+        self.auth = Some(auth);
+        self.attached = Arc::new(Mutex::new(HashMap::new()));
+        Ok(self)
+    }
+
+    /// Configure the options used to attach one catalog.
+    #[must_use]
+    pub fn with_catalog_attach_options(
+        mut self,
+        catalog: impl Into<String>,
+        options: AttachOptions,
+    ) -> Self {
+        let mut configured = self.attach_options.as_ref().clone();
+        configured.insert(catalog.into(), options);
+        self.attach_options = Arc::new(configured);
+        self.attached = Arc::new(Mutex::new(HashMap::new()));
+        self
+    }
+
+    /// Configure local subprocess/launcher behavior for this attachment.
+    #[must_use]
+    pub fn with_connection_options(mut self, options: vgi_client::ConnectionOptions) -> Self {
+        self.connection_options = options;
+        self.attached = Arc::new(Mutex::new(HashMap::new()));
+        self
     }
 
     /// Attach `catalog`, reusing the handle from a previous attach.
@@ -163,9 +214,12 @@ impl VgiConnection {
                 return Ok(handle.clone());
             }
         }
-        let handle = client
-            .attach(catalog, AttachOptions::default())
-            .map_err(to_df)?;
+        let options = self
+            .attach_options
+            .get(catalog)
+            .cloned()
+            .unwrap_or_default();
+        let handle = client.attach(catalog, options).map_err(to_df)?;
         if let Ok(mut cache) = self.attached.lock() {
             cache.insert(catalog.to_string(), handle.clone());
         }
@@ -193,7 +247,16 @@ impl VgiConnection {
     /// when it drops, so callers keep writing `let mut client = conn.connect()?`
     /// and get reuse for free.
     pub fn connect(&self) -> DFResult<PooledClient> {
-        self.pool.acquire(&self.location).map_err(to_df)
+        match &self.auth {
+            Some(auth) => self
+                .pool
+                .acquire_with_auth(&self.location, Arc::clone(auth))
+                .map_err(to_df),
+            None => self
+                .pool
+                .acquire_with_options(&self.location, self.connection_options.clone())
+                .map_err(to_df),
+        }
     }
 
     /// The pool behind this connection, for stats or an explicit flush.

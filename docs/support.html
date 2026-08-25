@@ -382,6 +382,31 @@
 
     .roadmap-card h3 { margin: 10px 0 8px; font-size: 20px; letter-spacing: -.025em; }
     .roadmap-card p { margin: 0; color: var(--muted); font-size: 13px; }
+    .roadmap-card ul {
+      display: grid;
+      gap: 7px;
+      margin: 16px 0 0;
+      padding: 14px 0 0 17px;
+      border-top: 1px solid var(--line);
+      color: #c8c4ba;
+      font-size: 12px;
+    }
+
+    .roadmap-card.ship { border-color: rgba(142, 230, 170, 0.24); }
+    .roadmap-card.ship .priority { color: var(--green); }
+    .roadmap-card.next { border-color: rgba(242, 198, 109, 0.22); }
+    .roadmap-card.next .priority { color: var(--amber); }
+
+    .scope-note {
+      margin: -52px 0 72px;
+      padding: 16px 18px;
+      border-left: 2px solid var(--blue);
+      color: var(--muted);
+      background: rgba(145, 200, 255, 0.06);
+      font-size: 13px;
+    }
+
+    .scope-note strong { color: var(--ink); }
 
     footer {
       display: flex;
@@ -415,7 +440,7 @@
 <body>
   <header class="shell topbar">
     <div class="brand"><span class="mark">VGI</span><span>DataFusion capability map</span></div>
-    <div class="topmeta">implementation snapshot<br>25 August 2026</div>
+    <div class="topmeta">DataFusion 55 snapshot<br>25 August 2026</div>
   </header>
 
   <main class="shell">
@@ -423,20 +448,20 @@
       <div>
         <p class="eyebrow">Protocol integration · current state</p>
         <h1>Remote compute, mapped honestly.</h1>
-        <p class="hero-copy">VGI catalogs, functions, optimizer hints, and split execution now work inside DataFusion. This page separates the production-ready paths from the features that are present only in the Rust client—or still shaped around DuckDB.</p>
+        <p class="hero-copy">VGI catalogs, functions, optimizer hints, and split execution now work inside DataFusion 55. This page records the tested surface and the concrete implementation work still needed for a production release.</p>
       </div>
       <aside class="readiness">
         <div class="readiness-label">Overall status</div>
-        <div class="readiness-value"><span class="pulse"></span>Integration preview</div>
-        <p>Core reads and function execution are green locally. Packaging, released dependencies, result caching, and a first-class observability surface remain.</p>
+        <div class="readiness-value"><span class="pulse"></span>Release candidate</div>
+        <p>The DataFusion 55 CLI, adapter suite, live OAuth-protected Volcanoes attach, and full shared-worker Unix/HTTP transport suites are green. Publishing, caching, observability, and the advanced SQL/protocol gaps below remain.</p>
       </aside>
     </section>
 
     <section class="summary-grid" aria-label="At a glance">
+      <article class="stat"><div class="number">55</div><div class="label">DataFusion release</div><div class="detail">Arrow 59.2 · optimized CLI built</div></article>
       <article class="stat"><div class="number">5</div><div class="label">Transport forms</div><div class="detail">subprocess · HTTP · Unix · TCP · launch</div></article>
-      <article class="stat"><div class="number">4</div><div class="label">Function surfaces</div><div class="detail">table · scalar · aggregate · SQL macro</div></article>
-      <article class="stat"><div class="number">71</div><div class="label">Adapter tests green</div><div class="detail">unit and live worker integration tests</div></article>
-      <article class="stat"><div class="number">2×</div><div class="label">Shared transports tested</div><div class="detail">Unix socket and HTTP SQLLogicTests</div></article>
+      <article class="stat"><div class="number">78</div><div class="label">Adapter tests green</div><div class="detail">unit, auth, attach-option, split, and transport tests</div></article>
+      <article class="stat"><div class="number">107</div><div class="label">CLI tests green</div><div class="detail">plus live release-binary HTTP smoke test</div></article>
     </section>
 
     <section class="answer-grid" aria-label="Direct answers">
@@ -462,7 +487,7 @@
           <li>No <code>CALL enable_logging</code>, <code>duckdb_logs()</code> equivalent, queryable log store, or VGI lifecycle/cache events.</li>
         </ul>
         <pre>RUST_LOG='vgi::worker=debug' \
-  ./target/debug/datafusion-cli</pre>
+  ./target/release/datafusion-cli</pre>
       </article>
     </section>
 
@@ -481,11 +506,11 @@
 
       <div class="matrix">
         <div class="group-title">Catalog & connectivity</div>
-        <div class="capability" data-status="supported"><div class="cap-name">ATTACH / DETACH</div><span class="badge supported">Supported</span><div class="cap-detail">DuckDB-style and query-string attach forms mount a remote VGI catalog under a DataFusion alias. Attach state is reused across pooled connections.</div></div>
+        <div class="capability" data-status="supported"><div class="cap-name">ATTACH / DETACH</div><span class="badge supported">Supported</span><div class="cap-detail">DuckDB-style and query-string forms, optional aliases, local connection options, and worker-declared typed options mount a remote catalog. Required and unknown options are validated before attach.</div></div>
         <div class="capability" data-status="supported"><div class="cap-name">Catalog discovery</div><span class="badge supported">Supported</span><div class="cap-detail">Schemas, tables, table functions, scalar functions, aggregate functions, and scalar SQL macros are discovered and registered.</div></div>
         <div class="capability" data-status="supported"><div class="cap-name">Transports</div><span class="badge supported">Supported</span><div class="cap-detail">Bare subprocess commands, HTTP, Unix sockets, TCP, and shared <code>launch:</code> workers use the same LOCATION spelling as DuckDB.</div></div>
         <div class="capability" data-status="supported"><div class="cap-name">Connection pooling</div><span class="badge supported">Supported</span><div class="cap-detail">Each DataFusion scan partition gets an independent VGI connection; idle connections and attach handles are reused.</div></div>
-        <div class="capability" data-status="partial"><div class="cap-name">Authentication</div><span class="badge partial">Partial</span><div class="cap-detail">The Rust client contains bearer/OAuth support, but DataFusion ATTACH options are not yet translated into authenticated connections.</div></div>
+        <div class="capability" data-status="supported"><div class="cap-name">Authentication</div><span class="badge supported">Supported</span><div class="cap-detail">HTTP attaches recover from 401 via RFC 9728 discovery and OAuth device flow, or accept <code>bearer_token</code> / <code>oauth_refresh_token</code>. Credentials are redacted, session-only, single-flight across partitions, and isolated in the pool.</div></div>
         <div class="capability" data-status="missing"><div class="cap-name">Transactions & time travel</div><span class="badge missing">Not wired</span><div class="cap-detail">No DataFusion transaction lifecycle bridge, catalog version pinning, or VGI <code>AT</code> clause surface.</div></div>
 
         <div class="group-title">Functions & SQL</div>
@@ -507,7 +532,7 @@
         <div class="capability" data-status="partial"><div class="cap-name">Locality & partition transforms</div><span class="badge partial">Partial</span><div class="cap-detail">Location hints and transforms survive in the plan, but DataFusion has no scheduler-affinity hook and VGI hash semantics are not assumed to match DataFusion's.</div></div>
         <div class="capability" data-status="missing"><div class="cap-name">Dynamic filters & join keys</div><span class="badge missing">Not wired</span><div class="cap-detail">There is no runtime bridge from DataFusion joins into VGI continuation ticks. Ordinary static predicates remain supported.</div></div>
         <div class="capability" data-status="missing"><div class="cap-name">Table sampling & order hints</div><span class="badge missing">Not wired</span><div class="cap-detail">DataFusion's current table-provider scan callback does not expose the VGI sample and order-hint surfaces used by DuckDB.</div></div>
-        <div class="capability" data-status="partial"><div class="cap-name">Cancellation</div><span class="badge partial">Partial</span><div class="cap-detail">Backpressure is bounded, but blocking worker calls run in <code>spawn_blocking</code>; dropping the async consumer is not yet a complete protocol-level cancellation path.</div></div>
+        <div class="capability" data-status="partial"><div class="cap-name">Cancellation</div><span class="badge partial">Partial</span><div class="cap-detail">Dropping a scan consumer or satisfying a LIMIT sends protocol cancellation to the active scan. Connection, bind, and split-planning calls are still synchronous <code>spawn_blocking</code> work and cannot be interrupted mid-call.</div></div>
 
         <div class="group-title">Caching, observability & mutation</div>
         <div class="capability" data-status="partial"><div class="cap-name">Planning / metadata cache</div><span class="badge partial">Partial</span><div class="cap-detail">Attach handles, table binds, scalar return types, and worker connections are memoized. Split-plan cache age is retained but not used by a reusable plan cache.</div></div>
@@ -519,20 +544,28 @@
 
     <section>
       <div class="section-head">
-        <div><p class="eyebrow">Next meaningful work</p><h2>Close the product gaps</h2></div>
-        <p>These are the highest-leverage additions after the current multi-repository changes are committed and released.</p>
+        <div><p class="eyebrow">Implementation backlog</p><h2>What is left</h2></div>
+        <p>Ordered by what most improves operability and real workloads. Each card names an implementation boundary, not just a broad feature wish.</p>
       </div>
       <div class="roadmap">
-        <article class="roadmap-card"><div class="priority">01 · Reliability surface</div><h3>Structured observability</h3><p>Add a DataFusion-facing event sink with worker messages, RPC phase/timing fields, split identifiers, and cache decisions—usable from the CLI and embedders.</p></article>
-        <article class="roadmap-card"><div class="priority">02 · Performance</div><h3>Wire in result caching</h3><p>Own a bounded <code>ResultCache</code> per integration/session, construct complete security-aware keys, capture batch metadata, and expose stats plus invalidation.</p></article>
-        <article class="roadmap-card"><div class="priority">03 · SQL expressiveness</div><h3>Row-dependent table calls</h3><p>Design an execution-time operator for correlated table-function arguments instead of asking DataFusion's planning-time table-function hook to do a runtime job.</p></article>
+        <article class="roadmap-card ship"><div class="priority">01 · Ship</div><h3>Publish and distribute</h3><p>Turn the working local integration into a reproducible artifact rather than a sibling-checkout build.</p><ul><li>Publish <code>vgi-datafusion</code> against DataFusion 55.</li><li>Upstream or maintain the small DataFusion CLI integration patch.</li><li>Add release CI and packaged CLI artifacts.</li></ul></article>
+        <article class="roadmap-card next"><div class="priority">02 · Operate</div><h3>Structured observability</h3><p>Expose more than worker text through <code>RUST_LOG</code>.</p><ul><li>Add a session-scoped event sink for worker, RPC, split, and cache events.</li><li>Attach query, function, split, duration, and structured-extra fields.</li><li>Offer CLI output and an embedder API; decide whether SQL-queryable history is appropriate.</li></ul></article>
+        <article class="roadmap-card next"><div class="priority">03 · Accelerate</div><h3>Wire in result caching</h3><p>Use the cache facilities and metadata that the Rust client already exposes.</p><ul><li>Own a bounded cache per DataFusion session.</li><li>Build complete keys including catalog version, arguments, projection, filters, and auth scope.</li><li>Expose hit/miss/eviction statistics, invalidation, and memory limits.</li></ul></article>
+        <article class="roadmap-card"><div class="priority">04 · Express</div><h3>Correlated LATERAL execution</h3><p>Make a table-function call depend on columns from each outer row, enabling the one-statement geocode-to-forecast example.</p><ul><li>Add an execution-time table-function operator.</li><li>Define concurrency, ordering, backpressure, and error semantics.</li><li>Avoid one uncontrolled connection per input row.</li></ul></article>
+        <article class="roadmap-card"><div class="priority">05 · Secure</div><h3>Secret resolution</h3><p>Authentication is wired; the remaining security gap is referring to credentials without embedding them in SQL text.</p><ul><li>Integrate a named secret resolver for embedders and the CLI.</li><li>Define refresh-token persistence as an explicit opt-in, separate from session state.</li><li>Carry auth identity into future result-cache keys without storing token material.</li></ul></article>
+        <article class="roadmap-card"><div class="priority">06 · Interrupt</div><h3>End-to-end cancellation</h3><p>Extend active-scan cancellation to every blocking RPC phase.</p><ul><li>Make connect, attach, bind, and plan calls cancellation-aware.</li><li>Propagate DataFusion task cancellation and deadlines.</li><li>Test stalled workers before and after scan creation.</li></ul></article>
+        <article class="roadmap-card"><div class="priority">07 · Optimize</div><h3>Runtime and ordering hints</h3><p>Bridge optimizer information that currently stops at the DataFusion boundary.</p><ul><li>Push ORDER BY and sampling hints where semantics match.</li><li>Connect runtime join filters to VGI continuation ticks.</li><li>Use locality only when a scheduler-affinity contract exists.</li></ul></article>
+        <article class="roadmap-card"><div class="priority">08 · Generalize</div><h3>Richer table input</h3><p>Remove the scalar-subquery restriction that limits exchange functions to one input column.</p><ul><li>Represent multi-column table arguments in the logical plan.</li><li>Preserve schema and partitioning through buffered/exchange calls.</li><li>Cover wide, empty, and multi-partition inputs.</li></ul></article>
+        <article class="roadmap-card"><div class="priority">09 · Stream</div><h3>Unbounded split execution</h3><p>Support start-only streaming positions with an execution plan that honestly declares unbounded output.</p><ul><li>Map VGI positions to DataFusion stream semantics.</li><li>Define checkpoints, reconnects, and cancellation.</li><li>Keep bounded scans unchanged.</li></ul></article>
+        <article class="roadmap-card"><div class="priority">10 · Mutate</div><h3>Writes and versioned catalogs</h3><p>Add the protocol surfaces outside today’s read/query focus.</p><ul><li>INSERT, UPDATE, DELETE, DDL, and COPY integration.</li><li>Transaction lifecycle and catalog-version pinning.</li><li>Time-travel and writable-branch SQL design.</li></ul></article>
       </div>
+      <p class="scope-note"><strong>Production gate status:</strong> authentication and fresh shared SQLLogicTest runs are complete (Unix: 283 executed / 50 gated skips / 10,722 assertions; HTTP: 288 / 45 / 10,767). Publishing, structured observability, and cancellation timeout coverage remain release gates. Result caching and correlated LATERAL execution are high-value follow-ons, but do not need to block a read-only preview if their absence is documented.</p>
     </section>
   </main>
 
   <footer class="shell">
     <span>Source of truth: current local <code>vgi-datafusion</code>, <code>vgi-rust</code>, and DataFusion integration code.</span>
-    <span>Core reads green · release packaging pending</span>
+    <span>DataFusion 55 release build green · publishing pending</span>
   </footer>
 
   <script>
