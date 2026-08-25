@@ -73,11 +73,11 @@ worker's weather-code SQL macros, and prints six forecast rows.
 
 ## Two constraints worth knowing before you build
 
-**DataFusion is a path dependency, deliberately.** Released DataFusion 54.1.0
-is built on arrow 58; `vgi-protocol` and the vgi-rust workspace are on arrow 59.
-Those are different `ArrayRef` types and cannot meet. DataFusion's main branch
-has moved to 59.2.0, so this builds against a checkout until a release carrying
-it exists.
+**DataFusion 55 is the supported release.** It uses Arrow 59.2, matching
+`vgi-protocol` and the vgi-rust workspace. The manifest includes both version
+`55.0.0` and a sibling-checkout path: published consumers use the released
+crate, while local `datafusion-cli` development uses one shared copy of
+DataFusion's types.
 
 **Everything blocks.** `vgi-client` is synchronous, like the Python and Java VGI
 clients, so every call runs inside `spawn_blocking`. `VgiConnection` is a

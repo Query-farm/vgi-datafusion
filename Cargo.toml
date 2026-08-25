@@ -16,12 +16,10 @@ vgi-protocol = { version = "0.31.0", path = "../vgi-rust/vgi-protocol" }
 # pinning it separately is how you end up with two incompatible `ArrayRef`
 # types that look identical in the error message.
 #
-# The path dependency is REQUIRED, not a convenience: released DataFusion
-# 54.1.0 is built on arrow 58, while `vgi-protocol` and the whole vgi-rust
-# workspace are on arrow 59. Those are different `ArrayRef` types, so the two
-# cannot meet. DataFusion's main branch has moved to 59.2.0, so this builds
-# against that until a release carrying it exists.
-datafusion = { path = "../datafusion/datafusion/core" }
+# The version makes the crate publishable against the DataFusion 55 release,
+# whose Arrow 59.2 dependency matches vgi-rust. The path keeps sibling checkout
+# development (especially datafusion-cli) on one copy of DataFusion's types.
+datafusion = { version = "55.0.0", path = "../datafusion/datafusion/core" }
 async-trait = "0.1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "rt-multi-thread", "macros", "time"] }
