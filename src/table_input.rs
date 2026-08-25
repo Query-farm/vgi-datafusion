@@ -242,7 +242,7 @@ impl datafusion::catalog::TableProvider for VgiLiteralInputProvider {
 
         let batches = batches
             .into_iter()
-            .map(|batch| crate::conform(batch, &output_schema))
+            .map(|batch| crate::conform(batch, &output_schema, None))
             .collect::<DFResult<Vec<_>>>()?;
         Ok(MemorySourceConfig::try_new_exec(
             &[batches],
@@ -436,7 +436,7 @@ impl datafusion::catalog::TableProvider for VgiTableInputProvider {
 
         let out: Vec<RecordBatch> = out
             .into_iter()
-            .map(|b| crate::conform(b, &schema))
+            .map(|b| crate::conform(b, &schema, None))
             .collect::<DFResult<_>>()?;
 
         // One partition: the exchange is a single conversation with one

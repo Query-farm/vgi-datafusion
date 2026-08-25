@@ -1018,6 +1018,7 @@ impl VgiTableProvider {
             catalog_version,
             at: None,
             constraints: None,
+            column_mapping: None,
             max_workers,
         }))
     }
@@ -1728,6 +1729,7 @@ impl VgiScanExec {
             cache_probe: OnceLock::new(),
             cache_capture: None,
             at: self.at.clone(),
+            column_mapping: self.column_mapping.clone(),
         }
     }
 }
