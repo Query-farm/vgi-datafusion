@@ -57,21 +57,29 @@ group, and individual file. Improvements are accepted by reviewing the diff and
 replacing the baseline deliberately. Unix and HTTP baselines should remain
 separate because transport equivalence is itself part of completion.
 
-## Initial baseline — 2026-08-25
+## Current baseline — 2026-08-25
 
 The canonical EC2 subprocess run of the 327-file normal corpus contains 4,114
-measured positive records:
+measured positive records. This baseline includes the DataFusion-native
+`typeof`, result-cache diagnostic aliases, and `duckdb_logs()` compatibility
+view backed by the adapter's structured event history.
 
-| Metric | Result |
-|---|---:|
-| Files run / skipped by missing environment | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) |
-| Exact results | 1,567 |
-| Rendering-equivalent results | 37 |
-| Genuine value differences | 149 |
-| DuckDB/extension configuration records reported separately | 607 |
-| Timeouts | 0 |
+| Metric | Initial | Current |
+|---|---:|---:|
+| Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
+| Records executed | 2,473 / 4,114 (60.1%) | 2,843 / 4,114 (69.1%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 1,770 / 2,008 (88.1%) |
+| Exact results | 1,567 | 1,733 |
+| Rendering-equivalent results | 37 | 37 |
+| Genuine value differences | 149 | 238 |
+| DuckDB/extension configuration records reported separately | 607 | 607 |
+| Timeouts | 0 | 0 |
+
+The larger mismatch count is expected evidence, not a regression: 255 more
+queries now reach result comparison instead of failing during planning. The
+regression gate separately guarantees that no previously agreeing check was
+lost. `cache/basic.test` is now fully executable with all 14 value checks
+exact.
 
 The deferred writable corpus under `../vgi/test_deferred/writable` is tracked
 as a future input, not mixed into this baseline. Six `.test_slow` files are also
@@ -83,26 +91,29 @@ gates.
 The following order maximizes useful coverage while keeping new DataFusion
 engine work to a minimum:
 
-1. **Corpus adaptation and classification.** There are 678 DuckDB-only failures
-   and 118 parser failures. Add explicit, reviewable equivalents for `typeof`,
-   metadata queries, struct extraction, and harmless dialect differences. Mark
-   extension settings, `duckdb_logs`, and DuckDB storage diagnostics
-   `out_of_scope` when no DataFusion semantic equivalent exists.
+1. **Corpus adaptation and classification.** DuckDB/extension-surface failures
+   fell from 678 to 214; 118 parser failures remain. Continue with reviewable
+   equivalents for metadata queries, struct extraction, and harmless dialect
+   differences. Keep extension settings and DuckDB storage internals
+   `out_of_scope` where DataFusion has no semantic equivalent.
 2. **Advertised function publication and binding.** The largest error shape is
-   662 instances of `table function ... not found`. Resolve these by capability
-   area: many cache, catalog, COPY, and table-in/out functions are advertised by
-   the worker but are not currently published in a form DataFusion can call.
-3. **Table-in/out breadth.** Correlated LATERAL calls account for at least 53
-   explicit failures. Wide table subqueries account for at least another 70;
-   the adapter currently accepts only the single-column expression shape
-   DataFusion exposes naturally. Literal one-row exchange is already wired.
-4. **Result cache breadth.** Memory producer/split caching and conditional
-   revalidation work. Exchange/per-value caching, disk persistence/spilling,
-   compression, single-flight, and DataFusion-native EXPLAIN/metrics remain.
-   Cache is the largest single incomplete group: 297/710 records execute.
+   now 282 instances of `table function ... not found`, down from 655. Resolve
+   the remainder by capability area, prioritizing functions that map to an
+   existing DataFusion table-provider or UDTF API.
+3. **Result cache breadth.** Memory producer/split caching, conditional
+   revalidation, diagnostics, flush/reap, and compatible event inspection work.
+   Exchange/per-value caching, disk persistence/spilling, compression,
+   single-flight, worker-log forwarding, and DataFusion-native EXPLAIN/metrics
+   remain. Cache execution improved from 297/710 to 533/710 records.
+4. **Table-in/out engine boundary.** Correlated LATERAL calls account for 53
+   explicit failures. Wide table subqueries account for at least another 70.
+   The adapter accepts the single-column expression shape DataFusion exposes
+   naturally, plus literal one-row exchange. These two gaps are tracked but are
+   not candidates for new DataFusion engine work in this project.
 5. **Catalog objects.** Macros, broader views, and multi-branch catalogs need
-   publication or a documented SQL adaptation. Current execution is 26/90 for
-   catalog, 2/19 for macros, and 2/14 for views.
+   publication or a documented SQL adaptation. Current execution is 43/90 for
+   catalog, 2/19 for macros, and 2/14 for views; part of the catalog increase is
+   diagnostic-query compatibility rather than new catalog functionality.
 6. **Secrets and authenticated fixtures.** Twenty-two failures explicitly lack
    a `VgiSecretResolver`. Add deterministic corpus resolvers before judging the
    worker behavior; keep real OAuth and external-service tests in the blocked
