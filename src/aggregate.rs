@@ -110,13 +110,14 @@ impl AggregateUDFImpl for VgiAggregateUdf {
     fn return_type(&self, arg_types: &[DataType]) -> DFResult<DataType> {
         // The worker resolves the output type at bind, from the argument
         // types — there is nothing static to declare, so ask it.
-        bind_output_type(
-            &self.conn,
-            &self.catalog,
-            &self.schema_name,
-            &self.function,
-            arg_types,
-        )
+        let conn = self.conn.clone();
+        let catalog = self.catalog.clone();
+        let schema_name = self.schema_name.clone();
+        let function = self.function.clone();
+        let arg_types = arg_types.to_vec();
+        crate::run_blocking_planner_call(move || {
+            bind_output_type(&conn, &catalog, &schema_name, &function, &arg_types)
+        })
     }
 
     /// The intermediate state: one list per argument, holding the input rows.
@@ -163,7 +164,7 @@ fn bind_output_type(
     arg_types: &[DataType],
 ) -> DFResult<DataType> {
     use datafusion::arrow::datatypes::Schema;
-    use vgi_client::{AttachOptions, BindSpec, FunctionType};
+    use vgi_client::{BindSpec, FunctionType};
 
     let input_schema = Schema::new(input_fields(arg_types));
     let mut client = conn.connect()?;
@@ -303,7 +304,7 @@ impl Accumulator for VgiAccumulator {
     fn evaluate(&mut self) -> DFResult<ScalarValue> {
         use datafusion::arrow::array::RecordBatch;
         use datafusion::arrow::datatypes::Schema;
-        use vgi_client::{with_group_ids, AttachOptions, BindSpec, FunctionType};
+        use vgi_client::{with_group_ids, BindSpec, FunctionType};
 
         let columns = self.collected()?;
         let schema = Arc::new(Schema::new(input_fields(&self.arg_types)));

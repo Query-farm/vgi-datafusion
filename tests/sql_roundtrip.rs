@@ -9,7 +9,10 @@ use std::path::PathBuf;
 
 use datafusion::arrow::array::Array;
 use datafusion::catalog::TableProvider;
-use datafusion::prelude::SessionContext;
+use datafusion::common::stats::Precision;
+use datafusion::common::ScalarValue;
+use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
+use datafusion::prelude::{SessionConfig, SessionContext};
 use vgi_datafusion::{VgiConnection, VgiTableProvider};
 
 /// Locate the worker built by the sibling `vgi-rust` workspace.
@@ -98,6 +101,55 @@ async fn datafusion_aggregates_over_remote_rows() -> datafusion::error::Result<(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn blended_literal_table_function_runs_as_a_one_row_exchange() -> datafusion::error::Result<()>
+{
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT geohash FROM ex.main.geo_encode(52.52, 13.41, precision := 2)",
+    )
+    .await?
+    .collect()
+    .await?;
+    let values = batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::StringArray>()
+                .expect("geohash is Utf8")
+                .clone();
+            (0..values.len()).map(move |index| values.value(index).to_string())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec!["52.52:13.41"]);
+
+    let batches = vgi_datafusion::sql(&ctx, "SELECT ex.main.vgi_multiply(6, 7) AS answer")
+        .await?
+        .collect()
+        .await?;
+    let answer = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("macro result is Int64")
+        .value(0);
+    assert_eq!(answer, 42, "catalog scalar macros expand locally");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn projection_reaches_the_worker() -> datafusion::error::Result<()> {
     let worker = skip_without_worker!();
     let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
@@ -119,6 +171,40 @@ async fn projection_reaches_the_worker() -> datafusion::error::Result<()> {
     for b in &batches {
         assert_eq!(b.num_columns(), 1, "projection should narrow the scan");
     }
+    Ok(())
+}
+
+/// A function that does not advertise projection pushdown emits its full
+/// schema. The adapter must leave projection IDs off the wire and narrow the
+/// result locally by name; otherwise the strict client rejects the batch (or,
+/// worse, `SELECT b` can return column `a`).
+#[tokio::test(flavor = "multi_thread")]
+async fn projection_stays_local_when_the_worker_does_not_opt_in() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+
+    let ctx = SessionContext::new();
+    let table = VgiTableProvider::bind(conn, "example", "main", "cache_multicol").await?;
+    ctx.register_table("remote", table)?;
+
+    let batches = ctx
+        .sql("SELECT b FROM remote ORDER BY b")
+        .await?
+        .collect()
+        .await?;
+    let values = batches
+        .iter()
+        .flat_map(|batch| {
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                .expect("b is int64")
+                .clone();
+            (0..column.len()).map(move |i| column.value(i))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![0, 10, 20, 30]);
     Ok(())
 }
 
@@ -379,6 +465,73 @@ async fn a_disjunction_widens_correctly() -> datafusion::error::Result<()> {
 // and there is no rendezvous for that at planning time. A split token names its
 // own work, so each partition redeems independently and no rendezvous is needed.
 
+/// The canonical VGI split corpus binds `n` and `splits` by name. DataFusion's
+/// table planner rejects named FunctionArgs before the UDTF hook, so the SQL
+/// wrapper carries them through a private expression and restores their names.
+/// Reversing them here proves they were not merely treated positionally.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_arguments_bind_by_name_from_sql() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT count(*) AS n, count(DISTINCT n) AS d \
+         FROM ex.main.split_sequence(splits := 7, n := 123)",
+    )
+    .await?
+    .collect()
+    .await?;
+    for column in 0..2 {
+        let value = batches[0]
+            .column(column)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("count is int64")
+            .value(0);
+        assert_eq!(value, 123);
+    }
+    Ok(())
+}
+
+/// DataFusion wraps an explained statement in its own AST node. The VGI SQL
+/// pre-pass must recurse through that wrapper or DataFusion sees the raw named
+/// arguments and rejects them before the table function can bind.
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_rewrites_named_table_function_arguments() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "EXPLAIN SELECT * FROM ex.main.split_sequence(splits := 7, n := 123)",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert!(
+        batches.iter().any(|batch| batch.num_rows() > 0),
+        "EXPLAIN should return a plan"
+    );
+    Ok(())
+}
+
 /// The baseline every other split assertion rests on: a split scan must return
 /// row-for-row what the same data returns unsplit. If this disagrees, nothing
 /// else about splits is meaningful.
@@ -419,6 +572,155 @@ async fn a_split_scan_returns_every_row_exactly_once() -> datafusion::error::Res
     };
     assert_eq!(col(0), 1000, "rows were lost or duplicated across splits");
     assert_eq!(col(1), 1000, "splits overlapped: {} distinct", col(1));
+    Ok(())
+}
+
+/// Pagination and statistics are the two client-facing pieces added after the
+/// initial split implementation. A total advertised only on the final page is
+/// intentionally not a plan-level fact (first-page-wins), so the adapter must
+/// derive the exact cardinality from the complete split enumeration.
+#[tokio::test(flavor = "multi_thread")]
+async fn paginated_splits_compose_and_publish_exact_statistics() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+
+    let ctx = SessionContext::new();
+    let provider = VgiTableProvider::bind_with_arguments(
+        conn,
+        "example",
+        "main",
+        "split_paginated",
+        vgi_client::Arguments::new()
+            .named("n", 137i64)
+            .named("splits", 13i64),
+    )
+    .await?;
+
+    let plan = provider.scan(&ctx.state(), None, &[], None).await?;
+    let statistics = StatisticsContext::new().compute(plan.as_ref(), &StatisticsArgs::new())?;
+    assert_eq!(statistics.num_rows, Precision::Exact(137));
+
+    let partition_count = plan.properties().output_partitioning().partition_count();
+    let mut partition_rows = 0usize;
+    for partition in 0..partition_count {
+        let statistics = StatisticsContext::new().compute(
+            plan.as_ref(),
+            &StatisticsArgs::new().with_partition(Some(partition)),
+        )?;
+        let Precision::Exact(rows) = statistics.num_rows else {
+            panic!("partition {partition} did not retain exact split row counts");
+        };
+        partition_rows += rows;
+    }
+    assert_eq!(partition_rows, 137);
+
+    ctx.register_table("remote", provider)?;
+    let batches = ctx
+        .sql("SELECT count(*) AS n, count(DISTINCT n) AS d FROM remote")
+        .await?
+        .collect()
+        .await?;
+    let count = |column: usize| {
+        batches[0]
+            .column(column)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("count is int64")
+            .value(0)
+    };
+    assert_eq!(count(0), 137, "a plan page was dropped or repeated");
+    assert_eq!(count(1), 137, "paginated split ranges overlap");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn split_optimizer_metadata_reaches_datafusion() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let provider = VgiTableProvider::bind_with_arguments(
+        conn,
+        "example",
+        "main",
+        "split_partitioned",
+        vgi_client::Arguments::new()
+            .named("rows_per_country", 3i64)
+            .named("require_plan_context", true),
+    )
+    .await?;
+
+    let plan = provider.scan(&ctx.state(), None, &[], None).await?;
+    let statistics = StatisticsContext::new().compute(plan.as_ref(), &StatisticsArgs::new())?;
+    assert_eq!(statistics.num_rows, Precision::Exact(12));
+    assert_eq!(statistics.total_byte_size, Precision::Inexact(192));
+    assert!(
+        plan.properties().output_ordering().is_some(),
+        "one VGI split per DataFusion partition preserves within-split ordering"
+    );
+
+    let first = StatisticsContext::new().compute(
+        plan.as_ref(),
+        &StatisticsArgs::new().with_partition(Some(0)),
+    )?;
+    assert_eq!(first.num_rows, Precision::Exact(3));
+    assert!(matches!(
+        (&first.column_statistics[0].min_value, &first.column_statistics[0].max_value),
+        (
+            Precision::Exact(ScalarValue::Utf8(Some(min))),
+            Precision::Exact(ScalarValue::Utf8(Some(max)))
+        ) if min == max
+    ));
+
+    // Execution is part of this test: the fixture refuses a split init unless
+    // the plan's execution_id and init_opaque_data are echoed unchanged.
+    ctx.register_table("remote", provider)?;
+    let batches = ctx.sql("SELECT * FROM remote").await?.collect().await?;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        12
+    );
+    Ok(())
+}
+
+/// More claims than DataFusion partitions forces each connection to redeem a
+/// token group sequentially, the execution shape used after bin-packing.
+#[tokio::test(flavor = "multi_thread")]
+async fn many_splits_are_redeemed_through_fewer_partitions() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+
+    let ctx = SessionContext::new();
+    let provider = VgiTableProvider::bind_with_arguments(
+        conn,
+        "example",
+        "main",
+        "split_many",
+        vgi_client::Arguments::new()
+            .named("n", 4096i64)
+            .named("splits", 257i64),
+    )
+    .await?;
+    let plan = provider.scan(&ctx.state(), None, &[], None).await?;
+    assert!(
+        plan.properties().output_partitioning().partition_count() < 257,
+        "the test must exercise grouped claims rather than one partition per split"
+    );
+
+    ctx.register_table("remote", provider)?;
+    let batches = ctx
+        .sql("SELECT count(*) AS n, count(DISTINCT n) AS d FROM remote")
+        .await?
+        .collect()
+        .await?;
+    for column in 0..2 {
+        let value = batches[0]
+            .column(column)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("count is int64")
+            .value(0);
+        assert_eq!(value, 4096);
+    }
     Ok(())
 }
 
@@ -539,8 +841,6 @@ async fn a_zero_row_split_does_not_end_the_scan() -> datafusion::error::Result<(
 /// ever read.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_split_scan_reports_more_than_one_partition() -> datafusion::error::Result<()> {
-    use datafusion::physical_plan::ExecutionPlan;
-
     let worker = skip_without_worker!();
     let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
 

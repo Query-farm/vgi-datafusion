@@ -15,22 +15,22 @@
 //! functions are reachable as bare tables through the schema provider, and
 //! argument-taking ones are reachable as table functions through this.
 //!
-//! # Positional arguments only
+//! # Named arguments
 //!
 //! VGI functions take named arguments too — `sequence(10, batch_size := 5)` is
-//! ordinary in the DuckDB extension. DataFusion cannot express that: both
-//! spellings are refused during planning, not parsing —
+//! ordinary in the DuckDB extension. DataFusion's `TableFactor::Table` planner
+//! rejects that form before [`TableFunctionImpl`] can see it —
 //!
 //! ```text
 //! SELECT * FROM generate_series(1, 3, step => 1);
 //! Error during planning: Unsupported function argument type: step => 1
 //! ```
 //!
-//! — so [`TableFunctionArgs`] carries a positional `&[Expr]` and there is
-//! nowhere to put a name. Named arguments therefore need a DataFusion change,
-//! and until then a caller must pass positionally or the worker must accept it.
-//! [`VgiTableFunction::call_with_args`] rejects an aliased argument with that
-//! explanation rather than silently dropping the name.
+//! [`crate::sql`] therefore rewrites each named argument to a private one-field
+//! struct literal before planning. [`TableFunctionArgs`] carries that ordinary
+//! expression through, and this module unwraps it into [`Arguments::named`].
+//! Calls made directly through `SessionContext::sql` do not pass through that
+//! compatibility rewrite and retain DataFusion's limitation.
 //!
 //! # Arguments must be constants
 //!
@@ -44,7 +44,7 @@ use datafusion::common::{plan_err, Result as DFResult, ScalarValue};
 use datafusion::logical_expr::Expr;
 use vgi_client::{ArgValue, Arguments};
 
-use crate::{VgiConnection, VgiTableProvider};
+use crate::{catalog::TableFunctionMetadata, VgiConnection, VgiTableProvider};
 
 /// One VGI table function, callable with arguments.
 #[derive(Debug)]
@@ -53,27 +53,24 @@ pub struct VgiTableFunction {
     catalog: String,
     schema_name: String,
     function: String,
-    /// Whether the worker declared this a `TableBufferingFunction`. Only
-    /// consulted for a call that carries a table argument, since that is the
-    /// only shape where the two protocols diverge here.
-    buffered: bool,
+    metadata: Option<TableFunctionMetadata>,
 }
 
 impl VgiTableFunction {
     /// Wrap a worker function as a DataFusion table function.
-    pub fn new(
+    pub(crate) fn new(
         conn: VgiConnection,
         catalog: impl Into<String>,
         schema_name: impl Into<String>,
         function: impl Into<String>,
-        buffered: bool,
+        metadata: Option<TableFunctionMetadata>,
     ) -> Self {
         Self {
             conn,
             catalog: catalog.into(),
             schema_name: schema_name.into(),
             function: function.into(),
-            buffered,
+            metadata,
         }
     }
 
@@ -97,45 +94,175 @@ impl TableFunctionImpl for VgiTableFunction {
                 .map(|(_, e)| e.clone())
                 .collect();
             let arguments = to_arguments(&self.function, &scalars)?;
-            return crate::table_input::VgiTableInputProvider::bind_blocking(
-                self.conn.clone(),
-                &self.catalog,
-                &self.schema_name,
-                &self.function,
-                arguments,
-                table_arg,
-                self.buffered,
-            )
+            let conn = self.conn.clone();
+            let catalog = self.catalog.clone();
+            let schema_name = self.schema_name.clone();
+            let function = self.function.clone();
+            let buffered = self.metadata.as_ref().is_some_and(|m| m.buffered);
+            return crate::run_blocking_planner_call(move || {
+                crate::table_input::VgiTableInputProvider::bind_blocking(
+                    conn,
+                    &catalog,
+                    &schema_name,
+                    &function,
+                    arguments,
+                    table_arg,
+                    buffered,
+                )
+            })
+            .map(|p| p as Arc<dyn TableProvider>);
+        }
+
+        // A blended table-in/out function exposes its positional arguments as
+        // per-row input columns. A literal call is therefore a one-row exchange,
+        // not a producer scan. Binding it as a producer gives the worker no
+        // input and can continuation-loop forever while waiting for a row.
+        if let Some(metadata) = self.metadata.as_ref().filter(|m| m.input_from_args) {
+            let (arguments, input_schema, input) =
+                blended_literal_input(&self.function, &metadata.specs, args.exprs())?;
+            let conn = self.conn.clone();
+            let catalog = self.catalog.clone();
+            let schema_name = self.schema_name.clone();
+            let function = self.function.clone();
+            return crate::run_blocking_planner_call(move || {
+                crate::table_input::VgiLiteralInputProvider::bind_blocking(
+                    conn,
+                    &catalog,
+                    &schema_name,
+                    &function,
+                    arguments,
+                    input_schema,
+                    input,
+                )
+            })
             .map(|p| p as Arc<dyn TableProvider>);
         }
 
         let arguments = to_arguments(&self.function, args.exprs())?;
-        VgiTableProvider::bind_blocking(
-            self.conn.clone(),
-            &self.catalog,
-            &self.schema_name,
-            &self.function,
-            arguments,
-        )
+        let conn = self.conn.clone();
+        let catalog = self.catalog.clone();
+        let schema_name = self.schema_name.clone();
+        let function = self.function.clone();
+        crate::run_blocking_planner_call(move || {
+            VgiTableProvider::bind_blocking(conn, &catalog, &schema_name, &function, arguments)
+        })
         .map(|p| p as Arc<dyn TableProvider>)
     }
+}
+
+/// Split a childless blended call into bind arguments and one input row.
+fn blended_literal_input(
+    function: &str,
+    specs: &vgi_client::ArgSpecs,
+    exprs: &[Expr],
+) -> DFResult<(
+    Arguments,
+    datafusion::arrow::datatypes::SchemaRef,
+    datafusion::arrow::array::RecordBatch,
+)> {
+    use datafusion::arrow::array::RecordBatchOptions;
+    use datafusion::arrow::datatypes::{Field, Schema};
+
+    let positional_specs = specs.positional().collect::<Vec<_>>();
+    let mut positional_index = 0usize;
+    let mut arguments = Arguments::new();
+    let mut fields = Vec::new();
+    let mut columns = Vec::new();
+
+    for (argument_index, expr) in exprs.iter().enumerate() {
+        if let Some((name, value)) = named_arg(function, argument_index, expr)? {
+            arguments = arguments.named(name, value);
+            continue;
+        }
+
+        let spec = positional_specs.get(positional_index).ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!(
+                "VGI function `{function}` received more positional arguments than it declares"
+            )
+        })?;
+        let value = match expr {
+            Expr::Literal(value, _) => value.clone(),
+            Expr::Column(column) => {
+                return plan_err!(
+                    "VGI function `{function}` argument {argument_index} refers to column \
+                     `{column}`; correlated LATERAL table functions are not yet representable \
+                     in DataFusion"
+                )
+            }
+            other => {
+                return plan_err!(
+                    "VGI function `{function}` argument {argument_index} is not a constant: {other}"
+                )
+            }
+        };
+        let value = value.cast_to(&spec.data_type)?;
+        fields.push(Field::new(&spec.name, spec.data_type.clone(), true));
+        columns.push(value.to_array_of_size(1)?);
+        positional_index += 1;
+    }
+
+    let schema = Arc::new(Schema::new(fields));
+    let input = datafusion::arrow::array::RecordBatch::try_new_with_options(
+        schema.clone(),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(1)),
+    )?;
+    Ok((arguments, schema, input))
 }
 
 /// Fold a call's argument expressions into [`Arguments`].
 fn to_arguments(function: &str, exprs: &[Expr]) -> DFResult<Arguments> {
     let mut out = Arguments::new();
     for (i, e) in exprs.iter().enumerate() {
-        out = out.positional(to_arg_value(function, i, e)?);
+        if let Some((name, value)) = named_arg(function, i, e)? {
+            out = out.named(name, value);
+        } else {
+            out = out.positional(to_arg_value(function, i, e)?);
+        }
     }
     Ok(out)
+}
+
+/// Unwrap the private struct literal inserted by `session::rewrite_table_functions`.
+/// DataFusion may constant-fold it to a Struct scalar before the table-function
+/// hook, so both the folded and expression forms are accepted.
+fn named_arg(
+    function_name: &str,
+    index: usize,
+    expr: &Expr,
+) -> DFResult<Option<(String, ArgValue)>> {
+    if let Expr::Literal(ScalarValue::Struct(array), _) = expr {
+        if array.num_columns() == 1 {
+            if let Some(name) = array.fields()[0]
+                .name()
+                .strip_prefix(crate::session::NAMED_ARG_PREFIX)
+            {
+                let value = ScalarValue::try_from_array(array.column(0), 0)?;
+                return scalar_to_arg(function_name, index, &value)
+                    .map(|value| Some((name.to_string(), value)));
+            }
+        }
+    }
+
+    if let Expr::ScalarFunction(function) = expr {
+        if function.name() == "named_struct" && function.args.len() == 2 {
+            if let Expr::Literal(ScalarValue::Utf8(Some(field)), _) = &function.args[0] {
+                if let Some(name) = field.strip_prefix(crate::session::NAMED_ARG_PREFIX) {
+                    return to_arg_value(function_name, index, &function.args[1])
+                        .map(|value| Some((name.to_string(), value)));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn to_arg_value(function: &str, i: usize, expr: &Expr) -> DFResult<ArgValue> {
     match expr {
         Expr::Literal(v, _) => scalar_to_arg(function, i, v),
-        // `f(x := 1)` never reaches here today — DataFusion refuses it during
-        // planning — but an alias can arrive other ways, and dropping the name
-        // would silently change which argument the value binds to.
+        // A SQL named argument is carried by `named_arg` above. An unrelated
+        // alias can still arrive other ways, and dropping it would silently
+        // change which argument the value binds to.
         Expr::Alias(a) => plan_err!(
             "VGI function `{function}` argument {i} is named (`{}`), and DataFusion \
              table functions take positional arguments only; pass it positionally",

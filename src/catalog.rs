@@ -37,15 +37,25 @@ use datafusion::common::{DataFusionError, Result as DFResult};
 
 use crate::{to_df, VgiConnection, VgiTableProvider};
 
+type CachedTable = Result<Arc<dyn TableProvider>, String>;
+
+/// Discovery metadata needed to choose the correct execution protocol for a
+/// callable table function.
+#[derive(Debug, Clone)]
+pub(crate) struct TableFunctionMetadata {
+    pub specs: vgi_client::ArgSpecs,
+    pub buffered: bool,
+    pub input_from_args: bool,
+}
+
 /// One VGI schema.
 #[derive(Debug)]
 pub struct VgiSchemaProvider {
     conn: VgiConnection,
     catalog: String,
     schema_name: String,
-    /// Which advertised table functions are `TableBufferingFunction`s, which
-    /// speak a different protocol from the streaming shape.
-    buffered_functions: std::collections::HashSet<String>,
+    /// Per-function execution shape and argument declarations.
+    table_functions: HashMap<String, TableFunctionMetadata>,
     /// Every name the schema advertises — catalog **tables** and table
     /// **functions**, resolved once at attach.
     ///
@@ -68,10 +78,12 @@ pub struct VgiSchemaProvider {
     /// Aggregate functions in this schema, published into DataFusion's
     /// aggregate registry at attach time.
     aggregates: Vec<String>,
+    /// Scalar SQL macros expanded locally before DataFusion planning.
+    macros: HashMap<String, vgi_client::dtos::MacroInfo>,
     /// Bind results, memoised. An `Err` records a function that will not bind
     /// bare — most fixture functions take arguments — so it is not retried,
     /// and the worker's own reason is kept to report at plan time.
-    bound: Mutex<HashMap<String, Result<Arc<dyn TableProvider>, String>>>,
+    bound: Mutex<HashMap<String, CachedTable>>,
 }
 
 impl VgiSchemaProvider {
@@ -82,7 +94,7 @@ impl VgiSchemaProvider {
         schema_name: &str,
     ) -> DFResult<Arc<Self>> {
         let (c, cat, sch) = (conn.clone(), catalog.to_string(), schema_name.to_string());
-        let (tables, fn_names, scalars, aggregates, buffered_functions) =
+        let (tables, table_functions, scalars, aggregates, macros) =
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat)?;
@@ -98,11 +110,18 @@ impl VgiSchemaProvider {
                 // not the lowercase `table_buffering` value — the same convention
                 // that governs `FunctionKind`. Matched case-insensitively so a
                 // worker that sends either spelling is understood.
-                let buffered: std::collections::HashSet<String> = fns
-                    .iter()
-                    .filter(|f| f.function_type.0.eq_ignore_ascii_case("table_buffering"))
-                    .map(|f| f.name.clone())
-                    .collect();
+                let table_functions = fns
+                    .into_iter()
+                    .map(|f| {
+                        let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
+                        let metadata = TableFunctionMetadata {
+                            buffered: f.function_type.0.eq_ignore_ascii_case("table_buffering"),
+                            input_from_args: f.input_from_args,
+                            specs,
+                        };
+                        Ok::<_, DataFusionError>((f.name, metadata))
+                    })
+                    .collect::<Result<HashMap<_, _>, _>>()?;
                 let scalars = client
                     .functions(&attached, &sch, vgi_client::FunctionKind::Scalar)
                     .map_err(to_df)?;
@@ -112,6 +131,12 @@ impl VgiSchemaProvider {
                     .into_iter()
                     .map(|f| f.name)
                     .collect::<Vec<String>>();
+                let macros = client
+                    .macros(&attached, &sch, vgi_client::MacroKind::Scalar)
+                    .map_err(to_df)?
+                    .into_iter()
+                    .map(|info| (info.name.clone(), info))
+                    .collect::<HashMap<_, _>>();
                 let scalars = scalars
                     .into_iter()
                     .map(|f| {
@@ -119,13 +144,7 @@ impl VgiSchemaProvider {
                         Ok::<_, DataFusionError>((f.name, specs))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, DataFusionError>((
-                    tables,
-                    fns.into_iter().map(|f| f.name).collect::<Vec<String>>(),
-                    scalars,
-                    aggregates,
-                    buffered,
-                ))
+                Ok::<_, DataFusionError>((tables, table_functions, scalars, aggregates, macros))
             })
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))??;
@@ -133,7 +152,12 @@ impl VgiSchemaProvider {
         let tables: HashMap<String, vgi_client::TableInfo> =
             tables.into_iter().map(|t| (t.name.clone(), t)).collect();
         let mut names: Vec<String> = tables.keys().cloned().collect();
-        names.extend(fn_names.into_iter().filter(|n| !tables.contains_key(n)));
+        names.extend(
+            table_functions
+                .keys()
+                .filter(|name| !tables.contains_key(*name))
+                .cloned(),
+        );
 
         Ok(Arc::new(Self {
             conn,
@@ -143,7 +167,8 @@ impl VgiSchemaProvider {
             tables,
             scalars,
             aggregates,
-            buffered_functions,
+            macros,
+            table_functions,
             bound: Mutex::new(HashMap::new()),
         }))
     }
@@ -163,13 +188,13 @@ impl VgiSchemaProvider {
         &self.aggregates
     }
 
-    /// Whether `name` is a buffered (Sink+Source) table function.
-    pub fn is_buffered(&self, name: &str) -> bool {
-        self.buffered_functions.contains(name)
+    /// Discovery metadata for a callable table function.
+    pub(crate) fn table_function_metadata(&self, name: &str) -> Option<&TableFunctionMetadata> {
+        self.table_functions.get(name)
     }
 
     /// Look up a memoised bind without holding the lock across an await.
-    fn cached(&self, name: &str) -> Option<Result<Arc<dyn TableProvider>, String>> {
+    fn cached(&self, name: &str) -> Option<CachedTable> {
         self.bound.lock().ok()?.get(name).cloned()
     }
 }
@@ -287,6 +312,15 @@ impl VgiCatalogProvider {
     /// than `SchemaProvider` exposes (scalar names are not tables).
     pub fn vgi_schemas(&self) -> impl Iterator<Item = (&String, &Arc<VgiSchemaProvider>)> {
         self.schemas.iter()
+    }
+
+    /// Scalar SQL macros, paired with their owning schema.
+    pub(crate) fn scalar_macros(
+        &self,
+    ) -> impl Iterator<Item = (&String, &vgi_client::dtos::MacroInfo)> {
+        self.schemas
+            .iter()
+            .flat_map(|(schema, provider)| provider.macros.values().map(move |info| (schema, info)))
     }
 }
 

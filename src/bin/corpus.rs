@@ -477,7 +477,7 @@ fn record_failure(tally: &mut Tally, sql: &str, err: &str) {
 /// here. They are reported separately rather than counted against conformance,
 /// which would otherwise charge this adapter for not being DuckDB.
 fn not_applicable(sql: &str) -> bool {
-    let head = sql.trim_start().split_whitespace().next().unwrap_or("");
+    let head = sql.split_whitespace().next().unwrap_or("");
     head.eq_ignore_ascii_case("set")
         || head.eq_ignore_ascii_case("pragma")
         || head.eq_ignore_ascii_case("call")

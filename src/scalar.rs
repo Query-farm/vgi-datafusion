@@ -193,31 +193,36 @@ impl VgiScalarUdf {
         }
 
         use datafusion::arrow::datatypes::Schema;
-        use vgi_client::{AttachOptions, BindSpec, FunctionType};
+        use vgi_client::{BindSpec, FunctionType};
 
         let (arguments, columns) = self.split_arguments(arg_types, values);
         let input_schema = Schema::new(columns);
 
-        let mut client = self.conn.connect()?;
-        let attached = self.conn.attach(&mut client, &self.catalog)?;
-        let mut spec = BindSpec::table(&self.function).in_schema(&self.schema_name);
-        spec.function_type = FunctionType::Scalar;
-        spec.arguments = arguments;
+        let conn = self.conn.clone();
+        let catalog = self.catalog.clone();
+        let schema_name = self.schema_name.clone();
+        let function = self.function.clone();
+        let out = crate::run_blocking_planner_call(move || {
+            let mut client = conn.connect()?;
+            let attached = conn.attach(&mut client, &catalog)?;
+            let mut spec = BindSpec::table(&function).in_schema(&schema_name);
+            spec.function_type = FunctionType::Scalar;
+            spec.arguments = arguments;
 
-        let bound = client
-            .bind_with_input(&attached, &spec, &input_schema)
-            .map_err(to_df)?;
-        let schema = bound.output_schema();
-        let out = schema
-            .fields()
-            .first()
-            .map(|f| f.data_type().clone())
-            .ok_or_else(|| {
-                DataFusionError::Plan(format!(
-                    "VGI scalar `{}` bound to an output schema with no columns",
-                    self.function
-                ))
-            })?;
+            let bound = client
+                .bind_with_input(&attached, &spec, &input_schema)
+                .map_err(to_df)?;
+            bound
+                .output_schema()
+                .fields()
+                .first()
+                .map(|field| field.data_type().clone())
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!(
+                        "VGI scalar `{function}` bound to an output schema with no columns"
+                    ))
+                })
+        })?;
 
         if let Ok(mut cache) = self.resolved.lock() {
             cache.insert(key, out.clone());
@@ -364,7 +369,7 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
         let input_schema = Schema::new(fields);
 
         let out = tokio::task::spawn_blocking(move || {
-            use vgi_client::{AttachOptions, BindSpec, FunctionType, ScanOptions};
+            use vgi_client::{BindSpec, FunctionType, ScanOptions};
             let mut client = conn.connect()?;
             let attached = conn.attach(&mut client, &cat)?;
             let mut spec = BindSpec::table(&name).in_schema(&sch);

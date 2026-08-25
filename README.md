@@ -24,14 +24,52 @@ ctx.sql("SELECT count(*) FROM orders").await?.show().await?;
 | Catalog / schema discovery | `CatalogProvider` / `SchemaProvider` | ✅ |
 | Scalar function | `AsyncScalarUDFImpl` | ✅ |
 | Projection & LIMIT pushdown | `scan(projection, limit)` | ✅ |
-| Filter pushdown | `supports_filters_pushdown` | not wired |
-| Table-in-out / buffered | — | **no host construct** |
+| Filter pushdown | `supports_filters_pushdown` | ✅, locally rechecked |
+| Split planning | physical scan partitions | ✅ |
+| Table-in-out / buffered | table-valued subquery argument | ✅, one input column |
 
-DataFusion resolves table-function arguments against an empty schema, so it
-cannot express a table function that takes rows. Exchange-mode VGI functions
-therefore have no direct SQL surface; the routes around it (an async scalar UDF
-returning `List<Struct>` plus `unnest`, or a UDTF taking a table *name*) are
-described in the feasibility study.
+An exchange-mode VGI function is reached with a scalar subquery as its TABLE
+argument. DataFusion constrains a scalar subquery to one column, so wider table
+inputs remain unavailable without an upstream DataFusion planner change.
+
+## VGI-enabled DataFusion CLI
+
+Build the CLI from the sibling DataFusion checkout after adding
+`vgi-datafusion` to `datafusion-cli`:
+
+```shell
+cd ../datafusion
+cargo build -p datafusion-cli
+./target/debug/datafusion-cli
+```
+
+Attach a worker once per CLI session. Both the DuckDB spelling and the compact
+query-string spelling are accepted:
+
+```sql
+ATTACH 'open_meteo' AS m (
+  TYPE vgi,
+  LOCATION 'https://vgi-open-meteo.rusty-bb6.workers.dev'
+);
+
+-- Equivalent:
+ATTACH 'open_meteo?location=https://vgi-open-meteo.rusty-bb6.workers.dev' AS m;
+```
+
+The alias becomes a DataFusion catalog, so remote objects are addressed as
+`m.<schema>.<function-or-table>`. `DETACH m;` removes it from the session.
+
+Run the complete Open-Meteo example with a labelled 30-second timeout around
+each interaction:
+
+```shell
+cargo run --example open_meteo
+```
+
+Set `VGI_OPEN_METEO_LOCATION` to test another deployment and
+`VGI_QUERY_TIMEOUT_SECS` to change the per-query deadline. The harness geocodes
+Glen Allen, feeds the returned coordinates into `forecast_hourly`, expands the
+worker's weather-code SQL macros, and prints six forecast rows.
 
 ## Two constraints worth knowing before you build
 
@@ -49,14 +87,23 @@ anyway.
 
 ## Known gaps
 
-- **Parallel scan partitions.** The plan reports the worker's `max_workers` as
-  its partition count, but only partition 0 currently reads; the rest return
-  empty. Correct, not yet parallel — the missing piece is sharing the primary's
-  `execution_id` across partitions, which needs a rendezvous the adapter does
-  not have. `vgi-client` itself does this correctly and has a test for it.
-- **Filter pushdown** is not wired to `supports_filters_pushdown`, so filters
-  are applied above the scan. VGI can take them; the translation from
-  DataFusion `Expr` to the wire encoding is about 250 lines and is not written.
+- **Streaming positions.** A split that names a start position without an end
+  is unbounded, while this provider declares bounded DataFusion tasks. Such a
+  plan is refused rather than allowed to hang a blocking operator.
+- **Partitioning and locality.** Partition bounds and column statistics feed
+  DataFusion statistics, and within-split ordering is advertised when a physical
+  partition contains exactly one split. VGI partition transforms are not mapped
+  blindly to DataFusion hash partitioning because their hash and partition-number
+  semantics differ. Location hints and cache age are retained in the scan plan,
+  but local DataFusion has no scheduler-affinity or result-plan cache hook for them.
+- **Dynamic filters and join keys.** DataFusion has no adapter bridge from its
+  runtime join filters to VGI continuation ticks yet. Ordinary static filters
+  are pushed and conservatively re-applied locally.
+- **Correlated LATERAL table functions.** DataFusion binds a table function
+  while planning, before an outer row exists. A call such as
+  `LATERAL m.main.forecast_hourly(g.latitude, g.longitude)` is therefore not yet
+  representable; run the geocoder first and pass its coordinates as constants
+  in a second statement.
 
 ## License
 

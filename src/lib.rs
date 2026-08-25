@@ -34,11 +34,10 @@
 //! # What maps cleanly, and what does not
 //!
 //! Producer-mode table functions map onto `TableProvider` almost exactly:
-//! projection, filters and limit all ride the same `scan` call VGI already
-//! pushes down. Exchange-mode functions do not, because DataFusion resolves
-//! table-function arguments against an empty schema and so cannot express a
-//! table function that takes rows. See the feasibility study for the routes
-//! around that.
+//! projection, filters, limit and split claims all ride VGI's scan calls.
+//! Exchange-mode and buffered functions use a scalar subquery as their TABLE
+//! argument; DataFusion restricts that subquery to one column, so wider table
+//! inputs need an upstream planner change.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -46,20 +45,24 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::array::{Array, BooleanArray, Int64Array, StringArray, UnionArray};
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
-use datafusion::common::{DataFusionError, Result as DFResult};
+use datafusion::common::stats::Precision;
+use datafusion::common::{
+    ColumnStatistics, DataFusionError, Result as DFResult, ScalarValue, Statistics,
+};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{Expr, TableType};
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::{expressions::Column, EquivalenceProperties, PhysicalSortExpr};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     execution_plan::{Boundedness, EmissionType},
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, StatisticsArgs,
 };
 use vgi_client::{
-    Arguments, AttachOptions, BindSpec, PlanOptions, PooledClient, ScanOptions, ScanSplitInfo,
-    VgiClient, VgiLocation, WorkerPool,
+    Arguments, AttachOptions, AttachedCatalog, BindSpec, FunctionKind, PlanOptions, PooledClient,
+    ScanOptions, ScanPlan, ScanSplitInfo, VgiClient, VgiLocation, WorkerPool,
 };
 
 mod aggregate;
@@ -249,12 +252,55 @@ fn narrowest_column(bound: &vgi_client::BoundFunction) -> Option<i64> {
         .map(|(i, _)| i as i64)
 }
 
+/// Capabilities that affect how a table scan is planned.
+#[derive(Debug, Clone, Copy, Default)]
+struct FunctionCapabilities {
+    projection_pushdown: bool,
+    /// `None` means discovery could not identify the function, so planning is
+    /// still attempted for compatibility with hidden catalog scan functions
+    /// and older workers.
+    supports_splits: Option<bool>,
+}
+
+/// Capabilities shared by every advertised overload of `function`.
+///
+/// A missing function is conservative rather than exceptional: catalog scan
+/// helpers can be bindable without being advertised as user-callable functions.
+/// Older workers may also omit function discovery entirely while still
+/// supporting direct binds, in which case projection remains local and split
+/// planning is probed directly.
+fn function_capabilities(
+    client: &mut PooledClient,
+    attached: &AttachedCatalog,
+    schema_name: &str,
+    function: &str,
+) -> DFResult<FunctionCapabilities> {
+    let functions = match client.functions(attached, schema_name, FunctionKind::Table) {
+        Ok(functions) => functions,
+        Err(e) if e.error_type == "MethodNotImplementedError" => return Ok(Default::default()),
+        Err(e) => return Err(to_df(e)),
+    };
+    let matches = functions
+        .iter()
+        .filter(|info| info.name == function)
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Ok(Default::default());
+    }
+    Ok(FunctionCapabilities {
+        projection_pushdown: matches
+            .iter()
+            .all(|info| info.projection_pushdown == Some(true)),
+        supports_splits: Some(matches.iter().all(|info| info.supports_splits)),
+    })
+}
+
 /// Make a batch match the schema its plan declared.
 ///
 /// Two cases matter. A zero-column schema is `count(*)`: build an empty batch
 /// that still carries the row count, since dropping the count would lose the
-/// answer. Otherwise take the leading columns, which is what a positional
-/// projection means.
+/// answer. Otherwise select the declared columns by name, which also handles a
+/// worker that correctly ignored projection IDs it never opted into receiving.
 fn conform(
     batch: datafusion::arrow::array::RecordBatch,
     schema: &SchemaRef,
@@ -315,6 +361,24 @@ fn to_df(e: vgi_client::RpcError) -> DataFusionError {
     DataFusionError::External(Box::new(std::io::Error::other(e.to_string())))
 }
 
+/// Run a synchronous VGI planning call outside any Tokio runtime.
+///
+/// DataFusion's table/scalar/aggregate type hooks are synchronous even when the
+/// surrounding planner is async. The HTTP transport uses reqwest's blocking
+/// client, which must not create its private runtime from a Tokio worker thread.
+pub(crate) fn run_blocking_planner_call<T, F>(work: F) -> DFResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> DFResult<T> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("vgi-planner-rpc".to_string())
+        .spawn(work)
+        .map_err(|error| DataFusionError::External(Box::new(error)))?
+        .join()
+        .map_err(|_| DataFusionError::Execution("VGI planner RPC thread panicked".to_string()))?
+}
+
 /// A VGI table function exposed as a DataFusion table.
 #[derive(Debug, Clone)]
 pub struct VgiTableProvider {
@@ -331,6 +395,12 @@ pub struct VgiTableProvider {
     /// over `arguments` and is forwarded verbatim.
     raw_arguments: Option<vgi_client::Bytes>,
     output_schema: SchemaRef,
+    /// The worker opted into receiving projection IDs. Functions that do not
+    /// opt in return their full schema and are narrowed locally instead.
+    projection_pushdown: bool,
+    /// The discovery-time split declaration. `None` means the function was not
+    /// discoverable, so `table_function_plan` is still probed for compatibility.
+    supports_splits: Option<bool>,
     max_workers: usize,
 }
 
@@ -372,15 +442,14 @@ impl VgiTableProvider {
     pub async fn bind_catalog_table(
         conn: VgiConnection,
         catalog: impl Into<String>,
-        schema_name: impl Into<String>,
+        _schema_name: impl Into<String>,
         info: vgi_client::TableInfo,
     ) -> DFResult<Arc<Self>> {
         let catalog = catalog.into();
-        let schema_name = schema_name.into();
         let c = conn.clone();
         let cat2 = catalog.clone();
 
-        let (function, function_schema, arguments, output_schema) =
+        let (function, function_schema, arguments, output_schema, capabilities) =
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat2)?;
@@ -409,12 +478,19 @@ impl VgiTableProvider {
                         .with_arguments(arguments.clone());
                     match client.bind(&attached, &spec) {
                         Ok(bound) => {
+                            let capabilities = function_capabilities(
+                                &mut client,
+                                &attached,
+                                schema,
+                                &scan.function_name,
+                            )?;
                             return Ok::<_, DataFusionError>((
                                 scan.function_name,
                                 schema.clone(),
                                 arguments,
                                 bound.output_schema().clone(),
-                            ))
+                                capabilities,
+                            ));
                         }
                         Err(e) => last_err = Some(e),
                     }
@@ -434,6 +510,8 @@ impl VgiTableProvider {
             arguments,
             raw_arguments: None,
             output_schema,
+            projection_pushdown: capabilities.projection_pushdown,
+            supports_splits: capabilities.supports_splits,
             max_workers: 1,
         }))
     }
@@ -462,6 +540,7 @@ impl VgiTableProvider {
             .with_arguments(arguments.clone());
         let bound = client.bind(&attached, &spec).map_err(to_df)?;
         let output_schema = bound.output_schema().clone();
+        let capabilities = function_capabilities(&mut client, &attached, schema_name, function)?;
         drop(client);
 
         Ok(Arc::new(Self {
@@ -472,6 +551,8 @@ impl VgiTableProvider {
             arguments,
             raw_arguments: None,
             output_schema,
+            projection_pushdown: capabilities.projection_pushdown,
+            supports_splits: capabilities.supports_splits,
             max_workers: 1,
         }))
     }
@@ -491,12 +572,13 @@ impl VgiTableProvider {
         let (cat2, sch2, fn2) = (catalog.clone(), schema_name.clone(), function.clone());
         let args2 = arguments.clone();
 
-        let (output_schema, max_workers) = tokio::task::spawn_blocking(move || {
+        let (output_schema, capabilities, max_workers) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
             let attached = c.attach(&mut client, &cat2)?;
             let spec = BindSpec::table(&fn2).in_schema(&sch2).with_arguments(args2);
             let bound = client.bind(&attached, &spec).map_err(to_df)?;
             let schema = bound.output_schema().clone();
+            let capabilities = function_capabilities(&mut client, &attached, &sch2, &fn2)?;
             // One partition at BIND time, deliberately. The real count is
             // decided at `scan`, where splits are planned.
             //
@@ -511,7 +593,7 @@ impl VgiTableProvider {
             // plan, one partition is also the honest answer: joining an existing
             // execution needs its id shared across partitions, and that
             // rendezvous is exactly what splits remove.
-            Ok::<_, DataFusionError>((schema, 1usize))
+            Ok::<_, DataFusionError>((schema, capabilities, 1usize))
         })
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
@@ -524,6 +606,8 @@ impl VgiTableProvider {
             arguments,
             raw_arguments: None,
             output_schema,
+            projection_pushdown: capabilities.projection_pushdown,
+            supports_splits: capabilities.supports_splits,
             max_workers,
         }))
     }
@@ -546,7 +630,14 @@ impl VgiTableProvider {
         pushdown: filters::Pushdown,
         limit: Option<usize>,
         target_partitions: usize,
-    ) -> DFResult<Option<Vec<Vec<Vec<u8>>>>> {
+    ) -> DFResult<Option<PlannedSplits>> {
+        // An advertised function that did not opt in must retain the ordinary
+        // scan path. Unknown functions are still probed because catalog scan
+        // helpers may intentionally be bindable without being discoverable.
+        if self.supports_splits == Some(false) {
+            return Ok(None);
+        }
+
         let conn = self.conn.clone();
         let catalog = self.catalog.clone();
         let schema_name = self.schema_name.clone();
@@ -650,13 +741,55 @@ impl VgiTableProvider {
                 self.function, unbounded
             )));
         }
+        if plan.start_position.is_some() && plan.end_position.is_none() {
+            return Err(DataFusionError::NotImplemented(format!(
+                "VGI function '{}' returned an unbounded plan range (it names a start position \
+                 and no resolved end frontier). This engine's tasks must terminate.",
+                self.function
+            )));
+        }
 
-        Ok(Some(pack_splits(
-            &plan.splits,
-            target_partitions,
-            plan.max_workers,
-        )))
+        let estimated_total_rows = plan.estimated_total_rows;
+        let estimated_total_bytes = plan.estimated_total_bytes;
+        let mut planned = pack_splits(plan, target_partitions);
+        // Plan-level totals are advisory and first-page-wins. Prefer the sum of
+        // split facts when every split supplied one (which also works for a
+        // paginated plan whose first page omitted its eventual total), then
+        // fall back to the plan estimate.
+        if planned.num_rows == Precision::Absent {
+            planned.num_rows = estimated_total_rows
+                .and_then(|n| usize::try_from(n).ok())
+                .map(Precision::Inexact)
+                .unwrap_or(Precision::Absent);
+        }
+        if planned.total_byte_size == Precision::Absent {
+            planned.total_byte_size = estimated_total_bytes
+                .and_then(|n| usize::try_from(n).ok())
+                .map(Precision::Inexact)
+                .unwrap_or(Precision::Absent);
+        }
+        Ok(Some(planned))
     }
+}
+
+/// One DataFusion partition's split claims and their combined cardinality.
+#[derive(Debug, Clone)]
+struct SplitGroup {
+    split_indices: Vec<usize>,
+    tokens: Vec<Vec<u8>>,
+    num_rows: Precision<usize>,
+    total_byte_size: Precision<usize>,
+}
+
+/// The complete planned scan after split claims have been packed.
+#[derive(Debug, Clone)]
+struct PlannedSplits {
+    groups: Vec<SplitGroup>,
+    num_rows: Precision<usize>,
+    total_byte_size: Precision<usize>,
+    /// The complete VGI plan is retained so every redemption echoes its
+    /// execution context and optimizer metadata remains available.
+    plan: ScanPlan,
 }
 
 /// Pack splits into partition-sized groups, weighted by byte estimate.
@@ -674,15 +807,18 @@ impl VgiTableProvider {
 /// correct, just skew-blind. That is the documented cost of not populating
 /// `estimated_bytes`, and it is why the field is described as load-bearing for
 /// packing engines specifically.
-fn pack_splits(
-    splits: &[ScanSplitInfo],
-    target_partitions: usize,
-    max_workers: Option<i64>,
-) -> Vec<Vec<Vec<u8>>> {
+fn pack_splits(plan: ScanPlan, target_partitions: usize) -> PlannedSplits {
+    let splits = &plan.splits;
     if splits.is_empty() {
-        return Vec::new();
+        return PlannedSplits {
+            groups: Vec::new(),
+            // A zero-split plan is the protocol's definitive "no work" result.
+            num_rows: Precision::Exact(0),
+            total_byte_size: Precision::Exact(0),
+            plan,
+        };
     }
-    let cap = match max_workers {
+    let cap = match plan.max_workers {
         Some(m) if m > 0 => (m as usize).min(target_partitions),
         _ => target_partitions,
     };
@@ -693,7 +829,7 @@ fn pack_splits(
     let mut order: Vec<usize> = (0..splits.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(splits[i].estimated_bytes.unwrap_or(0)));
 
-    let mut groups: Vec<Vec<Vec<u8>>> = vec![Vec::new(); n];
+    let mut group_indices: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut weights: Vec<i64> = vec![0; n];
     for i in order {
         let (lightest, _) = weights
@@ -701,10 +837,74 @@ fn pack_splits(
             .enumerate()
             .min_by_key(|(_, w)| **w)
             .expect("at least one bin");
-        groups[lightest].push(splits[i].token.clone());
+        group_indices[lightest].push(i);
         weights[lightest] += splits[i].estimated_bytes.unwrap_or(1).max(1);
     }
-    groups
+
+    let num_rows = split_row_count(splits.iter());
+    let total_byte_size = split_byte_count(splits.iter());
+    let groups = group_indices
+        .into_iter()
+        .map(|indices| SplitGroup {
+            num_rows: split_row_count(indices.iter().map(|&i| &splits[i])),
+            total_byte_size: split_byte_count(indices.iter().map(|&i| &splits[i])),
+            tokens: indices
+                .iter()
+                .copied()
+                .map(|i| splits[i].token.clone())
+                .collect(),
+            split_indices: indices,
+        })
+        .collect();
+    PlannedSplits {
+        groups,
+        num_rows,
+        total_byte_size,
+        plan,
+    }
+}
+
+/// Sum split row counts without turning partial or malformed estimates into a
+/// false total. Exactness is preserved only when every contributing split says
+/// its count is exact.
+fn split_row_count<'a>(splits: impl Iterator<Item = &'a ScanSplitInfo>) -> Precision<usize> {
+    let mut total = 0usize;
+    let mut exact = true;
+    for split in splits {
+        let Some(rows) = split
+            .estimated_rows
+            .and_then(|rows| usize::try_from(rows).ok())
+        else {
+            return Precision::Absent;
+        };
+        let Some(sum) = total.checked_add(rows) else {
+            return Precision::Absent;
+        };
+        total = sum;
+        exact &= split.rows_exact;
+    }
+    if exact {
+        Precision::Exact(total)
+    } else {
+        Precision::Inexact(total)
+    }
+}
+
+fn split_byte_count<'a>(splits: impl Iterator<Item = &'a ScanSplitInfo>) -> Precision<usize> {
+    let mut total = 0usize;
+    for split in splits {
+        let Some(bytes) = split
+            .estimated_bytes
+            .and_then(|bytes| usize::try_from(bytes).ok())
+        else {
+            return Precision::Absent;
+        };
+        let Some(sum) = total.checked_add(bytes) else {
+            return Precision::Absent;
+        };
+        total = sum;
+    }
+    Precision::Inexact(total)
 }
 
 #[async_trait]
@@ -752,6 +952,11 @@ impl TableProvider for VgiTableProvider {
         };
         let projection_ids: Option<Vec<i64>> =
             projection.map(|p| p.iter().map(|i| *i as i64).collect());
+        let pushed_projection = if self.projection_pushdown {
+            projection_ids.clone()
+        } else {
+            None
+        };
         let pushdown = filters::serialize(filters, &self.output_schema)?;
 
         // Divide the scan into named splits, then bin-pack them into partitions.
@@ -764,7 +969,7 @@ impl TableProvider for VgiTableProvider {
         let target_partitions = state.config_options().execution.target_partitions.max(1);
         let split_groups = self
             .plan_splits(
-                projection_ids.clone(),
+                pushed_projection,
                 pushdown.clone(),
                 limit,
                 target_partitions,
@@ -777,7 +982,7 @@ impl TableProvider for VgiTableProvider {
             // clamp to ONE (empty) partition, because UnknownPartitioning(0)
             // makes CoalescePartitionsExec fail outright and partition
             // statistics assert on the index.
-            Some(groups) => groups.len().max(1),
+            Some(plan) => plan.groups.len().max(1),
         };
 
         Ok(Arc::new(VgiScanExec::new(
@@ -788,6 +993,7 @@ impl TableProvider for VgiTableProvider {
             self.arguments.clone(),
             self.raw_arguments.clone(),
             projection_ids,
+            self.projection_pushdown,
             pushdown,
             limit,
             projected,
@@ -810,6 +1016,7 @@ pub struct VgiScanExec {
     /// A catalog table's worker-supplied argument bytes, forwarded verbatim.
     raw_arguments: Option<vgi_client::Bytes>,
     projection: Option<Vec<i64>>,
+    projection_pushdown: bool,
     pushdown: filters::Pushdown,
     limit: Option<usize>,
     schema: SchemaRef,
@@ -820,7 +1027,11 @@ pub struct VgiScanExec {
     /// The groups are decided at planning time because this engine's partition
     /// count IS its concurrency — there is no equivalent of a reader claiming
     /// its next unit of work mid-scan.
-    split_groups: Option<Vec<Vec<Vec<u8>>>>,
+    split_groups: Option<PlannedSplits>,
+    /// Statistics supplied by split planning, for the whole scan and for each
+    /// physical partition after bin-packing.
+    statistics: Arc<Statistics>,
+    partition_statistics: Vec<Arc<Statistics>>,
 }
 
 impl VgiScanExec {
@@ -833,14 +1044,20 @@ impl VgiScanExec {
         arguments: Arguments,
         raw_arguments: Option<vgi_client::Bytes>,
         projection: Option<Vec<i64>>,
+        projection_pushdown: bool,
         pushdown: filters::Pushdown,
         limit: Option<usize>,
         schema: SchemaRef,
         partitions: usize,
-        split_groups: Option<Vec<Vec<Vec<u8>>>>,
+        split_groups: Option<PlannedSplits>,
     ) -> Self {
+        let equivalence = split_groups
+            .as_ref()
+            .and_then(|planned| split_ordering(&schema, planned))
+            .map(|ordering| EquivalenceProperties::new_with_orderings(schema.clone(), [ordering]))
+            .unwrap_or_else(|| EquivalenceProperties::new(schema.clone()));
         let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
+            equivalence,
             // One partition per connection the worker will accept. VGI hands
             // each connection a disjoint slice, so the partitions really are
             // independent.
@@ -848,6 +1065,38 @@ impl VgiScanExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
+        let (statistics, partition_statistics) = match &split_groups {
+            Some(plan) => {
+                let overall = Arc::new(statistics_for_splits(
+                    &schema,
+                    &plan.plan,
+                    0..plan.plan.splits.len(),
+                    plan.num_rows,
+                    plan.total_byte_size,
+                ));
+                let partitions = if plan.groups.is_empty() {
+                    vec![Arc::clone(&overall)]
+                } else {
+                    plan.groups
+                        .iter()
+                        .map(|group| {
+                            Arc::new(statistics_for_splits(
+                                &schema,
+                                &plan.plan,
+                                group.split_indices.iter().copied(),
+                                group.num_rows,
+                                group.total_byte_size,
+                            ))
+                        })
+                        .collect()
+                };
+                (overall, partitions)
+            }
+            None => {
+                let unknown = Arc::new(Statistics::new_unknown(&schema));
+                (Arc::clone(&unknown), vec![unknown; partitions.max(1)])
+            }
+        };
         Self {
             conn,
             catalog,
@@ -856,13 +1105,220 @@ impl VgiScanExec {
             arguments,
             raw_arguments,
             projection,
+            projection_pushdown,
             pushdown,
             limit,
             schema,
             properties,
             split_groups,
+            statistics,
+            partition_statistics,
         }
     }
+}
+
+fn split_ordering(schema: &SchemaRef, planned: &PlannedSplits) -> Option<Vec<PhysicalSortExpr>> {
+    // VGI's claim is within one split. Concatenating two independently sorted
+    // runs does not make the DataFusion partition sorted, so bin-packing clears
+    // the claim even when every source split names the same ordering.
+    if planned.groups.is_empty()
+        || planned
+            .groups
+            .iter()
+            .any(|group| group.split_indices.len() != 1)
+    {
+        return None;
+    }
+    let fields = planned.plan.sort_order.as_ref()?;
+    if fields.is_empty() {
+        return None;
+    }
+    fields
+        .iter()
+        .map(|field| {
+            let index = schema.index_of(&field.column).ok()?;
+            let options = datafusion::arrow::compute::SortOptions {
+                descending: field.direction.0 == "desc",
+                nulls_first: field.nulls.0 == "nulls_first",
+            };
+            Some(PhysicalSortExpr::new(
+                Arc::new(Column::new(&field.column, index)),
+                options,
+            ))
+        })
+        .collect()
+}
+
+fn statistics_with_estimates(
+    schema: &SchemaRef,
+    num_rows: Precision<usize>,
+    total_byte_size: Precision<usize>,
+) -> Statistics {
+    let mut statistics = Statistics::new_unknown(schema);
+    statistics.num_rows = num_rows;
+    statistics.total_byte_size = total_byte_size;
+    statistics
+}
+
+fn bool_at(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    name: &str,
+    row: usize,
+) -> Option<bool> {
+    let array = batch.column_by_name(name)?;
+    let array = array.as_any().downcast_ref::<BooleanArray>()?;
+    (!array.is_null(row)).then(|| array.value(row))
+}
+
+fn i64_at(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    name: &str,
+    row: usize,
+) -> Option<i64> {
+    let array = batch.column_by_name(name)?;
+    let array = array.as_any().downcast_ref::<Int64Array>()?;
+    (!array.is_null(row)).then(|| array.value(row))
+}
+
+fn statistic_value(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    name: &str,
+    row: usize,
+    target: &DataType,
+) -> Option<ScalarValue> {
+    let union = batch
+        .column_by_name(name)?
+        .as_any()
+        .downcast_ref::<UnionArray>()?;
+    let type_id = union.type_id(row);
+    let offset = union.value_offset(row);
+    let child = union.child(type_id);
+    if child.is_null(offset) {
+        return None;
+    }
+    ScalarValue::try_from_array(child.as_ref(), offset)
+        .ok()?
+        .cast_to(target)
+        .ok()
+}
+
+/// Convert one VGI split's Arrow optimizer metadata into DataFusion's shape.
+///
+/// Worker column statistics have no explicit exactness bit, so their values are
+/// conservative `Inexact`. Partition bounds are the exact `(min, max)` range
+/// named by the split and therefore replace those two fields with `Exact`.
+fn statistics_for_split(schema: &SchemaRef, split: &ScanSplitInfo) -> Statistics {
+    let mut statistics = statistics_with_estimates(
+        schema,
+        split_row_count(std::iter::once(split)),
+        split_byte_count(std::iter::once(split)),
+    );
+    let mut columns: HashMap<String, ColumnStatistics> = HashMap::new();
+
+    if let Some(batch) = &split.column_statistics {
+        if let Some(names) = batch
+            .column_by_name("column_name")
+            .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+        {
+            for row in 0..batch.num_rows() {
+                if names.is_null(row) {
+                    continue;
+                }
+                let name = names.value(row);
+                let Some(field) = schema.field_with_name(name).ok() else {
+                    continue;
+                };
+                let num_rows = statistics.num_rows;
+                let null_count = match (
+                    bool_at(batch, "has_null", row),
+                    bool_at(batch, "has_not_null", row),
+                ) {
+                    (Some(false), _) => Precision::Exact(0),
+                    (_, Some(false)) => num_rows,
+                    _ => Precision::Absent,
+                };
+                let distinct_count = i64_at(batch, "distinct_count", row)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .map(Precision::Inexact)
+                    .unwrap_or(Precision::Absent);
+                let min_value = statistic_value(batch, "min", row, field.data_type())
+                    .map(Precision::Inexact)
+                    .unwrap_or(Precision::Absent);
+                let max_value = statistic_value(batch, "max", row, field.data_type())
+                    .map(Precision::Inexact)
+                    .unwrap_or(Precision::Absent);
+                columns.insert(
+                    name.to_string(),
+                    ColumnStatistics::new_unknown()
+                        .with_null_count(null_count)
+                        .with_distinct_count(distinct_count)
+                        .with_min_value(min_value)
+                        .with_max_value(max_value),
+                );
+            }
+        }
+    }
+
+    if let Some(bounds) = &split.partition_bounds {
+        for field in bounds.schema().fields() {
+            let Some(output) = schema.field_with_name(field.name()).ok() else {
+                continue;
+            };
+            let Some(array) = bounds.column_by_name(field.name()) else {
+                continue;
+            };
+            let min = ScalarValue::try_from_array(array.as_ref(), 0)
+                .and_then(|value| value.cast_to(output.data_type()))
+                .ok();
+            let max = ScalarValue::try_from_array(array.as_ref(), 1)
+                .and_then(|value| value.cast_to(output.data_type()))
+                .ok();
+            let column = columns
+                .entry(field.name().clone())
+                .or_insert_with(ColumnStatistics::new_unknown);
+            column.min_value = min
+                .clone()
+                .map(Precision::Exact)
+                .unwrap_or(Precision::Absent);
+            column.max_value = max
+                .clone()
+                .map(Precision::Exact)
+                .unwrap_or(Precision::Absent);
+            if min.as_ref().is_some_and(|min| !min.is_null()) && min == max {
+                column.distinct_count = Precision::Exact(1);
+            }
+        }
+    }
+
+    statistics.column_statistics = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            columns
+                .remove(field.name())
+                .unwrap_or_else(ColumnStatistics::new_unknown)
+        })
+        .collect();
+    statistics
+}
+
+fn statistics_for_splits(
+    schema: &SchemaRef,
+    plan: &ScanPlan,
+    indices: impl IntoIterator<Item = usize>,
+    num_rows: Precision<usize>,
+    total_byte_size: Precision<usize>,
+) -> Statistics {
+    let split_statistics: Vec<_> = indices
+        .into_iter()
+        .filter_map(|index| plan.splits.get(index))
+        .map(|split| statistics_for_split(schema, split))
+        .collect();
+    let mut statistics = Statistics::try_merge_iter(split_statistics.iter(), schema)
+        .unwrap_or_else(|_| Statistics::new_unknown(schema));
+    statistics.num_rows = num_rows;
+    statistics.total_byte_size = total_byte_size;
+    statistics
 }
 
 impl DisplayAs for VgiScanExec {
@@ -915,6 +1371,21 @@ impl ExecutionPlan for VgiScanExec {
         Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> DFResult<Arc<Statistics>> {
+        Ok(match args.partition() {
+            Some(partition) => self
+                .partition_statistics
+                .get(partition)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(Statistics::new_unknown(&self.schema))),
+            None => Arc::clone(&self.statistics),
+        })
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -927,15 +1398,22 @@ impl ExecutionPlan for VgiScanExec {
         let arguments = self.arguments.clone();
         let raw_arguments = self.raw_arguments.clone();
         let projection = self.projection.clone();
+        let projection_pushdown = self.projection_pushdown;
         let pushdown = self.pushdown.clone();
         let limit = self.limit;
         let out_schema = self.schema.clone();
         // The tokens this partition redeems. An empty group is legal — a plan
         // can pack fewer splits than partitions — and reads as no work.
-        let split_tokens: Option<Vec<Vec<u8>>> = self
+        let split_tokens: Option<Vec<Vec<u8>>> = self.split_groups.as_ref().map(|plan| {
+            plan.groups
+                .get(partition)
+                .map(|group| group.tokens.clone())
+                .unwrap_or_default()
+        });
+        let split_plan = self
             .split_groups
             .as_ref()
-            .map(|groups| groups.get(partition).cloned().unwrap_or_default());
+            .map(|planned| planned.plan.clone());
         // One handle for the blocking scan, one for the stream adapter.
         let scan_schema = self.schema.clone();
 
@@ -966,9 +1444,10 @@ impl ExecutionPlan for VgiScanExec {
                 // needs none. Ask for the single narrowest column instead, then
                 // drop it locally: one column on the wire rather than all of
                 // them, and the row count is preserved either way.
-                let push = match &projection {
-                    Some(p) if p.is_empty() => narrowest_column(&bound).map(|i| vec![i]),
-                    other => other.clone(),
+                let push = match (&projection, projection_pushdown) {
+                    (Some(p), true) if p.is_empty() => narrowest_column(&bound).map(|i| vec![i]),
+                    (other, true) => other.clone(),
+                    (_, false) => None,
                 };
                 // A split scan is genuinely parallel: each partition redeems its
                 // OWN tokens, so no partition has to learn another's execution
@@ -994,11 +1473,12 @@ impl ExecutionPlan for VgiScanExec {
                     // requested even when the projection omits them, or the
                     // worker evaluates the predicate against the wrong column.
                     filter_columns: Some(pushdown.columns.clone()),
-                    split_tokens: split_tokens
-                        .clone()
-                        .map(|ts| ts.into_iter().map(vgi_client::LargeBytes).collect()),
                     row_limit: limit.map(|l| l as i64),
                     ..Default::default()
+                };
+                let opts = match (&split_plan, split_tokens.clone()) {
+                    (Some(plan), Some(tokens)) => plan.redemption_options(tokens, opts),
+                    _ => opts,
                 };
                 let mut scan = client.scan(&bound, &opts).map_err(to_df)?;
 

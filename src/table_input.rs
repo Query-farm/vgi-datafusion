@@ -118,7 +118,7 @@ pub(crate) fn run_exchange(
     input_schema: &Schema,
     inputs: Vec<datafusion::arrow::array::RecordBatch>,
 ) -> DFResult<Vec<datafusion::arrow::array::RecordBatch>> {
-    use vgi_client::{AttachOptions, BindSpec, ScanOptions};
+    use vgi_client::{BindSpec, ScanOptions};
 
     let mut client = conn.connect()?;
     let attached = conn.attach(&mut client, catalog)?;
@@ -146,6 +146,110 @@ pub(crate) fn run_exchange(
     Ok(out)
 }
 
+/// A childless blended table-in/out call whose literal arguments form one
+/// input row.
+#[derive(Debug)]
+pub(crate) struct VgiLiteralInputProvider {
+    conn: VgiConnection,
+    catalog: String,
+    schema_name: String,
+    function: String,
+    arguments: vgi_client::Arguments,
+    input_schema: SchemaRef,
+    input: datafusion::arrow::array::RecordBatch,
+    output_schema: SchemaRef,
+}
+
+impl VgiLiteralInputProvider {
+    pub(crate) fn bind_blocking(
+        conn: VgiConnection,
+        catalog: &str,
+        schema_name: &str,
+        function: &str,
+        arguments: vgi_client::Arguments,
+        input_schema: SchemaRef,
+        input: datafusion::arrow::array::RecordBatch,
+    ) -> DFResult<Arc<Self>> {
+        use vgi_client::BindSpec;
+
+        let mut client = conn.connect()?;
+        let attached = conn.attach(&mut client, catalog)?;
+        let spec = BindSpec::table(function)
+            .in_schema(schema_name)
+            .with_arguments(arguments.clone());
+        let bound = client
+            .bind_with_input(&attached, &spec, input_schema.as_ref())
+            .map_err(to_df)?;
+        let output_schema = bound.output_schema().clone();
+
+        Ok(Arc::new(Self {
+            conn,
+            catalog: catalog.to_string(),
+            schema_name: schema_name.to_string(),
+            function: function.to_string(),
+            arguments,
+            input_schema,
+            input,
+            output_schema,
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl datafusion::catalog::TableProvider for VgiLiteralInputProvider {
+    fn schema(&self) -> SchemaRef {
+        self.output_schema.clone()
+    }
+
+    fn table_type(&self) -> datafusion::logical_expr::TableType {
+        datafusion::logical_expr::TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        use datafusion::datasource::memory::MemorySourceConfig;
+
+        let (conn, catalog, schema_name, function, arguments) = (
+            self.conn.clone(),
+            self.catalog.clone(),
+            self.schema_name.clone(),
+            self.function.clone(),
+            self.arguments.clone(),
+        );
+        let input_schema = self.input_schema.clone();
+        let input = self.input.clone();
+        let output_schema = self.output_schema.clone();
+        let batches = tokio::task::spawn_blocking(move || {
+            run_exchange(
+                &conn,
+                &catalog,
+                &schema_name,
+                &function,
+                arguments,
+                input_schema.as_ref(),
+                vec![input],
+            )
+        })
+        .await
+        .map_err(|error| DataFusionError::External(Box::new(error)))??;
+
+        let batches = batches
+            .into_iter()
+            .map(|batch| crate::conform(batch, &output_schema))
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(MemorySourceConfig::try_new_exec(
+            &[batches],
+            output_schema,
+            projection.cloned(),
+        )?)
+    }
+}
+
 /// Run a **buffered** call: every row is ingested before any output exists.
 ///
 /// A `TableBufferingFunction` is a different protocol, not a variation on the
@@ -168,7 +272,7 @@ pub(crate) fn run_buffered(
     input_schema: &Schema,
     inputs: Vec<datafusion::arrow::array::RecordBatch>,
 ) -> DFResult<Vec<datafusion::arrow::array::RecordBatch>> {
-    use vgi_client::{AttachOptions, BindSpec};
+    use vgi_client::BindSpec;
 
     let mut client = conn.connect()?;
     let attached = conn.attach(&mut client, catalog)?;
@@ -239,7 +343,7 @@ impl VgiTableInputProvider {
         table_arg: TableArgument,
         buffered: bool,
     ) -> DFResult<Arc<Self>> {
-        use vgi_client::{AttachOptions, BindSpec};
+        use vgi_client::BindSpec;
 
         let input_schema = table_arg.input_schema();
         let mut client = conn.connect()?;

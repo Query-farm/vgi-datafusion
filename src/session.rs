@@ -55,22 +55,39 @@
 //! [`FunctionFactory`]: datafusion::execution::context::FunctionFactory
 //! [`AttachDuckDBDatabaseOption`]: datafusion::sql::sqlparser::ast::AttachDuckDBDatabaseOption
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::ControlFlow;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider};
+use datafusion::catalog::MemoryCatalogProvider;
 use datafusion::common::{plan_datafusion_err, plan_err, Result as DFResult};
 use datafusion::dataframe::DataFrame;
 use datafusion::logical_expr::async_udf::AsyncScalarUDF;
 use datafusion::logical_expr::AggregateUDF;
 use datafusion::prelude::SessionContext;
-use datafusion::sql::parser::Statement as DFStatement;
+use datafusion::sql::parser::{DFParser, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
     Expr, Statement as SQLStatement, Value, ValueWithSpan, VisitMut,
 };
 
 use crate::{VgiAggregateUdf, VgiCatalogProvider, VgiConnection, VgiScalarUdf, VgiTableFunction};
+
+/// Private struct-field prefix used to carry a SQL named table-function
+/// argument through DataFusion's positional-only `TableFunctionArgs` API.
+pub(crate) const NAMED_ARG_PREFIX: &str = "__vgi_datafusion_named_arg__";
+
+#[derive(Debug, Clone)]
+struct SqlMacro {
+    parameters: Vec<String>,
+    definition: String,
+}
+
+type SessionMacros = HashMap<String, HashMap<String, SqlMacro>>;
+
+fn macro_registry() -> &'static Mutex<SessionMacros> {
+    static REGISTRY: OnceLock<Mutex<SessionMacros>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Run one SQL statement, handling `ATTACH` and `DETACH` for VGI catalogs.
 ///
@@ -98,7 +115,7 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
         return ctx.read_empty();
     }
     let state = ctx.state();
-    let dialect = state.config_options().sql_parser.dialect.clone();
+    let dialect = state.config_options().sql_parser.dialect;
     let statement = state.sql_to_statement(query, &dialect)?;
 
     match classify(&statement)? {
@@ -113,7 +130,7 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
         }
         None => {
             let mut statement = statement;
-            rewrite_qualified_table_functions(&mut statement);
+            rewrite_vgi_sql(ctx, &mut statement)?;
             let plan = state.statement_to_plan(statement).await?;
             ctx.execute_logical_plan(plan).await
         }
@@ -300,20 +317,23 @@ impl StripPrefixCi for str {
 /// Upstream tracks the underlying gap as apache/datafusion#18021; a PR that
 /// added schema-scoped table functions (#18022) was closed in favour of #15095,
 /// which is itself dormant.
-fn rewrite_qualified_table_functions(statement: &mut DFStatement) {
+fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResult<()> {
     use datafusion::sql::sqlparser::ast::{
-        Ident, ObjectName, ObjectNamePart, TableFactor, VisitorMut,
+        Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName,
+        ObjectNamePart, SelectItem, SetExpr, TableFactor, VisitorMut,
     };
 
-    struct Collapse;
+    struct Rewrite<'a> {
+        ctx: &'a SessionContext,
+    }
 
-    impl VisitorMut for Collapse {
-        type Break = ();
+    impl VisitorMut for Rewrite<'_> {
+        type Break = Box<datafusion::common::DataFusionError>;
 
-        fn pre_visit_table_factor(&mut self, tf: &mut TableFactor) -> ControlFlow<()> {
+        fn pre_visit_table_factor(&mut self, tf: &mut TableFactor) -> ControlFlow<Self::Break> {
             if let TableFactor::Table {
                 name,
-                args: Some(_),
+                args: Some(args),
                 ..
             } = tf
             {
@@ -328,16 +348,159 @@ fn rewrite_qualified_table_functions(statement: &mut DFStatement) {
                         *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(dotted))]);
                     }
                 }
+
+                // DataFusion's TableFactor::Table planner rejects named
+                // FunctionArgs before a TableFunctionImpl can see them. Carry
+                // each one as a private, single-field struct literal instead;
+                // the VGI implementation unwraps it back into Arguments::named.
+                // This preserves names and ordering without changing DataFusion.
+                for argument in &mut args.args {
+                    let FunctionArg::Named { name, arg, .. } = argument else {
+                        continue;
+                    };
+                    let FunctionArgExpr::Expr(value) = arg else {
+                        continue;
+                    };
+                    *argument = FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Struct {
+                        values: vec![SQLExpr::Named {
+                            expr: Box::new(value.clone()),
+                            name: Ident::new(format!("{NAMED_ARG_PREFIX}{}", name.value)),
+                        }],
+                        fields: vec![],
+                    }));
+                }
+            }
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_expr(&mut self, expr: &mut SQLExpr) -> ControlFlow<Self::Break> {
+            match expand_scalar_macro(self.ctx, expr) {
+                Ok(Some(expanded)) => *expr = expanded,
+                Ok(None) => {}
+                Err(error) => return ControlFlow::Break(Box::new(error)),
             }
             ControlFlow::Continue(())
         }
     }
 
-    if let DFStatement::Statement(inner) = statement {
-        // `visit` walks the whole tree — CTEs, subqueries, joins — so nested
-        // calls are covered without hand-rolling the recursion.
-        let _ = inner.as_mut().visit(&mut Collapse);
+    fn expand_scalar_macro(ctx: &SessionContext, expr: &SQLExpr) -> DFResult<Option<SQLExpr>> {
+        let SQLExpr::Function(function) = expr else {
+            return Ok(None);
+        };
+        let path = function
+            .name
+            .0
+            .iter()
+            .filter_map(|part| part.as_ident().map(|ident| ident.value.as_str()))
+            .collect::<Vec<_>>();
+        let [catalog_name, schema_name, macro_name] = path.as_slice() else {
+            return Ok(None);
+        };
+
+        let key = format!("{catalog_name}.{schema_name}.{macro_name}").to_ascii_lowercase();
+        let info = macro_registry()
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(&ctx.session_id())?.get(&key).cloned());
+        let Some(info) = info else {
+            return Ok(None);
+        };
+
+        let FunctionArguments::List(arguments) = &function.args else {
+            return plan_err!(
+                "VGI scalar macro `{}` requires an argument list",
+                function.name
+            );
+        };
+        if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
+            return plan_err!(
+                "VGI scalar macro `{}` does not accept DISTINCT or argument clauses",
+                function.name
+            );
+        }
+        let actual = arguments
+            .args
+            .iter()
+            .map(|argument| match argument {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr.clone()),
+                other => plan_err!(
+                    "VGI scalar macro `{}` only accepts positional expression arguments, found {other}",
+                    function.name
+                ),
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        if actual.len() != info.parameters.len() {
+            return plan_err!(
+                "VGI scalar macro `{}` expects {} argument(s), received {}",
+                function.name,
+                info.parameters.len(),
+                actual.len()
+            );
+        }
+
+        let mut parsed = DFParser::parse_sql(&format!("SELECT {}", info.definition))?;
+        let Some(DFStatement::Statement(statement)) = parsed.pop_front() else {
+            return plan_err!(
+                "VGI scalar macro `{}` has an empty definition",
+                function.name
+            );
+        };
+        let SQLStatement::Query(query) = statement.as_ref() else {
+            return plan_err!("VGI scalar macro `{}` is not an expression", function.name);
+        };
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            return plan_err!("VGI scalar macro `{}` is not an expression", function.name);
+        };
+        let [SelectItem::UnnamedExpr(expanded)] = select.projection.as_slice() else {
+            return plan_err!("VGI scalar macro `{}` is not one expression", function.name);
+        };
+        let mut expanded = expanded.clone();
+
+        struct Substitute<'a> {
+            parameters: &'a [String],
+            actual: &'a [SQLExpr],
+        }
+        impl VisitorMut for Substitute<'_> {
+            type Break = ();
+
+            fn post_visit_expr(&mut self, expr: &mut SQLExpr) -> ControlFlow<()> {
+                let SQLExpr::Identifier(identifier) = expr else {
+                    return ControlFlow::Continue(());
+                };
+                if let Some(index) = self
+                    .parameters
+                    .iter()
+                    .position(|parameter| parameter.eq_ignore_ascii_case(&identifier.value))
+                {
+                    *expr = self.actual[index].clone();
+                }
+                ControlFlow::Continue(())
+            }
+        }
+
+        let _ = expanded.visit(&mut Substitute {
+            parameters: &info.parameters,
+            actual: &actual,
+        });
+        Ok(Some(expanded))
     }
+
+    match statement {
+        DFStatement::Statement(inner) => {
+            // `visit` walks the whole SQL AST — CTEs, subqueries, joins — so
+            // nested calls are covered without hand-rolling the recursion.
+            if let ControlFlow::Break(error) = inner.as_mut().visit(&mut Rewrite { ctx }) {
+                return Err(*error);
+            }
+        }
+        // DataFusion parses EXPLAIN into its own wrapper rather than a
+        // sqlparser Statement. Rewrite the wrapped statement exactly as if it
+        // had been submitted directly; otherwise named table-function
+        // arguments reach DataFusion's positional-only planner unchanged.
+        DFStatement::Explain(explain) => rewrite_vgi_sql(ctx, explain.statement.as_mut())?,
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A statement this module handles itself.
@@ -470,8 +633,27 @@ async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
     register_table_functions(ctx, &conn, spec, &provider);
     register_scalar_functions(ctx, &conn, spec, &provider);
     register_aggregate_functions(ctx, &conn, spec, &provider);
+    register_scalar_macros(ctx, spec, &provider);
     ctx.register_catalog(&spec.alias, provider);
     Ok(())
+}
+
+fn register_scalar_macros(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalogProvider) {
+    let Ok(mut sessions) = macro_registry().lock() else {
+        return;
+    };
+    let macros = sessions.entry(ctx.session_id()).or_default();
+    let alias_prefix = format!("{}.", spec.alias.to_ascii_lowercase());
+    macros.retain(|name, _| !name.starts_with(&alias_prefix));
+    for (schema, info) in provider.scalar_macros() {
+        macros.insert(
+            format!("{}.{}.{}", spec.alias, schema, info.name).to_ascii_lowercase(),
+            SqlMacro {
+                parameters: info.parameters.clone(),
+                definition: info.definition.clone(),
+            },
+        );
+    }
 }
 
 /// Publish the catalog's table functions so they are callable **with
@@ -525,14 +707,14 @@ fn register_table_functions(
 
     for (schema_name, schema) in provider.vgi_schemas() {
         for function in datafusion::catalog::SchemaProvider::table_names(schema.as_ref()) {
-            let buffered = schema.is_buffered(&function);
+            let metadata = schema.table_function_metadata(&function).cloned();
             let make = || {
                 Arc::new(VgiTableFunction::new(
                     conn.clone(),
                     &spec.catalog,
                     schema_name,
                     &function,
-                    buffered,
+                    metadata.clone(),
                 ))
             };
 
@@ -671,6 +853,12 @@ fn register_aggregate_functions(
 fn detach(ctx: &SessionContext, alias: &str) -> DFResult<()> {
     if ctx.catalog(alias).is_none() {
         return plan_err!("no catalog attached as {alias:?}");
+    }
+    if let Ok(mut sessions) = macro_registry().lock() {
+        if let Some(macros) = sessions.get_mut(&ctx.session_id()) {
+            let prefix = format!("{}.", alias.to_ascii_lowercase());
+            macros.retain(|name, _| !name.starts_with(&prefix));
+        }
     }
     ctx.register_catalog(alias, Arc::new(MemoryCatalogProvider::new()));
     Ok(())
