@@ -201,11 +201,11 @@ that timeout.
 - **Dynamic filters and join keys.** DataFusion 55 hash-join filters are linked
   to VGI scans. Completed single-column `IN` sets use `join_keys` side IPC at
   init (`vgi_join_keys_version=2`), while later range/constant refinements ride
-  byte-stream continuations as standard-base64 `vgi_pushdown_filters` metadata.
-  The current HTTP path still drops that application metadata before the worker
-  observes it and remains a release blocker. The
-  join remains DataFusion's correctness boundary, so older workers may ignore
-  the hint safely, and dynamically filtered scans bypass the result cache.
+  continuations as standard-base64 `vgi_pushdown_filters` metadata. Subprocess,
+  Unix/TCP byte streams, and plain or authenticated HTTP all preserve those
+  between-tick updates. The join remains DataFusion's correctness boundary, so
+  older workers may ignore the hint safely, and dynamically filtered scans
+  bypass the result cache.
   DataFusion's hash-table lookup expression for very large joins and
   multi-column struct membership are not serializable to VGI yet; dynamic
   filters also prune within already-planned splits rather than changing the

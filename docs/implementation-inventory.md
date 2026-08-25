@@ -81,7 +81,7 @@ cross-query single-flight remain deferred.
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
 | Correlated LATERAL table calls | Not wired | DataFusion binds table functions before an outer row is available |
-| Dynamic join filters | Partial | Single-column join-key sets use VGI v2 side IPC at init; later constant/range generations use `vgi_pushdown_filters` over byte-stream continuations. HTTP currently loses that metadata before the worker; large hash-lookup and multi-column struct expressions remain local |
+| Dynamic join filters | Partial | Single-column join-key sets use VGI v2 side IPC at init; later constant/range generations use `vgi_pushdown_filters` over subprocess, Unix/TCP, and plain or authenticated HTTP continuations. Large hash-lookup and multi-column struct expressions remain local |
 | ORDER BY / TABLESAMPLE hints | Not wired | Current provider scan callback does not carry these VGI hints |
 | Table time travel | Supported | Fully-qualified VGI tables accept literal `AT (VERSION => …)` and `AT (TIMESTAMP => …)`; historical schemas and cache identities are isolated |
 | Catalog metadata | Supported | `SHOW TABLES`, `SHOW COLUMNS`, `SHOW FUNCTIONS`, and DataFusion `information_schema` expose VGI tables, views, columns, schemata, and routines without eager scan-function binds |
