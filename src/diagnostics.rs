@@ -439,8 +439,9 @@ mod tests {
 
         let batches = ctx
             .sql(
-                "SELECT typeof(CAST(1 AS TINYINT)), typeof(CAST(1 AS INTEGER)), \
-                 typeof(CAST(1 AS BIGINT)), typeof(CAST(1 AS DOUBLE)), typeof('x')",
+                "SELECT typeof(CAST(1 AS TINYINT)) AS t1, \
+                 typeof(CAST(1 AS INTEGER)) AS t2, typeof(CAST(1 AS BIGINT)) AS t3, \
+                 typeof(CAST(1 AS DOUBLE)) AS t4, typeof('x') AS t5",
             )
             .await?
             .collect()
