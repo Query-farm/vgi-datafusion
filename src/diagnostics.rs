@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    new_empty_array, ArrayRef, BooleanArray, Int64Array, ListBuilder, MapBuilder, StringArray,
-    StringBuilder, UInt64Array,
+    new_empty_array, Array, ArrayRef, BooleanArray, Int64Array, ListArray, ListBuilder, MapBuilder,
+    StringArray, StringBuilder, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -291,6 +291,12 @@ enum DiagnosticsKind {
     Logs,
     DuckDbLogs,
     DuckDbFunctions,
+    DuckDbDatabases,
+    DuckDbSchemas,
+    DuckDbTables,
+    DuckDbViews,
+    DuckDbColumns,
+    DuckDbConstraints,
     VgiFunctionArguments,
     LogStats,
     CacheFlush,
@@ -310,6 +316,12 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::Logs => logs(&self.runtime)?,
             DiagnosticsKind::DuckDbLogs => duckdb_logs(&self.runtime)?,
             DiagnosticsKind::DuckDbFunctions => duckdb_functions(&self.runtime)?,
+            DiagnosticsKind::DuckDbDatabases => duckdb_databases(&self.runtime)?,
+            DiagnosticsKind::DuckDbSchemas => duckdb_schemas(&self.runtime)?,
+            DiagnosticsKind::DuckDbTables => duckdb_tables(&self.runtime)?,
+            DiagnosticsKind::DuckDbViews => duckdb_views(&self.runtime)?,
+            DiagnosticsKind::DuckDbColumns => duckdb_columns(&self.runtime)?,
+            DiagnosticsKind::DuckDbConstraints => duckdb_constraints(&self.runtime)?,
             DiagnosticsKind::VgiFunctionArguments => vgi_function_arguments(&self.runtime)?,
             DiagnosticsKind::LogStats => log_stats(&self.runtime)?,
             DiagnosticsKind::CacheFlush => operation_result(
@@ -967,6 +979,447 @@ fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     Ok(RecordBatch::try_new(schema, arrays)?)
 }
 
+fn metadata_batch(names: &[&str], arrays: Vec<ArrayRef>) -> DFResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(
+        names
+            .iter()
+            .zip(&arrays)
+            .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+            .collect::<Vec<_>>(),
+    ));
+    Ok(RecordBatch::try_new(schema, arrays)?)
+}
+
+fn string_map_array(rows: &[Vec<(String, String)>]) -> DFResult<ArrayRef> {
+    let mut builder = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+    for row in rows {
+        for (key, value) in row {
+            builder.keys().append_value(key);
+            builder.values().append_value(value);
+        }
+        builder.append(true)?;
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+fn duckdb_databases(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let catalogs = runtime.catalog_metadata();
+    let mut tags = Vec::with_capacity(catalogs.len());
+    for (_, metadata) in &catalogs {
+        let mut row = metadata.tags.clone();
+        let mut add = |key: &str, value: &Option<String>| {
+            if let Some(value) = value {
+                if let Some(existing) = row.iter_mut().find(|(name, _)| name == key) {
+                    existing.1 = value.clone();
+                } else {
+                    row.push((key.to_string(), value.clone()));
+                }
+            }
+        };
+        add("vgi_resolved_data_version", &metadata.resolved_data_version);
+        add(
+            "vgi_resolved_implementation_version",
+            &metadata.resolved_implementation_version,
+        );
+        tags.push(row);
+    }
+    metadata_batch(
+        &["database_name", "type", "comment", "tags"],
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                catalogs.iter().map(|(alias, _)| alias.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                catalogs.iter().map(|_| "vgi"),
+            )),
+            optional_strings(&catalogs, |(_, metadata)| metadata.comment.as_deref()),
+            string_map_array(&tags)?,
+        ],
+    )
+}
+
+fn duckdb_schemas(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let rows = runtime
+        .catalog_metadata()
+        .into_iter()
+        .flat_map(|(alias, metadata)| {
+            metadata
+                .schemas
+                .into_iter()
+                .map(move |schema| (alias.clone(), schema))
+        })
+        .collect::<Vec<_>>();
+    let tags = rows
+        .iter()
+        .map(|(_, schema)| schema.tags.clone())
+        .collect::<Vec<_>>();
+    metadata_batch(
+        &["database_name", "schema_name", "comment", "tags"],
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(alias, _)| alias.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, schema)| schema.name.as_str()),
+            )),
+            optional_strings(&rows, |(_, schema)| schema.comment.as_deref()),
+            string_map_array(&tags)?,
+        ],
+    )
+}
+
+fn duckdb_tables(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let rows = runtime
+        .catalog_metadata()
+        .into_iter()
+        .flat_map(|(alias, metadata)| {
+            metadata
+                .tables
+                .into_iter()
+                .map(move |table| (alias.clone(), table))
+        })
+        .collect::<Vec<_>>();
+    let tags = rows
+        .iter()
+        .map(|(_, table)| {
+            let mut tags = table.tags.clone();
+            if !table.required_filters.is_empty() {
+                let value = serde_json::to_string(&table.required_filters).unwrap_or_default();
+                tags.push(("vgi_required_filters".to_string(), value));
+            }
+            tags
+        })
+        .collect::<Vec<_>>();
+    metadata_batch(
+        &[
+            "database_name",
+            "schema_name",
+            "table_name",
+            "comment",
+            "tags",
+        ],
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(alias, _)| alias.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, table)| table.schema_name.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, table)| table.name.as_str()),
+            )),
+            optional_strings(&rows, |(_, table)| table.comment.as_deref()),
+            string_map_array(&tags)?,
+        ],
+    )
+}
+
+fn duckdb_views(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let rows = runtime
+        .catalog_metadata()
+        .into_iter()
+        .flat_map(|(alias, metadata)| {
+            metadata
+                .views
+                .into_iter()
+                .map(move |(view, _)| (alias.clone(), view))
+        })
+        .collect::<Vec<_>>();
+    let tags = rows
+        .iter()
+        .map(|(_, view)| view.tags.clone())
+        .collect::<Vec<_>>();
+    metadata_batch(
+        &[
+            "database_name",
+            "schema_name",
+            "view_name",
+            "comment",
+            "tags",
+        ],
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(alias, _)| alias.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, view)| view.schema_name.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, view)| view.name.as_str()),
+            )),
+            optional_strings(&rows, |(_, view)| view.comment.as_deref()),
+            string_map_array(&tags)?,
+        ],
+    )
+}
+
+#[derive(Debug)]
+struct DuckDbColumnRow {
+    database_name: String,
+    schema_name: String,
+    table_name: String,
+    column_name: String,
+    column_default: Option<String>,
+    comment: Option<String>,
+}
+
+fn duckdb_columns(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let mut rows = Vec::new();
+    for (alias, metadata) in runtime.catalog_metadata() {
+        for table in metadata.tables {
+            let schema = vgi_protocol::ipc::read_schema(&table.columns.0).map_err(vgi_error)?;
+            for field in schema.fields() {
+                rows.push(DuckDbColumnRow {
+                    database_name: alias.clone(),
+                    schema_name: table.schema_name.clone(),
+                    table_name: table.name.clone(),
+                    column_name: field.name().clone(),
+                    column_default: field.metadata().get("default").cloned(),
+                    comment: field.metadata().get("comment").cloned(),
+                });
+            }
+        }
+        for (view, planned_columns) in metadata.views {
+            let comments = view
+                .column_comments
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            let columns = planned_columns
+                .into_iter()
+                .chain(comments.keys().cloned())
+                .collect::<std::collections::BTreeSet<_>>();
+            for column in columns {
+                rows.push(DuckDbColumnRow {
+                    database_name: alias.clone(),
+                    schema_name: view.schema_name.clone(),
+                    table_name: view.name.clone(),
+                    comment: comments.get(&column).cloned(),
+                    column_name: column,
+                    column_default: None,
+                });
+            }
+        }
+    }
+    metadata_batch(
+        &[
+            "database_name",
+            "schema_name",
+            "table_name",
+            "column_name",
+            "column_default",
+            "comment",
+        ],
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.database_name.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.schema_name.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.table_name.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.column_name.as_str()),
+            )),
+            optional_strings(&rows, |row| row.column_default.as_deref()),
+            optional_strings(&rows, |row| row.comment.as_deref()),
+        ],
+    )
+}
+
+#[derive(Debug)]
+struct DuckDbConstraintRow {
+    database_name: String,
+    schema_name: String,
+    table_name: String,
+    constraint_type: String,
+    constraint_text: String,
+    columns: Vec<String>,
+    referenced_table: Option<String>,
+    referenced_columns: Option<Vec<String>>,
+}
+
+fn column_names(schema: &Schema, indices: &[i32]) -> DFResult<Vec<String>> {
+    indices
+        .iter()
+        .map(|index| {
+            usize::try_from(*index)
+                .ok()
+                .and_then(|index| schema.fields().get(index))
+                .map(|field| field.name().clone())
+                .ok_or_else(|| {
+                    datafusion::common::plan_datafusion_err!(
+                        "VGI constraint column index {index} is outside the table schema"
+                    )
+                })
+        })
+        .collect()
+}
+
+fn string_list_column(batch: &RecordBatch, name: &str) -> DFResult<Vec<String>> {
+    let list = batch
+        .column_by_name(name)
+        .and_then(|array| array.as_any().downcast_ref::<ListArray>())
+        .ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!(
+                "VGI foreign key is missing list field `{name}`"
+            )
+        })?;
+    if list.is_null(0) {
+        return Ok(Vec::new());
+    }
+    let values = list.value(0);
+    let strings = values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!(
+                "VGI foreign key field `{name}` does not contain UTF-8 values"
+            )
+        })?;
+    Ok(strings.iter().flatten().map(str::to_string).collect())
+}
+
+fn foreign_key(bytes: &[u8]) -> DFResult<(Vec<String>, String, Vec<String>)> {
+    let batch = vgi_protocol::ipc::read_batch(bytes).map_err(vgi_error)?;
+    if batch.num_rows() != 1 {
+        return plan_err!("VGI foreign key metadata must contain exactly one row");
+    }
+    let referenced_table = batch
+        .column_by_name("referenced_table")
+        .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+        .and_then(|array| array.is_valid(0).then(|| array.value(0).to_string()))
+        .ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!(
+                "VGI foreign key is missing `referenced_table`"
+            )
+        })?;
+    Ok((
+        string_list_column(&batch, "fk_columns")?,
+        referenced_table,
+        string_list_column(&batch, "pk_columns")?,
+    ))
+}
+
+fn optional_string_list_array(rows: &[Option<Vec<String>>]) -> ArrayRef {
+    let mut builder = ListBuilder::new(StringBuilder::new());
+    for row in rows {
+        if let Some(values) = row {
+            for value in values {
+                builder.values().append_value(value);
+            }
+            builder.append(true);
+        } else {
+            builder.append(false);
+        }
+    }
+    Arc::new(builder.finish())
+}
+
+fn duckdb_constraints(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let mut rows = Vec::new();
+    for (alias, metadata) in runtime.catalog_metadata() {
+        for table in metadata.tables {
+            let schema = vgi_protocol::ipc::read_schema(&table.columns.0).map_err(vgi_error)?;
+            let mut push = |kind: &str, text: String, columns: Vec<String>| {
+                rows.push(DuckDbConstraintRow {
+                    database_name: alias.clone(),
+                    schema_name: table.schema_name.clone(),
+                    table_name: table.name.clone(),
+                    constraint_type: kind.to_string(),
+                    constraint_text: text,
+                    columns,
+                    referenced_table: None,
+                    referenced_columns: None,
+                });
+            };
+            for index in &table.not_null_constraints {
+                let columns = column_names(&schema, &[*index])?;
+                push("NOT NULL", "NOT NULL".to_string(), columns);
+            }
+            for indices in &table.primary_key_constraints {
+                let columns = column_names(&schema, indices)?;
+                push(
+                    "PRIMARY KEY",
+                    format!("PRIMARY KEY({})", columns.join(", ")),
+                    columns,
+                );
+            }
+            for indices in &table.unique_constraints {
+                let columns = column_names(&schema, indices)?;
+                push("UNIQUE", format!("UNIQUE({})", columns.join(", ")), columns);
+            }
+            for expression in &table.check_constraints {
+                push("CHECK", format!("CHECK(({expression}))"), Vec::new());
+            }
+            drop(push);
+            for bytes in &table.foreign_key_constraints {
+                let (columns, referenced_table, referenced_columns) = foreign_key(&bytes.0)?;
+                rows.push(DuckDbConstraintRow {
+                    database_name: alias.clone(),
+                    schema_name: table.schema_name.clone(),
+                    table_name: table.name.clone(),
+                    constraint_type: "FOREIGN KEY".to_string(),
+                    constraint_text: format!(
+                        "FOREIGN KEY ({}) REFERENCES {}({})",
+                        columns.join(", "),
+                        referenced_table,
+                        referenced_columns.join(", ")
+                    ),
+                    columns,
+                    referenced_table: Some(referenced_table),
+                    referenced_columns: Some(referenced_columns),
+                });
+            }
+        }
+    }
+    let columns = string_list_array(
+        &rows
+            .iter()
+            .map(|row| row.columns.clone())
+            .collect::<Vec<_>>(),
+    );
+    let referenced_columns = optional_string_list_array(
+        &rows
+            .iter()
+            .map(|row| row.referenced_columns.clone())
+            .collect::<Vec<_>>(),
+    );
+    metadata_batch(
+        &[
+            "database_name",
+            "schema_name",
+            "table_name",
+            "constraint_type",
+            "constraint_text",
+            "constraint_column_names",
+            "referenced_table",
+            "referenced_column_names",
+        ],
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.database_name.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.schema_name.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.table_name.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.constraint_type.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.constraint_text.as_str()),
+            )),
+            columns,
+            optional_strings(&rows, |row| row.referenced_table.as_deref()),
+            referenced_columns,
+        ],
+    )
+}
+
 #[derive(Debug)]
 struct FunctionArgumentRow {
     catalog_name: String,
@@ -1244,6 +1697,12 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ("vgi_result_cache_reap", DiagnosticsKind::CacheReap),
         ("duckdb_logs", DiagnosticsKind::DuckDbLogs),
         ("duckdb_functions", DiagnosticsKind::DuckDbFunctions),
+        ("duckdb_databases", DiagnosticsKind::DuckDbDatabases),
+        ("duckdb_schemas", DiagnosticsKind::DuckDbSchemas),
+        ("duckdb_tables", DiagnosticsKind::DuckDbTables),
+        ("duckdb_views", DiagnosticsKind::DuckDbViews),
+        ("duckdb_columns", DiagnosticsKind::DuckDbColumns),
+        ("duckdb_constraints", DiagnosticsKind::DuckDbConstraints),
         (
             "vgi_function_arguments",
             DiagnosticsKind::VgiFunctionArguments,

@@ -18,7 +18,16 @@ use vgi_client::{CacheLimits, ResultCache};
 pub(crate) struct VgiCatalogMetadata {
     pub connection: crate::VgiConnection,
     pub worker_catalog: String,
+    pub comment: Option<String>,
+    pub tags: Vec<(String, String)>,
+    pub resolved_data_version: Option<String>,
+    pub resolved_implementation_version: Option<String>,
+    pub schemas: Vec<vgi_client::dtos::SchemaInfo>,
     pub tables: Vec<vgi_client::dtos::TableInfo>,
+    /// View declaration plus the columns of its successfully planned
+    /// DataFusion ViewTable. VGI carries comments but not a separate output
+    /// schema, so the latter is captured after view planning.
+    pub views: Vec<(vgi_client::dtos::ViewInfo, Vec<String>)>,
     pub functions: Vec<vgi_client::dtos::FunctionInfo>,
     pub macros: Vec<vgi_client::dtos::MacroInfo>,
     pub global_function_prefix: String,

@@ -1310,18 +1310,6 @@ async fn attach_one(
     let options = build_attach_options(ctx, &conn, spec).await?;
     conn = conn.with_catalog_attach_options(&spec.catalog, options);
     let provider = VgiCatalogProvider::discover(conn.clone(), &spec.catalog).await?;
-    conn.runtime().set_catalog_metadata(
-        &spec.alias,
-        crate::runtime::VgiCatalogMetadata {
-            connection: conn.metadata_connection(),
-            worker_catalog: spec.catalog.clone(),
-            tables: provider.tables().cloned().collect(),
-            functions: provider.functions().cloned().collect(),
-            macros: provider.metadata_macros().cloned().collect(),
-            global_function_prefix: provider.global_function_prefix().to_string(),
-            global_functions: provider.global_functions().to_vec(),
-        },
-    );
     // Re-attaching an alias refreshes its flat function registrations as well
     // as its catalog provider.
     deregister_alias_functions(ctx, &spec.alias);
@@ -1332,6 +1320,28 @@ async fn attach_one(
     register_scalar_macros(ctx, spec, &provider);
     ctx.register_catalog(&spec.alias, provider.clone());
     register_views(ctx, spec, &provider).await;
+    // Capture diagnostics after view planning so duckdb_columns() can expose a
+    // view's actual DataFusion output fields as well as its VGI comments.
+    conn.runtime().set_catalog_metadata(
+        &spec.alias,
+        crate::runtime::VgiCatalogMetadata {
+            connection: conn.metadata_connection(),
+            worker_catalog: spec.catalog.clone(),
+            comment: provider.catalog_comment().map(str::to_string),
+            tags: provider.catalog_tags().to_vec(),
+            resolved_data_version: provider.resolved_data_version().map(str::to_string),
+            resolved_implementation_version: provider
+                .resolved_implementation_version()
+                .map(str::to_string),
+            schemas: provider.schema_infos().to_vec(),
+            tables: provider.tables().cloned().collect(),
+            views: provider.metadata_views(),
+            functions: provider.functions().cloned().collect(),
+            macros: provider.metadata_macros().cloned().collect(),
+            global_function_prefix: provider.global_function_prefix().to_string(),
+            global_functions: provider.global_functions().to_vec(),
+        },
+    );
     let mut event = crate::VgiEvent::new("catalog.attached");
     event.catalog = Some(spec.alias.clone());
     event.duration = Some(started.elapsed());

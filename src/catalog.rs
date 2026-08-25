@@ -673,6 +673,11 @@ fn bind_failed(name: &str) -> impl Fn(String) -> DataFusionError + '_ {
 #[derive(Debug)]
 pub struct VgiCatalogProvider {
     schemas: HashMap<String, Arc<VgiSchemaProvider>>,
+    comment: Option<String>,
+    tags: Vec<(String, String)>,
+    resolved_data_version: Option<String>,
+    resolved_implementation_version: Option<String>,
+    schema_infos: Vec<vgi_client::dtos::SchemaInfo>,
     /// The prefix the worker asked for on globally-published functions
     /// (`global_function_prefix`), empty when it asked for none.
     ///
@@ -688,31 +693,53 @@ impl VgiCatalogProvider {
     /// Attach a catalog and list its schemas.
     pub async fn discover(conn: VgiConnection, catalog: &str) -> DFResult<Arc<Self>> {
         let (c, cat) = (conn.clone(), catalog.to_string());
-        let (names, global_function_prefix, global_functions, companion_catalogs) =
-            tokio::task::spawn_blocking(move || {
-                let mut client = c.connect()?;
-                let attached = c.attach(&mut client, &cat)?;
-                let prefix = attached.info().global_function_prefix.clone();
-                let global_functions = attached.global_functions().map_err(to_df)?;
-                let companion_catalogs = attached.companion_catalogs().map_err(to_df)?;
-                let s = client.schemas(&attached).map_err(to_df)?;
-                Ok::<_, DataFusionError>((
-                    s.into_iter().map(|s| s.name).collect::<Vec<String>>(),
-                    prefix,
-                    global_functions,
-                    companion_catalogs,
-                ))
-            })
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))??;
+        let (
+            schema_infos,
+            comment,
+            tags,
+            resolved_data_version,
+            resolved_implementation_version,
+            global_function_prefix,
+            global_functions,
+            companion_catalogs,
+        ) = tokio::task::spawn_blocking(move || {
+            let mut client = c.connect()?;
+            let attached = c.attach(&mut client, &cat)?;
+            let info = attached.info();
+            let prefix = info.global_function_prefix.clone();
+            let comment = info.comment.clone();
+            let tags = info.tags.clone();
+            let resolved_data_version = info.resolved_data_version.clone();
+            let resolved_implementation_version = info.resolved_implementation_version.clone();
+            let global_functions = attached.global_functions().map_err(to_df)?;
+            let companion_catalogs = attached.companion_catalogs().map_err(to_df)?;
+            let schema_infos = client.schemas(&attached).map_err(to_df)?;
+            Ok::<_, DataFusionError>((
+                schema_infos,
+                comment,
+                tags,
+                resolved_data_version,
+                resolved_implementation_version,
+                prefix,
+                global_functions,
+                companion_catalogs,
+            ))
+        })
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
         let mut schemas: HashMap<String, Arc<VgiSchemaProvider>> = HashMap::new();
-        for name in names {
+        for name in schema_infos.iter().map(|schema| schema.name.clone()) {
             let sp = VgiSchemaProvider::discover(conn.clone(), catalog, &name).await?;
             schemas.insert(name, sp);
         }
         Ok(Arc::new(Self {
             schemas,
+            comment,
+            tags,
+            resolved_data_version,
+            resolved_implementation_version,
+            schema_infos,
             global_function_prefix,
             global_functions,
             companion_catalogs,
@@ -721,6 +748,26 @@ impl VgiCatalogProvider {
 }
 
 impl VgiCatalogProvider {
+    pub(crate) fn catalog_comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+
+    pub(crate) fn catalog_tags(&self) -> &[(String, String)] {
+        &self.tags
+    }
+
+    pub(crate) fn resolved_data_version(&self) -> Option<&str> {
+        self.resolved_data_version.as_deref()
+    }
+
+    pub(crate) fn resolved_implementation_version(&self) -> Option<&str> {
+        self.resolved_implementation_version.as_deref()
+    }
+
+    pub(crate) fn schema_infos(&self) -> &[vgi_client::dtos::SchemaInfo] {
+        &self.schema_infos
+    }
+
     /// The worker's requested prefix for globally-published functions.
     pub fn global_function_prefix(&self) -> &str {
         &self.global_function_prefix
@@ -754,6 +801,29 @@ impl VgiCatalogProvider {
 
     pub(crate) fn tables(&self) -> impl Iterator<Item = &vgi_client::dtos::TableInfo> {
         self.schemas.values().flat_map(|schema| schema.tables())
+    }
+
+    pub(crate) fn metadata_views(&self) -> Vec<(vgi_client::dtos::ViewInfo, Vec<String>)> {
+        self.schemas
+            .values()
+            .flat_map(|schema| {
+                schema.views().map(|(name, info)| {
+                    let columns = schema
+                        .cached(name)
+                        .and_then(Result::ok)
+                        .map(|provider| {
+                            provider
+                                .schema()
+                                .fields()
+                                .iter()
+                                .map(|field| field.name().clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (info.clone(), columns)
+                })
+            })
+            .collect()
     }
 
     /// Resolve one historical table through its concrete VGI schema.
