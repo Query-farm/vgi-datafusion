@@ -121,6 +121,39 @@ fn registration_registry() -> &'static Mutex<SessionRegistrations> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+type SessionDefaultSchemas = HashMap<String, HashMap<String, String>>;
+
+fn default_schema_registry() -> &'static Mutex<SessionDefaultSchemas> {
+    static REGISTRY: OnceLock<Mutex<SessionDefaultSchemas>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_default_schema(ctx: &SessionContext, alias: &str, schema: &str) {
+    default_schema_registry()
+        .lock()
+        .unwrap()
+        .entry(ctx.session_id())
+        .or_default()
+        .insert(alias.to_ascii_lowercase(), schema.to_string());
+}
+
+fn attached_default_schema(ctx: &SessionContext, alias: &str) -> Option<String> {
+    default_schema_registry()
+        .lock()
+        .ok()?
+        .get(&ctx.session_id())?
+        .get(&alias.to_ascii_lowercase())
+        .cloned()
+}
+
+fn remove_default_schema(ctx: &SessionContext, alias: &str) {
+    if let Ok(mut sessions) = default_schema_registry().lock() {
+        if let Some(aliases) = sessions.get_mut(&ctx.session_id()) {
+            aliases.remove(&alias.to_ascii_lowercase());
+        }
+    }
+}
+
 enum RegistrationKind {
     Scalar,
     Aggregate,
@@ -724,9 +757,10 @@ impl StripPrefixCi for str {
 ///
 /// # The guard that matters
 ///
-/// Only a relation **with arguments** is rewritten. A qualified name without
-/// parentheses is an ordinary table reference — `ex.data.ten_thousand_table` —
-/// which already resolves through the catalog and must not be touched.
+/// Relations with arguments use the flattened function key described above.
+/// Ordinary three-part table names are untouched. The one table-name rewrite is
+/// DuckDB's two-part `catalog.table` shorthand: for a known attached alias it
+/// becomes `catalog.<worker-default-schema>.table`.
 ///
 /// Upstream tracks the underlying gap as apache/datafusion#18021; a PR that
 /// added schema-scoped table functions (#18022) was closed in favour of #15095,
@@ -745,12 +779,20 @@ fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResul
         type Break = Box<datafusion::common::DataFusionError>;
 
         fn pre_visit_table_factor(&mut self, tf: &mut TableFactor) -> ControlFlow<Self::Break> {
-            if let TableFactor::Table {
-                name,
-                args: Some(args),
-                ..
-            } = tf
-            {
+            if let TableFactor::Table { name, args, .. } = tf {
+                if args.is_none() {
+                    if let [catalog, _table] = name.0.as_slice() {
+                        if let Some(catalog) = catalog.as_ident() {
+                            if let Some(schema) = attached_default_schema(self.ctx, &catalog.value)
+                            {
+                                name.0
+                                    .insert(1, ObjectNamePart::Identifier(Ident::new(schema)));
+                            }
+                        }
+                    }
+                    return ControlFlow::Continue(());
+                }
+                let args = args.as_mut().expect("checked table-function arguments");
                 if name.0.len() > 1 {
                     let dotted = name
                         .0
@@ -1320,6 +1362,7 @@ async fn attach_one(
     register_scalar_macros(ctx, spec, &provider);
     ctx.register_catalog(&spec.alias, provider.clone());
     register_views(ctx, spec, &provider).await;
+    record_default_schema(ctx, &spec.alias, provider.default_schema());
     // Capture diagnostics after view planning so duckdb_columns() can expose a
     // view's actual DataFusion output fields as well as its VGI comments.
     conn.runtime().set_catalog_metadata(
@@ -1981,6 +2024,7 @@ fn detach(ctx: &SessionContext, alias: &str) -> DFResult<()> {
         return plan_err!("no catalog attached as {alias:?}");
     }
     deregister_alias_functions(ctx, alias);
+    remove_default_schema(ctx, alias);
     session_runtime(ctx).remove_catalog_metadata(alias);
     if let Ok(mut sessions) = macro_registry().lock() {
         if let Some(macros) = sessions.get_mut(&ctx.session_id()) {
@@ -2139,6 +2183,30 @@ mod tests {
         assert!(
             equality.contains("other = 10"),
             "equality was lost: {equality}"
+        );
+    }
+
+    #[test]
+    fn attached_catalog_two_part_tables_use_the_worker_default_schema() {
+        let ctx = SessionContext::new();
+        record_default_schema(&ctx, "example", "main");
+        let state = ctx.state();
+        let dialect = state.config_options().sql_parser.dialect;
+        let mut statement = state
+            .sql_to_statement(
+                "SELECT * FROM example.first_ten JOIN local.items ON true",
+                &dialect,
+            )
+            .expect("parses");
+        rewrite_vgi_sql(&ctx, &mut statement).expect("rewrites");
+        let rewritten = statement.to_string();
+        assert!(
+            rewritten.contains("example.main.first_ten"),
+            "attached alias did not gain its default schema: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("local.items"),
+            "unattached two-part name was changed: {rewritten}"
         );
     }
 }

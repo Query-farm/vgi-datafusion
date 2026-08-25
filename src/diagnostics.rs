@@ -1169,12 +1169,22 @@ fn duckdb_columns(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         for table in metadata.tables {
             let schema = vgi_protocol::ipc::read_schema(&table.columns.0).map_err(vgi_error)?;
             for field in schema.fields() {
+                let column_default = field
+                    .metadata()
+                    .get("generated_expression")
+                    .map(|expression| {
+                        format!(
+                            "CAST(({expression}) AS {})",
+                            duckdb_type_name(field.data_type())
+                        )
+                    })
+                    .or_else(|| field.metadata().get("default").cloned());
                 rows.push(DuckDbColumnRow {
                     database_name: alias.clone(),
                     schema_name: table.schema_name.clone(),
                     table_name: table.name.clone(),
                     column_name: field.name().clone(),
-                    column_default: field.metadata().get("default").cloned(),
+                    column_default,
                     comment: field.metadata().get("comment").cloned(),
                 });
             }

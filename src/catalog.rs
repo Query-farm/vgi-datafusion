@@ -675,6 +675,7 @@ pub struct VgiCatalogProvider {
     schemas: HashMap<String, Arc<VgiSchemaProvider>>,
     comment: Option<String>,
     tags: Vec<(String, String)>,
+    default_schema: String,
     resolved_data_version: Option<String>,
     resolved_implementation_version: Option<String>,
     schema_infos: Vec<vgi_client::dtos::SchemaInfo>,
@@ -697,6 +698,7 @@ impl VgiCatalogProvider {
             schema_infos,
             comment,
             tags,
+            default_schema,
             resolved_data_version,
             resolved_implementation_version,
             global_function_prefix,
@@ -709,6 +711,7 @@ impl VgiCatalogProvider {
             let prefix = info.global_function_prefix.clone();
             let comment = info.comment.clone();
             let tags = info.tags.clone();
+            let default_schema = info.default_schema.clone();
             let resolved_data_version = info.resolved_data_version.clone();
             let resolved_implementation_version = info.resolved_implementation_version.clone();
             let global_functions = attached.global_functions().map_err(to_df)?;
@@ -718,6 +721,7 @@ impl VgiCatalogProvider {
                 schema_infos,
                 comment,
                 tags,
+                default_schema,
                 resolved_data_version,
                 resolved_implementation_version,
                 prefix,
@@ -737,6 +741,7 @@ impl VgiCatalogProvider {
             schemas,
             comment,
             tags,
+            default_schema,
             resolved_data_version,
             resolved_implementation_version,
             schema_infos,
@@ -754,6 +759,10 @@ impl VgiCatalogProvider {
 
     pub(crate) fn catalog_tags(&self) -> &[(String, String)] {
         &self.tags
+    }
+
+    pub(crate) fn default_schema(&self) -> &str {
+        &self.default_schema
     }
 
     pub(crate) fn resolved_data_version(&self) -> Option<&str> {
