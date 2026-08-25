@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use datafusion::prelude::{SessionConfig, SessionContext};
+use futures::stream::{self, StreamExt};
 
 /// One directive from a `.test` file.
 #[derive(Debug)]
@@ -143,6 +144,38 @@ struct Tally {
     /// Expected-error statements are syntax/error-contract tests, not positive
     /// capability evidence, so they are recorded but excluded from rates.
     expected_errors_ignored: usize,
+}
+
+impl Tally {
+    fn merge(&mut self, other: Self) {
+        self.files_run += other.files_run;
+        self.files_skipped += other.files_skipped;
+        self.executed += other.executed;
+        self.failed += other.failed;
+        self.not_applicable += other.not_applicable;
+        self.timed_out += other.timed_out;
+        self.values_matched += other.values_matched;
+        self.values_rendering += other.values_rendering;
+        self.values_unordered_subset += other.values_unordered_subset;
+        self.values_differed += other.values_differed;
+        self.expected_errors_ignored += other.expected_errors_ignored;
+        for (bucket, count) in other.buckets {
+            *self.buckets.entry(bucket).or_default() += count;
+        }
+        for (shape, count) in other.error_shapes {
+            *self.error_shapes.entry(shape).or_default() += count;
+        }
+        for (group, (executed, failed)) in other.groups {
+            let entry = self.groups.entry(group).or_default();
+            entry.0 += executed;
+            entry.1 += failed;
+        }
+        for (bucket, example) in other.examples {
+            self.examples.entry(bucket).or_insert(example);
+        }
+        self.mismatches.extend(other.mismatches);
+        self.files.extend(other.files);
+    }
 }
 
 #[derive(Default)]
@@ -891,6 +924,10 @@ async fn main() {
     let mut roots = Vec::new();
     let mut json_path = std::env::var_os("CORPUS_JSON").map(PathBuf::from);
     let mut compare_path: Option<PathBuf> = None;
+    let mut jobs = std::env::var("CORPUS_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("corpus")
         .join("compatibility.json");
@@ -918,9 +955,22 @@ async fn main() {
                 };
                 compare_path = Some(PathBuf::from(path));
             }
+            "--jobs" | "-j" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--jobs requires a positive integer");
+                    std::process::exit(2);
+                };
+                jobs = match value.parse::<usize>() {
+                    Ok(value) if value > 0 => value,
+                    _ => {
+                        eprintln!("--jobs requires a positive integer, found {value:?}");
+                        std::process::exit(2);
+                    }
+                };
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: corpus [--json REPORT.json] [--compare BASELINE.json] \
+                    "Usage: corpus [--jobs N] [--json REPORT.json] [--compare BASELINE.json] \
                      [--manifest compatibility.json] [PATH ...]"
                 );
                 return;
@@ -970,12 +1020,25 @@ async fn main() {
         eprintln!("VGI_TEST_WORKER is not set — every file will skip.");
     }
 
+    let file_count = files.len();
+    let mut partials = stream::iter(files.into_iter().enumerate())
+        .map(|(i, file)| async move {
+            if i % 25 == 0 {
+                eprintln!("  [{i}/{file_count}] {}", file.display());
+            }
+            let mut tally = Tally::default();
+            run_file(&file, &mut tally).await;
+            (i, tally)
+        })
+        .buffer_unordered(jobs)
+        .collect::<Vec<_>>()
+        .await;
+    // Merge in source order so examples and mismatch presentation remain
+    // deterministic even when files finish out of order.
+    partials.sort_by_key(|(i, _)| *i);
     let mut tally = Tally::default();
-    for (i, f) in files.iter().enumerate() {
-        if i % 25 == 0 {
-            eprintln!("  [{i}/{}] {}", files.len(), f.display());
-        }
-        run_file(f, &mut tally).await;
+    for (_, partial) in partials {
+        tally.merge(partial);
     }
 
     let total = tally.executed + tally.failed + tally.timed_out;
@@ -987,7 +1050,7 @@ async fn main() {
         }
     };
 
-    println!("\n=== corpus: {} files ===", files.len());
+    println!("\n=== corpus: {file_count} files ===");
     println!(
         "files:   {} run, {} skipped (no require-env / no records)",
         tally.files_run, tally.files_skipped
@@ -1109,7 +1172,7 @@ async fn main() {
             }
         }
         if let Err(error) =
-            write_json_report(&path, &roots, files.len(), &tally, &areas, &group_areas)
+            write_json_report(&path, &roots, file_count, &tally, &areas, &group_areas)
         {
             eprintln!("{error}");
             std::process::exit(2);

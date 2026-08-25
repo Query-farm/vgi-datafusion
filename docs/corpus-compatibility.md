@@ -35,9 +35,25 @@ Use the optimized runner for a full corpus pass:
 ```bash
 VGI_TEST_WORKER=../vgi-rust/target/release/vgi-example-worker \
   cargo run --release --bin corpus -- \
+  --jobs 4 \
   --json corpus/baselines/subprocess.json \
   ../vgi/test/sql/integration
 ```
+
+During implementation, pass only the affected files or a group directory. For
+example, the complete function-metadata slice runs in a few seconds:
+
+```bash
+target/release/corpus --jobs 4 \
+  ../vgi/test/sql/integration/catalog/function_arguments.test \
+  ../vgi/test/sql/integration/scalar/function_registration.test \
+  ../vgi/test/sql/integration/table/function_registration.test
+```
+
+Files use independent DataFusion sessions, so `--jobs N` runs them concurrently
+while merging results back in source order. Keep `N` bounded on shared hosts;
+four workers is the EC2 default for corpus runs. A full run is reserved for
+baseline promotion rather than the inner development loop.
 
 For normal development, write a temporary report and compare it with the
 committed baseline. The command exits non-zero if an existing file executes
@@ -47,6 +63,7 @@ checks:
 ```bash
 VGI_TEST_WORKER=../vgi-rust/target/release/vgi-example-worker \
   target/release/corpus \
+  --jobs 4 \
   --json target/corpus-current.json \
   --compare corpus/baselines/subprocess.json \
   ../vgi/test/sql/integration
