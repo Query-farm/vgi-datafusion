@@ -28,6 +28,7 @@ enum DiagnosticsKind {
     CacheStats,
     PlanCacheStats,
     CacheEntries,
+    DuckDbCacheEntries,
     Logs,
     LogStats,
     CacheFlush,
@@ -43,6 +44,7 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::CacheStats => cache_stats(&self.runtime)?,
             DiagnosticsKind::PlanCacheStats => plan_cache_stats(&self.runtime)?,
             DiagnosticsKind::CacheEntries => cache_entries(&self.runtime)?,
+            DiagnosticsKind::DuckDbCacheEntries => duckdb_cache_entries(&self.runtime)?,
             DiagnosticsKind::Logs => logs(&self.runtime)?,
             DiagnosticsKind::LogStats => log_stats(&self.runtime)?,
             DiagnosticsKind::CacheFlush => operation_result(
@@ -274,6 +276,66 @@ fn cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     )?)
 }
 
+/// Compatibility shape for the DuckDB extension's `vgi_result_cache()`.
+///
+/// Keep the DataFusion-native diagnostic above stable and expose only fields
+/// this cache actually owns. In particular, disk tier and per-substream fields
+/// are not invented here: queries asking for them must continue to identify a
+/// real incomplete feature.
+fn duckdb_cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let entries = runtime.result_cache().entries();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key_hash", DataType::Utf8, false),
+        Field::new("catalog", DataType::Utf8, false),
+        Field::new("function", DataType::Utf8, false),
+        Field::new("num_rows", DataType::UInt64, false),
+        Field::new("bytes", DataType::UInt64, false),
+        Field::new("age_ms", DataType::UInt64, false),
+        Field::new("stale", DataType::Boolean, false),
+        Field::new("hits", DataType::UInt64, false),
+        Field::new("revalidatable", DataType::Boolean, false),
+    ]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                entries.iter().map(|entry| entry.key_fingerprint.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                entries.iter().map(|entry| entry.catalog.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(entries.iter().map(|entry| {
+                entry
+                    .function
+                    .rsplit_once('.')
+                    .map(|(_, name)| name)
+                    .unwrap_or(&entry.function)
+            }))),
+            Arc::new(UInt64Array::from_iter_values(
+                entries.iter().map(|entry| entry.rows as u64),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries.iter().map(|entry| entry.bytes as u64),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries.iter().map(|entry| entry.age.as_millis() as u64),
+            )),
+            Arc::new(BooleanArray::from(
+                entries.iter().map(|entry| entry.stale).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries.iter().map(|entry| entry.hits),
+            )),
+            Arc::new(BooleanArray::from(
+                entries
+                    .iter()
+                    .map(|entry| entry.revalidatable)
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )?)
+}
+
 fn logs(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let events = runtime.events();
     let schema = Arc::new(Schema::new(vec![
@@ -390,7 +452,7 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         // session-scoped DataFusion cache. These deliberately do not emulate
         // disk/exchange cache fields the adapter has not implemented.
         ("vgi_result_cache_stats", DiagnosticsKind::CacheStats),
-        ("vgi_result_cache", DiagnosticsKind::CacheEntries),
+        ("vgi_result_cache", DiagnosticsKind::DuckDbCacheEntries),
         ("vgi_result_cache_flush", DiagnosticsKind::CacheFlush),
         ("vgi_result_cache_reap", DiagnosticsKind::CacheReap),
     ] {
@@ -485,7 +547,7 @@ mod tests {
         assert_eq!(stats[0].num_rows(), 1);
 
         let entries = ctx
-            .sql("SELECT function FROM vgi_result_cache()")
+            .sql("SELECT key_hash, function, num_rows FROM vgi_result_cache()")
             .await?
             .collect()
             .await?;
