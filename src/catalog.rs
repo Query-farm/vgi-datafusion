@@ -28,14 +28,21 @@
 //! never bind bare, and re-binding them on each plan would reintroduce the cost
 //! this design exists to avoid.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::{CatalogProvider, SchemaProvider, Session, TableProvider};
-use datafusion::common::{Constraints, DataFusionError, Result as DFResult, Statistics};
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType, Volatility};
+use datafusion::common::{Constraints, DFSchema, DataFusionError, Result as DFResult, Statistics};
+use datafusion::execution::SessionState;
+use datafusion::logical_expr::utils::expr_to_columns;
+use datafusion::logical_expr::{
+    Expr, ExprSchemable, TableProviderFilterPushDown, TableType, Volatility,
+};
+use datafusion::physical_expr::expressions::Column as PhysicalColumn;
 use datafusion::physical_plan::empty::EmptyExec;
+use datafusion::physical_plan::projection::{ProjectionExec, ProjectionExpr};
 use datafusion::physical_plan::ExecutionPlan;
 
 use crate::{datafusion_constraints, to_df, VgiConnection, VgiTableProvider};
@@ -56,7 +63,10 @@ struct VgiCatalogTableProvider {
     schema_name: String,
     info: vgi_client::TableInfo,
     at: Option<vgi_client::At>,
-    output_schema: datafusion::arrow::datatypes::SchemaRef,
+    /// Complete catalog schema, including virtual generated columns.
+    output_schema: SchemaRef,
+    /// Columns the worker's nominated scan function physically emits.
+    physical_schema: SchemaRef,
     constraints: Constraints,
     bound: tokio::sync::OnceCell<Arc<VgiTableProvider>>,
     statistics: tokio::sync::OnceCell<Option<Arc<Statistics>>>,
@@ -71,6 +81,15 @@ impl VgiCatalogTableProvider {
         at: Option<vgi_client::At>,
     ) -> DFResult<Arc<Self>> {
         let output_schema = vgi_protocol::ipc::read_schema(&info.columns.0).map_err(to_df)?;
+        let physical_schema = Arc::new(Schema::new_with_metadata(
+            output_schema
+                .fields()
+                .iter()
+                .filter(|field| !field.metadata().contains_key("generated_expression"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            output_schema.metadata().clone(),
+        ));
         let constraints = datafusion_constraints(
             info.primary_key_constraints.clone(),
             info.unique_constraints.clone(),
@@ -83,6 +102,7 @@ impl VgiCatalogTableProvider {
             info,
             at,
             output_schema,
+            physical_schema,
             constraints,
             bound: tokio::sync::OnceCell::new(),
             statistics: tokio::sync::OnceCell::new(),
@@ -114,7 +134,7 @@ impl VgiCatalogTableProvider {
                         .await
                     }
                 }?;
-                provider.with_declared_schema(Arc::clone(&self.output_schema))
+                provider.with_declared_schema(Arc::clone(&self.physical_schema))
             })
             .await?;
         Ok(provider)
@@ -171,6 +191,86 @@ impl VgiCatalogTableProvider {
             filters,
         ))
     }
+
+    fn has_generated_columns(&self) -> bool {
+        self.physical_schema.fields().len() != self.output_schema.fields().len()
+    }
+
+    /// Build the catalog-visible projection above a physical VGI scan.
+    ///
+    /// Generated expressions are catalog metadata, while the backing function
+    /// emits only stored columns. DataFusion already has the SQL-expression and
+    /// physical-projection APIs needed to bridge those two schemas, so no
+    /// engine-specific logical node is necessary here.
+    fn generated_projection(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        input: Arc<dyn ExecutionPlan>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let session_state = state
+            .as_any()
+            .downcast_ref::<SessionState>()
+            .ok_or_else(|| {
+                DataFusionError::Plan(
+                    "VGI generated columns require DataFusion SessionState SQL expression support"
+                        .to_string(),
+                )
+            })?;
+        let physical_df_schema = DFSchema::try_from(self.physical_schema.as_ref().clone())?;
+        let selected: Vec<usize> = projection
+            .cloned()
+            .unwrap_or_else(|| (0..self.output_schema.fields().len()).collect());
+        let projected_schema = self.output_schema.project(&selected)?;
+        let mut expressions = Vec::with_capacity(selected.len());
+
+        for index in selected {
+            let field = self.output_schema.field(index);
+            let expr = if let Some(sql) = field.metadata().get("generated_expression") {
+                let logical = session_state
+                    .create_logical_expr(sql, &physical_df_schema)?
+                    .cast_to(field.data_type(), &physical_df_schema)?;
+                state.create_physical_expr(logical, &physical_df_schema)?
+            } else {
+                let physical_index = self.physical_schema.index_of(field.name())?;
+                Arc::new(PhysicalColumn::new(field.name(), physical_index))
+            };
+            expressions.push(ProjectionExpr {
+                expr,
+                alias: field.name().clone(),
+            });
+        }
+
+        Ok(Arc::new(ProjectionExec::try_new_with_schema_metadata(
+            expressions,
+            input,
+            &projected_schema,
+        )?))
+    }
+
+    /// A generated predicate cannot be sent to a function that has no such
+    /// physical input column. Physical-only predicates remain useful worker
+    /// hints; this provider reports every filter as `Inexact`, so DataFusion
+    /// still evaluates the predicate above the generated projection.
+    fn physical_filters(&self, filters: &[Expr]) -> Vec<Expr> {
+        let physical_names = self
+            .physical_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<HashSet<_>>();
+        filters
+            .iter()
+            .filter(|filter| {
+                let mut columns = HashSet::new();
+                expr_to_columns(filter, &mut columns).is_ok()
+                    && columns
+                        .iter()
+                        .all(|column| physical_names.contains(column.name.as_str()))
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -210,10 +310,17 @@ impl TableProvider for VgiCatalogTableProvider {
             };
             return Ok(Arc::new(EmptyExec::new(schema)));
         }
-        self.bound()
-            .await?
-            .scan(state, projection, filters, limit)
-            .await
+        let bound = self.bound().await?;
+        if !self.has_generated_columns() {
+            return bound.scan(state, projection, filters, limit).await;
+        }
+
+        // Fetch every stored column because an arbitrary generated expression
+        // may depend on any of them. Do not push LIMIT below the generated
+        // projection: an outer predicate may remove rows after generation.
+        let physical_filters = self.physical_filters(filters);
+        let input = bound.scan(state, None, &physical_filters, None).await?;
+        self.generated_projection(state, projection, input)
     }
 }
 
