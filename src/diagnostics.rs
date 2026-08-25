@@ -10,7 +10,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::{MemTable, TableFunctionArgs, TableFunctionImpl, TableProvider};
 use datafusion::common::{plan_err, Result as DFResult, ScalarValue};
 use datafusion::logical_expr::{
-    create_udf, ColumnarValue, ScalarFunctionImplementation, Volatility,
+    create_udf, ColumnarValue, ScalarFunctionArgs, ScalarFunctionImplementation, ScalarUDF,
+    ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion::prelude::SessionContext;
 
@@ -29,6 +30,8 @@ enum DiagnosticsKind {
     CacheEntries,
     Logs,
     LogStats,
+    CacheFlush,
+    CacheReap,
 }
 
 impl TableFunctionImpl for DiagnosticsTable {
@@ -42,11 +45,123 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::CacheEntries => cache_entries(&self.runtime)?,
             DiagnosticsKind::Logs => logs(&self.runtime)?,
             DiagnosticsKind::LogStats => log_stats(&self.runtime)?,
+            DiagnosticsKind::CacheFlush => operation_result(
+                "flushed",
+                (self.runtime.result_cache().flush_all() + self.runtime.flush_plan_cache()) as u64,
+            )?,
+            DiagnosticsKind::CacheReap => {
+                operation_result("removed", self.runtime.result_cache().reap() as u64)?
+            }
         };
         Ok(Arc::new(MemTable::try_new(
             batch.schema(),
             vec![vec![batch]],
         )?))
+    }
+}
+
+fn operation_result(name: &str, value: u64) -> DFResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::UInt64, false)]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![Arc::new(UInt64Array::from(vec![value]))],
+    )?)
+}
+
+/// DuckDB spells physical types differently from Arrow. The shared VGI corpus
+/// uses `typeof` to assert overload selection, so expose that harmless dialect
+/// compatibility through DataFusion's ordinary scalar-UDF API.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct DuckDbTypeOf {
+    signature: Signature,
+}
+
+impl DuckDbTypeOf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl ScalarUDFImpl for DuckDbTypeOf {
+    fn name(&self) -> &str {
+        "typeof"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let Some(argument) = args.args.first() else {
+            return plan_err!("typeof expects one argument");
+        };
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(
+            duckdb_type_name(&argument.data_type()),
+        ))))
+    }
+}
+
+fn duckdb_type_name(data_type: &DataType) -> String {
+    match data_type {
+        DataType::Null => "NULL".to_string(),
+        DataType::Boolean => "BOOLEAN".to_string(),
+        DataType::Int8 => "TINYINT".to_string(),
+        DataType::Int16 => "SMALLINT".to_string(),
+        DataType::Int32 => "INTEGER".to_string(),
+        DataType::Int64 => "BIGINT".to_string(),
+        DataType::UInt8 => "UTINYINT".to_string(),
+        DataType::UInt16 => "USMALLINT".to_string(),
+        DataType::UInt32 => "UINTEGER".to_string(),
+        DataType::UInt64 => "UBIGINT".to_string(),
+        DataType::Float16 | DataType::Float32 => "FLOAT".to_string(),
+        DataType::Float64 => "DOUBLE".to_string(),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => "VARCHAR".to_string(),
+        DataType::Binary
+        | DataType::LargeBinary
+        | DataType::BinaryView
+        | DataType::FixedSizeBinary(_) => "BLOB".to_string(),
+        DataType::Date32 | DataType::Date64 => "DATE".to_string(),
+        DataType::Time32(_) | DataType::Time64(_) => "TIME".to_string(),
+        DataType::Timestamp(_, timezone) if timezone.is_some() => {
+            "TIMESTAMP WITH TIME ZONE".to_string()
+        }
+        DataType::Timestamp(_, _) => "TIMESTAMP".to_string(),
+        DataType::Duration(_) | DataType::Interval(_) => "INTERVAL".to_string(),
+        DataType::Decimal32(precision, scale)
+        | DataType::Decimal64(precision, scale)
+        | DataType::Decimal128(precision, scale)
+        | DataType::Decimal256(precision, scale) => format!("DECIMAL({precision},{scale})"),
+        DataType::List(field) | DataType::LargeList(field) | DataType::ListView(field) => {
+            format!("{}[]", duckdb_type_name(field.data_type()))
+        }
+        DataType::LargeListView(field) => format!("{}[]", duckdb_type_name(field.data_type())),
+        DataType::FixedSizeList(field, size) => {
+            format!("{}[{size}]", duckdb_type_name(field.data_type()))
+        }
+        DataType::Struct(fields) => format!(
+            "STRUCT({})",
+            fields
+                .iter()
+                .map(|field| format!("{} {}", field.name(), duckdb_type_name(field.data_type())))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        DataType::Map(field, _) => match field.data_type() {
+            DataType::Struct(fields) if fields.len() == 2 => format!(
+                "MAP({}, {})",
+                duckdb_type_name(fields[0].data_type()),
+                duckdb_type_name(fields[1].data_type())
+            ),
+            _ => format!("MAP({})", duckdb_type_name(field.data_type())),
+        },
+        DataType::Dictionary(_, value) => duckdb_type_name(value),
+        other => format!("{other}"),
     }
 }
 
@@ -271,6 +386,13 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ("vgi_cache_entries", DiagnosticsKind::CacheEntries),
         ("vgi_logs", DiagnosticsKind::Logs),
         ("vgi_log_stats", DiagnosticsKind::LogStats),
+        // DuckDB-extension compatibility aliases backed by the same
+        // session-scoped DataFusion cache. These deliberately do not emulate
+        // disk/exchange cache fields the adapter has not implemented.
+        ("vgi_result_cache_stats", DiagnosticsKind::CacheStats),
+        ("vgi_result_cache", DiagnosticsKind::CacheEntries),
+        ("vgi_result_cache_flush", DiagnosticsKind::CacheFlush),
+        ("vgi_result_cache_reap", DiagnosticsKind::CacheReap),
     ] {
         if !state.table_functions().contains_key(name) {
             ctx.register_udtf(
@@ -281,6 +403,10 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
                 }),
             );
         }
+    }
+
+    if !state.scalar_functions().contains_key("typeof") {
+        ctx.register_udf(ScalarUDF::new_from_impl(DuckDbTypeOf::new()));
     }
 
     if !state.scalar_functions().contains_key("vgi_cache_flush") {
@@ -298,5 +424,71 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ctx.register_udf(zero_arg_u64("vgi_logs_clear", move || {
             runtime.clear_events() as u64
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::StringArray;
+
+    #[tokio::test]
+    async fn duckdb_typeof_names_use_the_existing_scalar_udf_surface() -> DFResult<()> {
+        let ctx = SessionContext::new();
+        register(&ctx, Arc::new(VgiRuntime::default()));
+
+        let batches = ctx
+            .sql(
+                "SELECT typeof(CAST(1 AS TINYINT)), typeof(CAST(1 AS INTEGER)), \
+                 typeof(CAST(1 AS BIGINT)), typeof(CAST(1 AS DOUBLE)), typeof('x')",
+            )
+            .await?
+            .collect()
+            .await?;
+        let batch = &batches[0];
+        let values = batch
+            .columns()
+            .iter()
+            .map(|column| {
+                column
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("typeof returns Utf8")
+                    .value(0)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            ["TINYINT", "INTEGER", "BIGINT", "DOUBLE", "VARCHAR"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duckdb_cache_names_alias_the_session_cache() -> DFResult<()> {
+        let ctx = SessionContext::new();
+        register(&ctx, Arc::new(VgiRuntime::default()));
+
+        let flush = ctx
+            .sql("SELECT flushed FROM vgi_result_cache_flush()")
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(flush[0].num_rows(), 1);
+
+        let stats = ctx
+            .sql("SELECT entries, total_bytes FROM vgi_result_cache_stats()")
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(stats[0].num_rows(), 1);
+
+        let entries = ctx
+            .sql("SELECT function FROM vgi_result_cache()")
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(entries.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+        Ok(())
     }
 }
