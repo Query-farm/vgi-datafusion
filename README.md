@@ -221,6 +221,15 @@ that timeout.
   supported independently. See `docs/implementation-inventory.md` for the API
   boundaries and recommended sequence.
 
+## SQLLogicTest compatibility
+
+The shared VGI corpus is tracked by capability, group, and individual file.
+See [`docs/corpus-compatibility.md`](docs/corpus-compatibility.md) for the
+completion rules, current EC2 baseline, adaptation policy, prioritized gaps,
+and regression command. [`corpus/compatibility.json`](corpus/compatibility.json)
+is the machine-readable status manifest; the runner rejects newly added corpus
+groups until they are assigned and reviewed.
+
 ## License
 
 See `LICENSE` at the repository root.
