@@ -59,19 +59,19 @@ separate because transport equivalence is itself part of completion.
 
 ## Initial baseline — 2026-08-25
 
-The 327-file normal corpus contains 4,114 measured positive records in the
-current environment:
+The canonical EC2 subprocess run of the 327-file normal corpus contains 4,114
+measured positive records:
 
 | Metric | Result |
 |---|---:|
 | Files run / skipped by missing environment | 278 / 49 |
-| Records executed | 2,465 / 4,114 (59.9%) |
-| Comparable results agreeing | 1,602 / 1,745 (91.8%) |
-| Exact results | 1,565 |
+| Records executed | 2,473 / 4,114 (60.1%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) |
+| Exact results | 1,567 |
 | Rendering-equivalent results | 37 |
-| Genuine value differences | 143 |
+| Genuine value differences | 149 |
 | DuckDB/extension configuration records reported separately | 607 |
-| Timeouts | 1 |
+| Timeouts | 0 |
 
 The deferred writable corpus under `../vgi/test_deferred/writable` is tracked
 as a future input, not mixed into this baseline. Six `.test_slow` files are also
