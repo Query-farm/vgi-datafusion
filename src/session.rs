@@ -106,7 +106,12 @@ fn runtime_registry() -> &'static Mutex<HashMap<String, Weak<VgiRuntime>>> {
 struct RegisteredNames {
     scalar: HashSet<String>,
     aggregate: HashSet<String>,
-    table: HashSet<String>,
+    /// Published table-function name -> worker-declared named arguments.
+    ///
+    /// Besides DETACH bookkeeping, this lets the SQL compatibility pass
+    /// distinguish DuckDB's `name=value` named-argument spelling from an
+    /// ordinary equality expression without guessing from syntax alone.
+    table: HashMap<String, HashSet<String>>,
 }
 
 type SessionRegistrations = HashMap<String, HashMap<String, RegisteredNames>>;
@@ -119,7 +124,7 @@ fn registration_registry() -> &'static Mutex<SessionRegistrations> {
 enum RegistrationKind {
     Scalar,
     Aggregate,
-    Table,
+    Table(HashSet<String>),
 }
 
 fn record_registration(ctx: &SessionContext, alias: &str, kind: RegistrationKind, name: String) {
@@ -132,8 +137,40 @@ fn record_registration(ctx: &SessionContext, alias: &str, kind: RegistrationKind
     match kind {
         RegistrationKind::Scalar => registered.scalar.insert(name),
         RegistrationKind::Aggregate => registered.aggregate.insert(name),
-        RegistrationKind::Table => registered.table.insert(name),
+        RegistrationKind::Table(named_arguments) => {
+            registered.table.insert(name, named_arguments).is_none()
+        }
     };
+}
+
+fn named_arguments(specs: &vgi_client::ArgSpecs) -> HashSet<String> {
+    specs
+        .0
+        .iter()
+        .filter(|spec| spec.is_named)
+        .map(|spec| spec.name.to_ascii_lowercase())
+        .collect()
+}
+
+fn is_declared_named_table_argument(
+    ctx: &SessionContext,
+    function_name: &str,
+    argument_name: &str,
+) -> bool {
+    registration_registry()
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions.get(&ctx.session_id()).map(|aliases| {
+                aliases.values().any(|registered| {
+                    registered.table.iter().any(|(name, arguments)| {
+                        name.eq_ignore_ascii_case(function_name)
+                            && arguments.contains(&argument_name.to_ascii_lowercase())
+                    })
+                })
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn deregister_alias_functions(ctx: &SessionContext, alias: &str) {
@@ -154,7 +191,7 @@ fn deregister_alias_functions(ctx: &SessionContext, alias: &str) {
     for name in registered.aggregate {
         ctx.deregister_udaf(&name);
     }
-    for name in registered.table {
+    for name in registered.table.into_keys() {
         ctx.deregister_udtf(&name);
     }
 }
@@ -696,8 +733,8 @@ impl StripPrefixCi for str {
 /// which is itself dormant.
 fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResult<()> {
     use datafusion::sql::sqlparser::ast::{
-        Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName,
-        ObjectNamePart, SelectItem, SetExpr, TableFactor, VisitorMut,
+        BinaryOperator, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+        ObjectName, ObjectNamePart, SelectItem, SetExpr, TableFactor, VisitorMut,
     };
 
     struct Rewrite<'a> {
@@ -726,22 +763,60 @@ fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResul
                     }
                 }
 
+                let function_name = name
+                    .0
+                    .first()
+                    .and_then(ObjectNamePart::as_ident)
+                    .map(|ident| ident.value.clone())
+                    .unwrap_or_default();
+
                 // DataFusion's TableFactor::Table planner rejects named
                 // FunctionArgs before a TableFunctionImpl can see them. Carry
                 // each one as a private, single-field struct literal instead;
                 // the VGI implementation unwraps it back into Arguments::named.
                 // This preserves names and ordering without changing DataFusion.
                 for argument in &mut args.args {
-                    let FunctionArg::Named { name, arg, .. } = argument else {
-                        continue;
+                    let named = match argument {
+                        FunctionArg::Named { name, arg, .. } => match arg {
+                            FunctionArgExpr::Expr(value) => {
+                                Some((name.value.clone(), value.clone()))
+                            }
+                            _ => None,
+                        },
+                        FunctionArg::ExprNamed {
+                            name: SQLExpr::Identifier(name),
+                            arg: FunctionArgExpr::Expr(value),
+                            ..
+                        } => Some((name.value.clone(), value.clone())),
+                        // DuckDB also accepts `f(option=value)`. The generic
+                        // DataFusion dialect parses that as a positional
+                        // equality expression, so recognize it only when VGI
+                        // discovery says `option` really is a named parameter.
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::BinaryOp {
+                            left,
+                            op: BinaryOperator::Eq,
+                            right,
+                        })) => match left.as_ref() {
+                            SQLExpr::Identifier(name)
+                                if is_declared_named_table_argument(
+                                    self.ctx,
+                                    &function_name,
+                                    &name.value,
+                                ) =>
+                            {
+                                Some((name.value.clone(), right.as_ref().clone()))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
                     };
-                    let FunctionArgExpr::Expr(value) = arg else {
+                    let Some((name, value)) = named else {
                         continue;
                     };
                     *argument = FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::Struct {
                         values: vec![SQLExpr::Named {
-                            expr: Box::new(value.clone()),
-                            name: Ident::new(format!("{NAMED_ARG_PREFIX}{}", name.value)),
+                            expr: Box::new(value),
+                            name: Ident::new(format!("{NAMED_ARG_PREFIX}{name}")),
                         }],
                         fields: vec![],
                     }));
@@ -1423,6 +1498,7 @@ fn register_global_functions(
                     buffered: kind == "table_buffering",
                     input_from_args: info.input_from_args,
                 };
+                let named_arguments = named_arguments(&metadata.specs);
                 ctx.register_udtf(
                     &name,
                     Arc::new(VgiTableFunction::new(
@@ -1433,7 +1509,12 @@ fn register_global_functions(
                         Some(metadata),
                     )),
                 );
-                record_registration(ctx, &spec.alias, RegistrationKind::Table, name);
+                record_registration(
+                    ctx,
+                    &spec.alias,
+                    RegistrationKind::Table(named_arguments),
+                    name,
+                );
             }
             _ => unreachable!(),
         }
@@ -1728,6 +1809,10 @@ fn register_table_functions(
     for (schema_name, schema) in provider.vgi_schemas() {
         for function in schema.table_function_names() {
             let metadata = schema.table_function_metadata(function).cloned();
+            let declared_named_arguments = metadata
+                .as_ref()
+                .map(|metadata| named_arguments(&metadata.specs))
+                .unwrap_or_default();
             let make = || {
                 Arc::new(VgiTableFunction::new(
                     conn.clone(),
@@ -1745,7 +1830,12 @@ fn register_table_functions(
                 // unambiguous way to say which one you meant.
                 if !ctx.state().table_functions().contains_key(&name) {
                     ctx.register_udtf(&name, make());
-                    record_registration(ctx, &spec.alias, RegistrationKind::Table, name);
+                    record_registration(
+                        ctx,
+                        &spec.alias,
+                        RegistrationKind::Table(declared_named_arguments.clone()),
+                        name,
+                    );
                 }
             }
         }
@@ -2001,5 +2091,44 @@ mod tests {
         let debug = format!("{parsed:?}");
         assert!(!debug.contains("sentinel-secret"), "{debug}");
         assert!(debug.contains("bearer_token"), "{debug}");
+    }
+
+    #[test]
+    fn duckdb_equals_rewrites_only_declared_named_table_arguments() {
+        let ctx = SessionContext::new();
+        record_registration(
+            &ctx,
+            "example",
+            RegistrationKind::Table(HashSet::from(["increment".to_string()])),
+            "example.sequence".to_string(),
+        );
+        let parse_and_rewrite = |sql: &str| {
+            let state = ctx.state();
+            let dialect = state.config_options().sql_parser.dialect;
+            let mut statement = state.sql_to_statement(sql, &dialect).expect("parses");
+            rewrite_vgi_sql(&ctx, &mut statement).expect("rewrites");
+            statement.to_string()
+        };
+
+        let named =
+            parse_and_rewrite("SELECT * FROM example.sequence(5, increment=10, batch_size := 2)");
+        assert!(
+            named.contains(&format!("{NAMED_ARG_PREFIX}increment")),
+            "declared `increment` was not carried as a named argument: {named}"
+        );
+        assert!(
+            named.contains(&format!("{NAMED_ARG_PREFIX}batch_size")),
+            "explicit named syntax regressed: {named}"
+        );
+
+        let equality = parse_and_rewrite("SELECT * FROM example.sequence(5, other=10)");
+        assert!(
+            !equality.contains(&format!("{NAMED_ARG_PREFIX}other")),
+            "an undeclared equality was mistaken for a named argument: {equality}"
+        );
+        assert!(
+            equality.contains("other = 10"),
+            "equality was lost: {equality}"
+        );
     }
 }
