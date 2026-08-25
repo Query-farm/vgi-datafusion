@@ -106,6 +106,23 @@ async fn worker_function_metadata_is_queryable_and_detaches() -> datafusion::err
         1
     );
 
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT count(*) FROM vgi_function_arguments() \
+         WHERE catalog_name = 'ex' AND function_name = 'multiply' \
+         AND arg_name = 'factor' AND is_const AND arg_description IS NOT NULL",
+    )
+    .await?
+    .collect()
+    .await?;
+    let documented_const = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(documented_const, 1);
+
     vgi_datafusion::sql(&ctx, "DETACH ex").await?;
     let batches = vgi_datafusion::sql(
         &ctx,

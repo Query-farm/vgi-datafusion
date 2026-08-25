@@ -35,6 +35,7 @@ enum DiagnosticsKind {
     Logs,
     DuckDbLogs,
     DuckDbFunctions,
+    VgiFunctionArguments,
     LogStats,
     CacheFlush,
     CacheReap,
@@ -53,6 +54,7 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::Logs => logs(&self.runtime)?,
             DiagnosticsKind::DuckDbLogs => duckdb_logs(&self.runtime)?,
             DiagnosticsKind::DuckDbFunctions => duckdb_functions(&self.runtime)?,
+            DiagnosticsKind::VgiFunctionArguments => vgi_function_arguments(&self.runtime)?,
             DiagnosticsKind::LogStats => log_stats(&self.runtime)?,
             DiagnosticsKind::CacheFlush => operation_result(
                 "flushed",
@@ -709,6 +711,215 @@ fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     Ok(RecordBatch::try_new(schema, arrays)?)
 }
 
+#[derive(Debug)]
+struct FunctionArgumentRow {
+    catalog_name: String,
+    schema_name: String,
+    function_name: String,
+    function_type: String,
+    field_index: u64,
+    arg_position: Option<i64>,
+    arg_name: String,
+    arg_type: String,
+    is_positional: bool,
+    is_named: bool,
+    is_const: bool,
+    is_varargs: bool,
+    is_any_type: bool,
+    arg_description: Option<String>,
+    arg_default: Option<String>,
+    arg_choices: Option<String>,
+    arg_range: Option<String>,
+    arg_pattern: Option<String>,
+}
+
+fn append_argument_rows(
+    rows: &mut Vec<FunctionArgumentRow>,
+    catalog: &str,
+    schema_name: &str,
+    function_name: &str,
+    function_type: &str,
+    schema: &Schema,
+) {
+    let mut positional = 0_i64;
+    for (field_index, field) in schema.fields().iter().enumerate() {
+        let metadata = field.metadata();
+        let is_named = metadata
+            .get("vgi_arg")
+            .is_some_and(|value| value.eq_ignore_ascii_case("named"))
+            || field.name().starts_with("named_");
+        let is_positional = !is_named;
+        let arg_position = is_positional.then_some(positional);
+        if is_positional {
+            positional += 1;
+        }
+        let is_any_type = metadata
+            .get("vgi_type")
+            .is_some_and(|value| value.eq_ignore_ascii_case("any"));
+        let arg_type = if is_any_type {
+            "ANY".to_string()
+        } else if metadata
+            .get("vgi_type")
+            .is_some_and(|value| value.eq_ignore_ascii_case("table"))
+        {
+            "TABLE".to_string()
+        } else {
+            duckdb_type_name(field.data_type())
+        };
+        rows.push(FunctionArgumentRow {
+            catalog_name: catalog.to_string(),
+            schema_name: schema_name.to_string(),
+            function_name: function_name.to_string(),
+            function_type: function_type.to_string(),
+            field_index: field_index as u64,
+            arg_position,
+            arg_name: field
+                .name()
+                .strip_prefix("named_")
+                .unwrap_or(field.name())
+                .to_string(),
+            arg_type,
+            is_positional,
+            is_named,
+            is_const: metadata
+                .get("vgi_const")
+                .is_some_and(|value| value == "true"),
+            is_varargs: metadata
+                .get("vgi_varargs")
+                .is_some_and(|value| value == "true"),
+            is_any_type,
+            arg_description: metadata.get("vgi_doc").cloned(),
+            arg_default: metadata.get("vgi_default").cloned(),
+            arg_choices: metadata.get("vgi_choices").cloned(),
+            arg_range: metadata.get("vgi_range").cloned(),
+            arg_pattern: metadata.get("vgi_pattern").cloned(),
+        });
+    }
+}
+
+fn vgi_function_arguments(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let mut rows = Vec::new();
+    for (alias, metadata) in runtime.catalog_metadata() {
+        for info in &metadata.functions {
+            let schema = if info.arguments.0.is_empty() {
+                Arc::new(Schema::empty())
+            } else {
+                vgi_protocol::ipc::read_schema(&info.arguments.0).map_err(crate::to_df)?
+            };
+            append_argument_rows(
+                &mut rows,
+                &alias,
+                &info.schema_name,
+                &info.name,
+                &info.function_type.0.to_ascii_lowercase(),
+                &schema,
+            );
+        }
+        for info in &metadata.macros {
+            let schema = match &info.arguments_schema {
+                Some(arguments) if !arguments.0.is_empty() => {
+                    vgi_protocol::ipc::read_schema(&arguments.0).map_err(crate::to_df)?
+                }
+                _ => Arc::new(Schema::new(
+                    info.parameters
+                        .iter()
+                        .map(|name| Field::new(name, DataType::Null, true))
+                        .collect::<Vec<_>>(),
+                )),
+            };
+            append_argument_rows(
+                &mut rows,
+                &alias,
+                &info.schema_name,
+                &info.name,
+                &info.macro_type.0.to_ascii_lowercase(),
+                &schema,
+            );
+        }
+    }
+
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.catalog_name.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.schema_name.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.function_name.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.function_type.as_str()),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|row| row.field_index),
+        )),
+        Arc::new(Int64Array::from(
+            rows.iter().map(|row| row.arg_position).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.arg_name.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.arg_type.as_str()),
+        )),
+        Arc::new(BooleanArray::from(
+            rows.iter().map(|row| row.is_positional).collect::<Vec<_>>(),
+        )),
+        Arc::new(BooleanArray::from(
+            rows.iter().map(|row| row.is_named).collect::<Vec<_>>(),
+        )),
+        Arc::new(BooleanArray::from(
+            rows.iter().map(|row| row.is_const).collect::<Vec<_>>(),
+        )),
+        Arc::new(BooleanArray::from(
+            rows.iter().map(|row| row.is_varargs).collect::<Vec<_>>(),
+        )),
+        Arc::new(BooleanArray::from(
+            rows.iter().map(|row| row.is_any_type).collect::<Vec<_>>(),
+        )),
+        optional_strings(&rows, |row| row.arg_description.as_deref()),
+        optional_strings(&rows, |row| row.arg_default.as_deref()),
+        optional_strings(&rows, |row| row.arg_choices.as_deref()),
+        optional_strings(&rows, |row| row.arg_range.as_deref()),
+        optional_strings(&rows, |row| row.arg_pattern.as_deref()),
+    ];
+    let names = [
+        "catalog_name",
+        "schema_name",
+        "function_name",
+        "function_type",
+        "field_index",
+        "arg_position",
+        "arg_name",
+        "arg_type",
+        "is_positional",
+        "is_named",
+        "is_const",
+        "is_varargs",
+        "is_any_type",
+        "arg_description",
+        "arg_default",
+        "arg_choices",
+        "arg_range",
+        "arg_pattern",
+    ];
+    let schema = Arc::new(Schema::new(
+        names
+            .into_iter()
+            .zip(&arrays)
+            .map(|(name, array)| Field::new(name, array.data_type().clone(), true))
+            .collect::<Vec<_>>(),
+    ));
+    Ok(RecordBatch::try_new(schema, arrays)?)
+}
+
+fn optional_strings<'a, T>(rows: &'a [T], value: impl Fn(&'a T) -> Option<&'a str>) -> ArrayRef {
+    Arc::new(StringArray::from(
+        rows.iter().map(value).collect::<Vec<_>>(),
+    ))
+}
+
 fn log_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let mut grouped = std::collections::BTreeMap::<String, (u64, i64)>::new();
     for event in runtime.events() {
@@ -772,6 +983,10 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ("vgi_result_cache_reap", DiagnosticsKind::CacheReap),
         ("duckdb_logs", DiagnosticsKind::DuckDbLogs),
         ("duckdb_functions", DiagnosticsKind::DuckDbFunctions),
+        (
+            "vgi_function_arguments",
+            DiagnosticsKind::VgiFunctionArguments,
+        ),
     ] {
         if !state.table_functions().contains_key(name) {
             ctx.register_udtf(
