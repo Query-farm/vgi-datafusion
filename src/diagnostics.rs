@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    new_null_array, ArrayRef, BooleanArray, Int64Array, ListBuilder, StringArray, StringBuilder,
+    ArrayRef, BooleanArray, Int64Array, ListBuilder, MapBuilder, StringArray, StringBuilder,
     UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -169,6 +169,18 @@ pub(crate) fn duckdb_type_name(data_type: &DataType) -> String {
             ),
             _ => format!("MAP({})", duckdb_type_name(field.data_type())),
         },
+        DataType::Union(fields, _) => format!(
+            "UNION({})",
+            fields
+                .iter()
+                .map(|(_, field)| format!(
+                    "{} {}",
+                    field.name(),
+                    duckdb_type_name(field.data_type())
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         DataType::Dictionary(_, value) => duckdb_type_name(value),
         other => format!("{other}"),
     }
@@ -475,6 +487,7 @@ struct DuckDbFunctionRow {
     description: String,
     varargs: Option<String>,
     categories: Vec<String>,
+    tags: Vec<(String, String)>,
 }
 
 fn function_row(
@@ -492,9 +505,14 @@ fn function_row(
         Some(value) if value.eq_ignore_ascii_case("table") => "TABLE".to_string(),
         _ => duckdb_type_name(field.data_type()),
     };
-    let parameters = arguments
-        .fields()
-        .iter()
+    let fixed_arguments = arguments.fields().iter().filter(|field| {
+        !field
+            .metadata()
+            .get("vgi_varargs")
+            .is_some_and(|value| value == "true")
+    });
+    let parameters = fixed_arguments
+        .clone()
         .map(|field| {
             field
                 .name()
@@ -503,9 +521,7 @@ fn function_row(
                 .to_string()
         })
         .collect::<Vec<_>>();
-    let parameter_types = arguments
-        .fields()
-        .iter()
+    let parameter_types = fixed_arguments
         .map(|field| parameter_type(field))
         .collect::<Vec<_>>();
     let varargs = arguments
@@ -555,6 +571,7 @@ fn function_row(
         description: info.description.clone(),
         varargs,
         categories: info.categories.clone(),
+        tags: info.tags.clone(),
     })
 }
 
@@ -592,6 +609,7 @@ fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
                 description: info.comment.clone().unwrap_or_default(),
                 varargs: None,
                 categories: Vec::new(),
+                tags: info.tags.clone(),
             });
         }
         for info in &metadata.global_functions {
@@ -622,20 +640,15 @@ fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             .map(|row| row.categories.clone())
             .collect::<Vec<_>>(),
     );
-    let tags_type = DataType::Map(
-        Arc::new(Field::new(
-            "entries",
-            DataType::Struct(
-                vec![
-                    Field::new("key", DataType::Utf8, false),
-                    Field::new("value", DataType::Utf8, true),
-                ]
-                .into(),
-            ),
-            false,
-        )),
-        false,
-    );
+    let mut tags = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+    for row in &rows {
+        for (key, value) in &row.tags {
+            tags.keys().append_value(key);
+            tags.values().append_value(value);
+        }
+        tags.append(true)?;
+    }
+    let tags: ArrayRef = Arc::new(tags.finish());
     let arrays: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from_iter_values(
             rows.iter().map(|row| row.database_name.as_str()),
@@ -670,7 +683,7 @@ fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
                 .collect::<Vec<_>>(),
         )),
         categories,
-        new_null_array(&tags_type, rows.len()),
+        tags,
     ];
     let names = [
         "database_name",
