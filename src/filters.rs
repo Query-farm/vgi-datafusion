@@ -30,6 +30,11 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{Result as DFResult, ScalarValue};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
+use datafusion::physical_expr::expressions::{
+    BinaryExpr as PhysicalBinaryExpr, CastExpr, Column as PhysicalColumn, InListExpr,
+    IsNotNullExpr, IsNullExpr, Literal,
+};
+use datafusion::physical_expr::PhysicalExpr;
 
 /// A constant hoisted out of a predicate, to become its own column.
 enum Constant {
@@ -83,6 +88,8 @@ struct Builder<'a> {
     /// filter lands on whichever column happens to occupy that slot — silently
     /// filtering on the wrong data rather than failing.
     referenced_columns: Vec<i64>,
+    /// Side IPC batches for physical `IN` expressions produced by joins.
+    join_keys: Vec<Vec<u8>>,
 }
 
 impl<'a> Builder<'a> {
@@ -160,6 +167,134 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Translate a physical predicate snapshot. DataFusion's post-optimizer
+    /// dynamic-filter hook uses physical expressions, whereas ordinary
+    /// `TableProvider` pushdown arrives as logical [`Expr`]s.
+    fn build_physical(
+        &mut self,
+        expr: &dyn PhysicalExpr,
+        side_join_keys: bool,
+    ) -> Option<serde_json::Value> {
+        if let Some(binary) = expr.downcast_ref::<PhysicalBinaryExpr>() {
+            return self.physical_binary(binary, side_join_keys);
+        }
+        if let Some(is_null) = expr.downcast_ref::<IsNullExpr>() {
+            let name = physical_column_name(is_null.arg().as_ref())?;
+            return Some(serde_json::json!({
+                "type": "is_null",
+                "column_name": name,
+                "column_index": self.column_index(&name)?,
+            }));
+        }
+        if let Some(is_not_null) = expr.downcast_ref::<IsNotNullExpr>() {
+            let name = physical_column_name(is_not_null.arg().as_ref())?;
+            return Some(serde_json::json!({
+                "type": "is_not_null",
+                "column_name": name,
+                "column_index": self.column_index(&name)?,
+            }));
+        }
+        if let Some(list) = expr.downcast_ref::<InListExpr>() {
+            if list.negated() || list.is_empty() {
+                return None;
+            }
+            let name = physical_column_name(list.expr().as_ref())?;
+            let index = self.column_index(&name)?;
+            let values = list
+                .list()
+                .iter()
+                .map(|value| physical_literal(value.as_ref()))
+                .collect::<Option<Vec<_>>>()?;
+            if side_join_keys {
+                self.join_keys.push(join_keys_ipc(&name, values).ok()?);
+                return Some(serde_json::json!({
+                    "type": "join_keys",
+                    "column_name": name,
+                    "column_index": index,
+                    "keys_column": name,
+                }));
+            }
+            let mut refs = Vec::with_capacity(values.len());
+            for value in &values {
+                refs.push(self.add_constant(Constant::from_scalar(value)?));
+            }
+            return Some(serde_json::json!({
+                "type": "in",
+                "column_name": name,
+                "column_index": index,
+                "value_refs": refs,
+            }));
+        }
+        None
+    }
+
+    /// Top-level predicates are implicitly conjoined by the VGI wire format,
+    /// so flatten physical AND trees. Besides matching DataFusion's generated
+    /// min/max + membership filters, this also supports multi-column join keys
+    /// without inventing a cross-column conjunction node (which VGI does not
+    /// have).
+    fn build_physical_top(
+        &mut self,
+        expr: &dyn PhysicalExpr,
+        side_join_keys: bool,
+        out: &mut Vec<serde_json::Value>,
+    ) {
+        if let Some(binary) = expr.downcast_ref::<PhysicalBinaryExpr>() {
+            if *binary.op() == Operator::And {
+                self.build_physical_top(binary.left().as_ref(), side_join_keys, out);
+                self.build_physical_top(binary.right().as_ref(), side_join_keys, out);
+                return;
+            }
+        }
+        if let Some(spec) = self.build_physical(expr, side_join_keys) {
+            out.push(spec);
+        }
+    }
+
+    fn physical_binary(
+        &mut self,
+        binary: &PhysicalBinaryExpr,
+        side_join_keys: bool,
+    ) -> Option<serde_json::Value> {
+        let op = *binary.op();
+        if op == Operator::And || op == Operator::Or {
+            let left = self.build_physical(binary.left().as_ref(), side_join_keys);
+            let right = self.build_physical(binary.right().as_ref(), side_join_keys);
+            return match op {
+                Operator::And => match (left, right) {
+                    (Some(left), Some(right)) => self.conjunction("and", left, right),
+                    (Some(one), None) | (None, Some(one)) => Some(one),
+                    (None, None) => None,
+                },
+                Operator::Or => self.conjunction("or", left?, right?),
+                _ => unreachable!(),
+            };
+        }
+        let (name, value, op) = match (
+            physical_column_name(binary.left().as_ref()),
+            physical_literal(binary.right().as_ref()),
+        ) {
+            (Some(name), Some(value)) => (name, value, op),
+            _ => match (
+                physical_literal(binary.left().as_ref()),
+                physical_column_name(binary.right().as_ref()),
+            ) {
+                (Some(value), Some(name)) => (name, value, flip(op)?),
+                _ => return None,
+            },
+        };
+        let index = self.column_index(&name)?;
+        let token = op_token(op)?;
+        let value_ref = self.add_constant(Constant::from_scalar(&value)?);
+        Some(serde_json::json!({
+            "type": "constant",
+            "column_name": name,
+            "column_index": index,
+            "op": token,
+            "value_ref": value_ref,
+        }))
     }
 
     /// Build an `and`/`or` node over two already-translated children.
@@ -261,6 +396,22 @@ fn literal(e: &Expr) -> Option<ScalarValue> {
     }
 }
 
+fn physical_column_name(expr: &dyn PhysicalExpr) -> Option<String> {
+    if let Some(column) = expr.downcast_ref::<PhysicalColumn>() {
+        return Some(column.name().to_string());
+    }
+    expr.downcast_ref::<CastExpr>()
+        .and_then(|cast| physical_column_name(cast.expr.as_ref()))
+}
+
+fn physical_literal(expr: &dyn PhysicalExpr) -> Option<ScalarValue> {
+    if let Some(literal) = expr.downcast_ref::<Literal>() {
+        return Some(literal.value().clone());
+    }
+    expr.downcast_ref::<CastExpr>()
+        .and_then(|cast| physical_literal(cast.expr.as_ref()))
+}
+
 /// The VGI op token for a comparison, or `None` for anything else.
 fn op_token(op: Operator) -> Option<&'static str> {
     Some(match op {
@@ -293,6 +444,7 @@ pub(crate) fn is_pushable(expr: &Expr, schema: &SchemaRef) -> bool {
         schema,
         constants: Vec::new(),
         referenced_columns: Vec::new(),
+        join_keys: Vec::new(),
     };
     b.build(expr).is_some()
 }
@@ -316,13 +468,60 @@ pub(crate) struct Pushdown {
     pub columns: Vec<i64>,
 }
 
+/// A runtime physical-expression pushdown and any side batches referenced by
+/// its `join_keys` specs.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DynamicPushdown {
+    pub pushdown: Pushdown,
+    pub join_keys: Vec<Vec<u8>>,
+}
+
 pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown> {
     let mut b = Builder {
         schema,
         constants: Vec::new(),
         referenced_columns: Vec::new(),
+        join_keys: Vec::new(),
     };
     let specs: Vec<serde_json::Value> = exprs.iter().filter_map(|e| b.build(e)).collect();
+    if specs.is_empty() {
+        return Ok(Pushdown::default());
+    }
+    finish_pushdown(specs, b.constants, b.referenced_columns)
+}
+
+/// Serialize snapshots of DataFusion runtime filters.
+///
+/// With `side_join_keys`, physical `IN` lists use VGI's `join_keys` side IPC
+/// batches (schema metadata `vgi_join_keys_version=2`). Continuation ticks do
+/// not carry those side batches, so callers use `false` there to inline values.
+pub(crate) fn serialize_physical(
+    exprs: &[Arc<dyn PhysicalExpr>],
+    schema: &SchemaRef,
+    side_join_keys: bool,
+) -> DFResult<DynamicPushdown> {
+    let mut b = Builder {
+        schema,
+        constants: Vec::new(),
+        referenced_columns: Vec::new(),
+        join_keys: Vec::new(),
+    };
+    let mut specs = Vec::new();
+    for expr in exprs {
+        b.build_physical_top(expr.as_ref(), side_join_keys, &mut specs);
+    }
+    let pushdown = finish_pushdown(specs, b.constants, b.referenced_columns)?;
+    Ok(DynamicPushdown {
+        pushdown,
+        join_keys: b.join_keys,
+    })
+}
+
+fn finish_pushdown(
+    specs: Vec<serde_json::Value>,
+    constants: Vec<Constant>,
+    referenced_columns: Vec<i64>,
+) -> DFResult<Pushdown> {
     if specs.is_empty() {
         return Ok(Pushdown::default());
     }
@@ -338,7 +537,7 @@ pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown
         ),
     ];
     let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![json]))];
-    for (i, c) in b.constants.iter().enumerate() {
+    for (i, c) in constants.iter().enumerate() {
         let arr = c.to_array();
         fields.push(Field::new(
             format!("value_{i}"),
@@ -358,8 +557,135 @@ pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown
     }
     Ok(Pushdown {
         blob: Some(buf),
-        columns: b.referenced_columns,
+        columns: referenced_columns,
     })
+}
+
+fn join_keys_ipc(column: &str, values: Vec<ScalarValue>) -> DFResult<Vec<u8>> {
+    let array = ScalarValue::iter_to_array(values)?;
+    let schema = Arc::new(
+        Schema::new(vec![Field::new(column, array.data_type().clone(), true)]).with_metadata(
+            [("vgi_join_keys_version".to_string(), "2".to_string())]
+                .into_iter()
+                .collect(),
+        ),
+    );
+    let batch = RecordBatch::try_new(schema, vec![array])?;
+    let mut out = Vec::new();
+    {
+        let mut writer =
+            datafusion::arrow::ipc::writer::StreamWriter::try_new(&mut out, &batch.schema())?;
+        writer.write(&batch)?;
+        writer.finish()?;
+    }
+    Ok(out)
+}
+
+/// Conjoin already-serialized static and runtime pushdowns.
+///
+/// Both wire blobs are one-row IPC batches. Appending the runtime specs and
+/// constant columns requires shifting their `value_ref` indices by the number
+/// of constants already present in the static batch.
+pub(crate) fn merge(left: &Pushdown, right: &Pushdown) -> DFResult<Pushdown> {
+    match (&left.blob, &right.blob) {
+        (None, None) => return Ok(Pushdown::default()),
+        (Some(_), None) => return Ok(left.clone()),
+        (None, Some(_)) => return Ok(right.clone()),
+        (Some(_), Some(_)) => {}
+    }
+    let left_batch = read_pushdown(left.blob.as_deref().expect("checked"))?;
+    let right_batch = read_pushdown(right.blob.as_deref().expect("checked"))?;
+    let left_constants = left_batch.num_columns() - 1;
+    let mut merged_specs = parse_specs(&left_batch)?;
+    let mut right_specs = parse_specs(&right_batch)?;
+    for spec in &mut right_specs {
+        shift_value_refs(spec, left_constants);
+    }
+    merged_specs.extend(right_specs);
+
+    let mut fields = vec![left_batch.schema().field(0).clone()];
+    let mut columns = vec![left_batch.column(0).clone()];
+    for batch in [&left_batch, &right_batch] {
+        for index in 1..batch.num_columns() {
+            fields.push(Field::new(
+                format!("value_{}", fields.len() - 1),
+                batch.column(index).data_type().clone(),
+                true,
+            ));
+            columns.push(batch.column(index).clone());
+        }
+    }
+    columns[0] = Arc::new(StringArray::from(vec![serde_json::Value::Array(
+        merged_specs,
+    )
+    .to_string()]));
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
+    let mut out = Vec::new();
+    {
+        let mut writer =
+            datafusion::arrow::ipc::writer::StreamWriter::try_new(&mut out, &batch.schema())?;
+        writer.write(&batch)?;
+        writer.finish()?;
+    }
+    let mut referenced_columns = left.columns.clone();
+    for column in &right.columns {
+        if !referenced_columns.contains(column) {
+            referenced_columns.push(*column);
+        }
+    }
+    Ok(Pushdown {
+        blob: Some(out),
+        columns: referenced_columns,
+    })
+}
+
+fn read_pushdown(bytes: &[u8]) -> DFResult<RecordBatch> {
+    let mut reader =
+        datafusion::arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None)?;
+    reader.next().transpose()?.ok_or_else(|| {
+        datafusion::common::DataFusionError::Execution("empty VGI filter IPC".into())
+    })
+}
+
+fn parse_specs(batch: &RecordBatch) -> DFResult<Vec<serde_json::Value>> {
+    let json = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            datafusion::common::DataFusionError::Execution("VGI filter spec is not UTF-8".into())
+        })?;
+    serde_json::from_str(json.value(0)).map_err(|error| {
+        datafusion::common::DataFusionError::Execution(format!("invalid VGI filter JSON: {error}"))
+    })
+}
+
+fn shift_value_refs(value: &mut serde_json::Value, offset: usize) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(reference) = object.get_mut("value_ref") {
+                if let Some(index) = reference.as_u64() {
+                    *reference = serde_json::json!(index + offset as u64);
+                }
+            }
+            if let Some(serde_json::Value::Array(references)) = object.get_mut("value_refs") {
+                for reference in references {
+                    if let Some(index) = reference.as_u64() {
+                        *reference = serde_json::json!(index + offset as u64);
+                    }
+                }
+            }
+            for child in object.values_mut() {
+                shift_value_refs(child, offset);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                shift_value_refs(child, offset);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +693,9 @@ mod tests {
     use super::*;
     use datafusion::arrow::array::Array;
     use datafusion::logical_expr::{col, lit};
+    use datafusion::physical_expr::expressions::{
+        col as physical_col, lit as physical_lit, BinaryExpr as PhysicalBinaryExpr, InListExpr,
+    };
 
     fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -611,5 +940,73 @@ mod tests {
         let pd = serialize(&[col("n").eq(col("name"))], &schema()).unwrap();
         assert!(pd.blob.is_none());
         assert!(pd.columns.is_empty());
+    }
+
+    #[test]
+    fn physical_runtime_filter_serializes_with_join_key_side_ipc() {
+        let needle = physical_col("n", &schema()).unwrap();
+        let list = InListExpr::try_new(
+            needle,
+            vec![
+                physical_lit(1_i64),
+                physical_lit(3_i64),
+                physical_lit(5_i64),
+            ],
+            false,
+            &schema(),
+        )
+        .unwrap();
+        let dynamic =
+            serialize_physical(&[Arc::new(list) as Arc<dyn PhysicalExpr>], &schema(), true)
+                .unwrap();
+        let (specs, batch) = decode(dynamic.pushdown.blob.as_deref().unwrap());
+        assert_eq!(specs[0]["type"], "join_keys");
+        assert_eq!(specs[0]["keys_column"], "n");
+        assert_eq!(batch.num_columns(), 1, "values ride in the side batch");
+        assert_eq!(dynamic.join_keys.len(), 1);
+
+        let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&dynamic.join_keys[0]),
+            None,
+        )
+        .unwrap();
+        let keys = reader.next().unwrap().unwrap();
+        assert_eq!(keys.num_rows(), 3);
+        assert_eq!(
+            keys.schema().metadata().get("vgi_join_keys_version"),
+            Some(&"2".to_string())
+        );
+    }
+
+    #[test]
+    fn physical_runtime_filter_can_inline_values_for_continuation_ticks() {
+        let expression = Arc::new(PhysicalBinaryExpr::new(
+            physical_col("n", &schema()).unwrap(),
+            Operator::Gt,
+            physical_lit(10_i64),
+        )) as Arc<dyn PhysicalExpr>;
+        let dynamic = serialize_physical(&[expression], &schema(), false).unwrap();
+        let (specs, batch) = decode(dynamic.pushdown.blob.as_deref().unwrap());
+        assert_eq!(specs[0]["type"], "constant");
+        assert_eq!(specs[0]["op"], "gt");
+        assert_eq!(batch.num_columns(), 2);
+        assert!(dynamic.join_keys.is_empty());
+    }
+
+    #[test]
+    fn merging_static_and_runtime_filters_rebases_value_references() {
+        let static_filter = serialize(&[col("n").gt(lit(1_i64))], &schema()).unwrap();
+        let expression = Arc::new(PhysicalBinaryExpr::new(
+            physical_col("n", &schema()).unwrap(),
+            Operator::Lt,
+            physical_lit(10_i64),
+        )) as Arc<dyn PhysicalExpr>;
+        let runtime = serialize_physical(&[expression], &schema(), false).unwrap();
+        let merged = merge(&static_filter, &runtime.pushdown).unwrap();
+        let (specs, batch) = decode(merged.blob.as_deref().unwrap());
+        assert_eq!(specs.as_array().unwrap().len(), 2);
+        assert_eq!(specs[0]["value_ref"], 0);
+        assert_eq!(specs[1]["value_ref"], 1);
+        assert_eq!(batch.num_columns(), 3);
     }
 }

@@ -32,12 +32,128 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use datafusion::catalog::{CatalogProvider, SchemaProvider, TableProvider};
-use datafusion::common::{DataFusionError, Result as DFResult};
+use datafusion::catalog::{CatalogProvider, SchemaProvider, Session, TableProvider};
+use datafusion::common::{Constraints, DataFusionError, Result as DFResult};
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType, Volatility};
+use datafusion::physical_plan::ExecutionPlan;
 
-use crate::{to_df, VgiConnection, VgiTableProvider};
+use crate::{datafusion_constraints, to_df, VgiConnection, VgiTableProvider};
 
 type CachedTable = Result<Arc<dyn TableProvider>, String>;
+
+/// A catalog table whose schema is available from discovery and whose scan
+/// function is bound only when DataFusion actually scans it.
+///
+/// DataFusion builds `information_schema.columns` and `views` by asking for
+/// every listed provider, even when SQL filters name one table. Binding here
+/// would therefore turn metadata lookup into one RPC per table and make a
+/// valid argument-dependent/multi-branch table abort the whole query.
+#[derive(Debug)]
+struct VgiCatalogTableProvider {
+    conn: VgiConnection,
+    catalog: String,
+    schema_name: String,
+    info: vgi_client::TableInfo,
+    at: Option<vgi_client::At>,
+    output_schema: datafusion::arrow::datatypes::SchemaRef,
+    constraints: Constraints,
+    bound: tokio::sync::OnceCell<Arc<VgiTableProvider>>,
+}
+
+impl VgiCatalogTableProvider {
+    fn new(
+        conn: VgiConnection,
+        catalog: impl Into<String>,
+        schema_name: impl Into<String>,
+        info: vgi_client::TableInfo,
+        at: Option<vgi_client::At>,
+    ) -> DFResult<Arc<Self>> {
+        let output_schema = vgi_protocol::ipc::read_schema(&info.columns.0).map_err(to_df)?;
+        let constraints = datafusion_constraints(
+            info.primary_key_constraints.clone(),
+            info.unique_constraints.clone(),
+            output_schema.fields().len(),
+        )?;
+        Ok(Arc::new(Self {
+            conn,
+            catalog: catalog.into(),
+            schema_name: schema_name.into(),
+            info,
+            at,
+            output_schema,
+            constraints,
+            bound: tokio::sync::OnceCell::new(),
+        }))
+    }
+
+    async fn bound(&self) -> DFResult<&Arc<VgiTableProvider>> {
+        let provider = self
+            .bound
+            .get_or_try_init(|| async {
+                let provider = match &self.at {
+                    Some(at) => {
+                        VgiTableProvider::bind_catalog_table_at(
+                            self.conn.clone(),
+                            &self.catalog,
+                            &self.schema_name,
+                            self.info.clone(),
+                            at.clone(),
+                        )
+                        .await
+                    }
+                    None => {
+                        VgiTableProvider::bind_catalog_table(
+                            self.conn.clone(),
+                            &self.catalog,
+                            &self.schema_name,
+                            self.info.clone(),
+                        )
+                        .await
+                    }
+                }?;
+                provider.with_declared_schema(Arc::clone(&self.output_schema))
+            })
+            .await?;
+        Ok(provider)
+    }
+}
+
+#[async_trait]
+impl TableProvider for VgiCatalogTableProvider {
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        Arc::clone(&self.output_schema)
+    }
+
+    fn constraints(&self) -> Option<&Constraints> {
+        Some(&self.constraints)
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> DFResult<Vec<TableProviderFilterPushDown>> {
+        // The scan bind discovers exactness later. Inexact is safe here: VGI
+        // still receives supported predicates and DataFusion always rechecks.
+        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        self.bound()
+            .await?
+            .scan(state, projection, filters, limit)
+            .await
+    }
+}
 
 /// Discovery metadata needed to choose the correct execution protocol for a
 /// callable table function.
@@ -63,6 +179,10 @@ pub struct VgiSchemaProvider {
     /// which kind `t` is, and the worker guarantees the names are distinct
     /// within a schema.
     names: Vec<String>,
+    /// Actual relations exposed through DataFusion metadata. Table functions
+    /// remain resolvable through `table()` for the useful bare-call error, but
+    /// are routines rather than rows in `SHOW TABLES`.
+    relation_names: Vec<String>,
     /// Which of those names are catalog tables. They bind differently: a table
     /// is scanned through the function the worker nominates
     /// (`catalog_table_scan_function_get`), with the worker's own arguments.
@@ -74,16 +194,28 @@ pub struct VgiSchemaProvider {
     ///
     /// The specs travel with the name because a call cannot be built without
     /// them: a const parameter belongs in the bind, not the input batch.
-    scalars: Vec<(String, vgi_client::ArgSpecs)>,
+    scalars: Vec<(String, Vec<vgi_client::ArgSpecs>, Volatility)>,
     /// Aggregate functions in this schema, published into DataFusion's
     /// aggregate registry at attach time.
-    aggregates: Vec<String>,
+    aggregates: Vec<(
+        String,
+        vgi_client::ArgSpecs,
+        Volatility,
+        bool,
+        Vec<vgi_client::SecretLookupRequest>,
+    )>,
     /// Scalar SQL macros expanded locally before DataFusion planning.
     macros: HashMap<String, vgi_client::dtos::MacroInfo>,
+    /// SQL views declared by the worker. Their definitions are planned after
+    /// the catalog and its functions have been registered with DataFusion.
+    views: HashMap<String, vgi_client::dtos::ViewInfo>,
     /// Bind results, memoised. An `Err` records a function that will not bind
     /// bare — most fixture functions take arguments — so it is not retried,
     /// and the worker's own reason is kept to report at plan time.
     bound: Mutex<HashMap<String, CachedTable>>,
+    /// Historical binds are isolated from the current-table cache because a
+    /// past version may expose a different schema.
+    versioned: Mutex<HashMap<(String, String, String), CachedTable>>,
 }
 
 impl VgiSchemaProvider {
@@ -94,7 +226,7 @@ impl VgiSchemaProvider {
         schema_name: &str,
     ) -> DFResult<Arc<Self>> {
         let (c, cat, sch) = (conn.clone(), catalog.to_string(), schema_name.to_string());
-        let (tables, table_functions, scalars, aggregates, macros) =
+        let (tables, table_functions, scalars, aggregates, macros, views) =
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat)?;
@@ -129,29 +261,80 @@ impl VgiSchemaProvider {
                     .functions(&attached, &sch, vgi_client::FunctionKind::Aggregate)
                     .map_err(to_df)?
                     .into_iter()
-                    .map(|f| f.name)
-                    .collect::<Vec<String>>();
+                    .map(|f| {
+                        let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
+                        let secrets = f
+                            .required_secrets
+                            .iter()
+                            .map(|secret| vgi_client::SecretLookupRequest {
+                                secret_type: secret.secret_type.clone(),
+                                scope: secret.scope.clone(),
+                                name: secret.secret_name.clone(),
+                            })
+                            .collect();
+                        Ok::<_, DataFusionError>((
+                            f.name,
+                            specs,
+                            volatility(f.stability.as_ref().map(|v| v.0.as_str())),
+                            f.supports_window,
+                            secrets,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let macros = client
                     .macros(&attached, &sch, vgi_client::MacroKind::Scalar)
                     .map_err(to_df)?
                     .into_iter()
                     .map(|info| (info.name.clone(), info))
                     .collect::<HashMap<_, _>>();
-                let scalars = scalars
+                let views = client
+                    .views(&attached, &sch)
+                    .map_err(to_df)?
                     .into_iter()
-                    .map(|f| {
-                        let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
-                        Ok::<_, DataFusionError>((f.name, specs))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok::<_, DataFusionError>((tables, table_functions, scalars, aggregates, macros))
+                    .map(|info| (info.name.clone(), info))
+                    .collect::<HashMap<_, _>>();
+                // DataFusion registers one scalar UDF per SQL name, whereas
+                // VGI advertises one FunctionInfo per overload. Preserve the
+                // complete overload set so the UDF can choose the right const
+                // layout for each call instead of whichever overload happened
+                // to be registered first.
+                let mut scalar_overloads: HashMap<String, (Vec<vgi_client::ArgSpecs>, Volatility)> =
+                    HashMap::new();
+                for f in scalars {
+                    let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
+                    let declared = volatility(f.stability.as_ref().map(|v| v.0.as_str()));
+                    let entry = scalar_overloads
+                        .entry(f.name)
+                        .or_insert_with(|| (Vec::new(), declared));
+                    entry.0.push(specs);
+                    entry.1 = most_volatile(entry.1, declared);
+                }
+                let scalars = scalar_overloads
+                    .into_iter()
+                    .map(|(name, (overloads, volatility))| (name, overloads, volatility))
+                    .collect::<Vec<_>>();
+                Ok::<_, DataFusionError>((
+                    tables,
+                    table_functions,
+                    scalars,
+                    aggregates,
+                    macros,
+                    views,
+                ))
             })
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
         let tables: HashMap<String, vgi_client::TableInfo> =
             tables.into_iter().map(|t| (t.name.clone(), t)).collect();
-        let mut names: Vec<String> = tables.keys().cloned().collect();
+        let mut relation_names: Vec<String> = tables.keys().cloned().collect();
+        relation_names.extend(
+            views
+                .keys()
+                .filter(|name| !tables.contains_key(*name))
+                .cloned(),
+        );
+        let mut names = relation_names.clone();
         names.extend(
             table_functions
                 .keys()
@@ -164,12 +347,15 @@ impl VgiSchemaProvider {
             catalog: catalog.to_string(),
             schema_name: schema_name.to_string(),
             names,
+            relation_names,
             tables,
             scalars,
             aggregates,
             macros,
+            views,
             table_functions,
             bound: Mutex::new(HashMap::new()),
+            versioned: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -179,13 +365,34 @@ impl VgiSchemaProvider {
     }
 
     /// Scalar functions this schema advertises, with their parameter specs.
-    pub fn scalars(&self) -> &[(String, vgi_client::ArgSpecs)] {
+    pub fn scalars(&self) -> &[(String, Vec<vgi_client::ArgSpecs>, Volatility)] {
         &self.scalars
     }
 
     /// Aggregate functions this schema advertises.
-    pub fn aggregates(&self) -> &[String] {
+    pub fn aggregates(
+        &self,
+    ) -> &[(
+        String,
+        vgi_client::ArgSpecs,
+        Volatility,
+        bool,
+        Vec<vgi_client::SecretLookupRequest>,
+    )] {
         &self.aggregates
+    }
+
+    /// Views declared by this schema.
+    pub(crate) fn views(&self) -> impl Iterator<Item = (&String, &vgi_client::dtos::ViewInfo)> {
+        self.views.iter()
+    }
+
+    /// Install a planned view (or its durable planning error) in the same lazy
+    /// table cache used for remote tables.
+    pub(crate) fn install_view(&self, name: &str, table: CachedTable) {
+        if let Ok(mut cache) = self.bound.lock() {
+            cache.insert(name.to_string(), table);
+        }
     }
 
     /// Discovery metadata for a callable table function.
@@ -193,16 +400,106 @@ impl VgiSchemaProvider {
         self.table_functions.get(name)
     }
 
+    /// Names that are callable table functions (excluding tables and views).
+    pub(crate) fn table_function_names(&self) -> impl Iterator<Item = &String> {
+        self.table_functions.keys()
+    }
+
     /// Look up a memoised bind without holding the lock across an await.
     fn cached(&self, name: &str) -> Option<CachedTable> {
         self.bound.lock().ok()?.get(name).cloned()
+    }
+
+    /// Bind a catalog table at an explicit VGI time-travel coordinate.
+    pub(crate) async fn table_at(
+        &self,
+        name: &str,
+        at: vgi_client::At,
+    ) -> DFResult<Arc<dyn TableProvider>> {
+        if !self.tables.contains_key(name) {
+            return Err(DataFusionError::Plan(format!(
+                "VGI time travel is only supported for catalog tables; `{name}` is not one"
+            )));
+        }
+        let key = (name.to_string(), at.unit.clone(), at.value.clone());
+        if let Some(hit) = self
+            .versioned
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+        {
+            return hit.map_err(bind_failed(name));
+        }
+
+        // Discovery describes the current table. Ask for TableInfo again at
+        // this coordinate so schema evolution is visible during planning.
+        let conn = self.conn.clone();
+        let catalog = self.catalog.clone();
+        let schema = self.schema_name.clone();
+        let table = name.to_string();
+        let lookup_at = at.clone();
+        let info = tokio::task::spawn_blocking(move || {
+            let mut client = conn.connect()?;
+            let attached = conn.attach(&mut client, &catalog)?;
+            client
+                .table_get(&attached, &schema, &table, Some(&lookup_at))
+                .map_err(to_df)?
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!(
+                        "VGI catalog table `{schema}.{table}` was not found at {} {}",
+                        lookup_at.unit, lookup_at.value
+                    ))
+                })
+        })
+        .await
+        .map_err(|error| DataFusionError::External(Box::new(error)))??;
+
+        let bound = VgiCatalogTableProvider::new(
+            self.conn.clone(),
+            &self.catalog,
+            &self.schema_name,
+            info,
+            Some(at),
+        )
+        .map(|provider| provider as Arc<dyn TableProvider>)
+        .map_err(|error| error.to_string());
+        if let Ok(mut cache) = self.versioned.lock() {
+            cache.insert(key, bound.clone());
+        }
+        bound.map_err(bind_failed(name))
+    }
+}
+
+fn volatility(value: Option<&str>) -> Volatility {
+    match value {
+        Some(value) if value.eq_ignore_ascii_case("VOLATILE") => Volatility::Volatile,
+        Some(value) if value.eq_ignore_ascii_case("CONSISTENT_WITHIN_QUERY") => Volatility::Stable,
+        _ => Volatility::Immutable,
+    }
+}
+
+fn most_volatile(left: Volatility, right: Volatility) -> Volatility {
+    match (left, right) {
+        (Volatility::Volatile, _) | (_, Volatility::Volatile) => Volatility::Volatile,
+        (Volatility::Stable, _) | (_, Volatility::Stable) => Volatility::Stable,
+        _ => Volatility::Immutable,
     }
 }
 
 #[async_trait]
 impl SchemaProvider for VgiSchemaProvider {
     fn table_names(&self) -> Vec<String> {
-        self.names.clone()
+        self.relation_names.clone()
+    }
+
+    async fn table_type(&self, name: &str) -> DFResult<Option<TableType>> {
+        if self.tables.contains_key(name) {
+            Ok(Some(TableType::Base))
+        } else if self.views.contains_key(name) {
+            Ok(Some(TableType::View))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn table(&self, name: &str) -> DFResult<Option<Arc<dyn TableProvider>>> {
@@ -212,26 +509,30 @@ impl SchemaProvider for VgiSchemaProvider {
         if let Some(hit) = self.cached(name) {
             return hit.map(Some).map_err(bind_failed(name));
         }
+        if self.views.contains_key(name) {
+            return Err(DataFusionError::Plan(format!(
+                "VGI view `{name}` was discovered but has not been planned"
+            )));
+        }
 
         // Two callers racing the same cold name both bind; the loser's result
         // is dropped. That is cheaper and simpler than holding a lock across
         // the await, and binds are idempotent.
         let bound = match self.tables.get(name) {
-            Some(info) => {
-                VgiTableProvider::bind_catalog_table(
-                    self.conn.clone(),
-                    &self.catalog,
-                    &self.schema_name,
-                    info.clone(),
-                )
-                .await
-            }
+            Some(info) => VgiCatalogTableProvider::new(
+                self.conn.clone(),
+                &self.catalog,
+                &self.schema_name,
+                info.clone(),
+                None,
+            )
+            .map(|provider| provider as Arc<dyn TableProvider>),
             None => {
                 VgiTableProvider::bind(self.conn.clone(), &self.catalog, &self.schema_name, name)
                     .await
+                    .map(|provider| provider as Arc<dyn TableProvider>)
             }
         }
-        .map(|p| p as Arc<dyn TableProvider>)
         .map_err(|e| e.to_string());
 
         if let Ok(mut cache) = self.bound.lock() {
@@ -271,24 +572,31 @@ pub struct VgiCatalogProvider {
     /// what they should be called; honouring it means one worker gets the same
     /// spelling on both engines, rather than each client inventing its own.
     global_function_prefix: String,
+    global_functions: Vec<vgi_client::dtos::FunctionInfo>,
+    companion_catalogs: Vec<vgi_client::dtos::AttachCatalogInfo>,
 }
 
 impl VgiCatalogProvider {
     /// Attach a catalog and list its schemas.
     pub async fn discover(conn: VgiConnection, catalog: &str) -> DFResult<Arc<Self>> {
         let (c, cat) = (conn.clone(), catalog.to_string());
-        let (names, global_function_prefix) = tokio::task::spawn_blocking(move || {
-            let mut client = c.connect()?;
-            let attached = c.attach(&mut client, &cat)?;
-            let prefix = attached.info().global_function_prefix.clone();
-            let s = client.schemas(&attached).map_err(to_df)?;
-            Ok::<_, DataFusionError>((
-                s.into_iter().map(|s| s.name).collect::<Vec<String>>(),
-                prefix,
-            ))
-        })
-        .await
-        .map_err(|e| DataFusionError::External(Box::new(e)))??;
+        let (names, global_function_prefix, global_functions, companion_catalogs) =
+            tokio::task::spawn_blocking(move || {
+                let mut client = c.connect()?;
+                let attached = c.attach(&mut client, &cat)?;
+                let prefix = attached.info().global_function_prefix.clone();
+                let global_functions = attached.global_functions().map_err(to_df)?;
+                let companion_catalogs = attached.companion_catalogs().map_err(to_df)?;
+                let s = client.schemas(&attached).map_err(to_df)?;
+                Ok::<_, DataFusionError>((
+                    s.into_iter().map(|s| s.name).collect::<Vec<String>>(),
+                    prefix,
+                    global_functions,
+                    companion_catalogs,
+                ))
+            })
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
         let mut schemas: HashMap<String, Arc<VgiSchemaProvider>> = HashMap::new();
         for name in names {
@@ -298,6 +606,8 @@ impl VgiCatalogProvider {
         Ok(Arc::new(Self {
             schemas,
             global_function_prefix,
+            global_functions,
+            companion_catalogs,
         }))
     }
 }
@@ -308,10 +618,33 @@ impl VgiCatalogProvider {
         &self.global_function_prefix
     }
 
+    /// Function descriptors explicitly nominated for global publication.
+    pub fn global_functions(&self) -> &[vgi_client::dtos::FunctionInfo] {
+        &self.global_functions
+    }
+
+    /// Companion catalogs requested by this attachment.
+    pub fn companion_catalogs(&self) -> &[vgi_client::dtos::AttachCatalogInfo] {
+        &self.companion_catalogs
+    }
+
     /// This catalog's schemas, concretely — the registration paths need more
     /// than `SchemaProvider` exposes (scalar names are not tables).
     pub fn vgi_schemas(&self) -> impl Iterator<Item = (&String, &Arc<VgiSchemaProvider>)> {
         self.schemas.iter()
+    }
+
+    /// Resolve one historical table through its concrete VGI schema.
+    pub(crate) async fn table_at(
+        &self,
+        schema: &str,
+        table: &str,
+        at: vgi_client::At,
+    ) -> DFResult<Arc<dyn TableProvider>> {
+        let provider = self.schemas.get(schema).ok_or_else(|| {
+            DataFusionError::Plan(format!("VGI schema `{schema}` does not exist"))
+        })?;
+        provider.table_at(table, at).await
     }
 
     /// Scalar SQL macros, paired with their owning schema.

@@ -89,6 +89,27 @@ async fn bearer_auth_reaches_catalog_and_parallel_scans() -> datafusion::error::
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         1
     );
+
+    // Aggregate finalization is a synchronous DataFusion callback. Keep this
+    // on the HTTP lane: constructing reqwest's blocking runtime directly from
+    // that async callback used to panic even though scans correctly used
+    // spawn_blocking.
+    let aggregate = vgi_datafusion::sql(
+        &ctx,
+        "SELECT example.main.vgi_percentile(x::DOUBLE, 0.9) FROM range(10) t(x)",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(
+        aggregate[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .expect("percentile returns Float64")
+            .value(0),
+        9.0
+    );
     Ok(())
 }
 

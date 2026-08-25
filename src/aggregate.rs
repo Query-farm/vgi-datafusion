@@ -39,7 +39,10 @@ use datafusion::arrow::compute::concat;
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
-use datafusion::logical_expr::{Accumulator, AggregateUDFImpl, Signature, Volatility};
+use datafusion::logical_expr::{
+    Accumulator, AggregateUDFImpl, ColumnarValue, Signature, Volatility,
+};
+use vgi_client::{ArgSpecs, ArgValue, Arguments};
 
 use crate::{to_df, VgiConnection};
 
@@ -54,6 +57,11 @@ pub struct VgiAggregateUdf {
     /// The name DataFusion knows it by, which is the registry key.
     registered_name: String,
     signature: Signature,
+    /// Parameter roles declared by the worker. Const parameters are bind-time
+    /// arguments, even though DataFusion evaluates every aggregate expression
+    /// into an array for `update_batch`.
+    specs: ArgSpecs,
+    required_secrets: Vec<vgi_client::SecretLookupRequest>,
 }
 
 impl VgiAggregateUdf {
@@ -69,14 +77,48 @@ impl VgiAggregateUdf {
         function: impl Into<String>,
         registered_name: impl Into<String>,
     ) -> Self {
+        Self::new_with_volatility(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            registered_name,
+            Volatility::Volatile,
+        )
+    }
+
+    /// Describe an aggregate with worker-declared volatility.
+    pub fn new_with_volatility(
+        conn: VgiConnection,
+        catalog: impl Into<String>,
+        schema_name: impl Into<String>,
+        function: impl Into<String>,
+        registered_name: impl Into<String>,
+        volatility: Volatility,
+    ) -> Self {
         Self {
             conn,
             catalog: catalog.into(),
             schema_name: schema_name.into(),
             function: function.into(),
             registered_name: registered_name.into(),
-            signature: Signature::variadic_any(Volatility::Volatile),
+            signature: Signature::variadic_any(volatility),
+            specs: ArgSpecs::default(),
+            required_secrets: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_arg_specs(mut self, specs: ArgSpecs) -> Self {
+        self.specs = specs;
+        self
+    }
+
+    pub(crate) fn with_required_secrets(
+        mut self,
+        required_secrets: Vec<vgi_client::SecretLookupRequest>,
+    ) -> Self {
+        self.required_secrets = required_secrets;
+        self
     }
 }
 
@@ -115,8 +157,18 @@ impl AggregateUDFImpl for VgiAggregateUdf {
         let schema_name = self.schema_name.clone();
         let function = self.function.clone();
         let arg_types = arg_types.to_vec();
+        let specs = self.specs.clone();
+        let required_secrets = self.required_secrets.clone();
         crate::run_blocking_planner_call(move || {
-            bind_output_type(&conn, &catalog, &schema_name, &function, &arg_types)
+            bind_output_type(
+                &conn,
+                &catalog,
+                &schema_name,
+                &function,
+                &arg_types,
+                &specs,
+                &required_secrets,
+            )
         })
     }
 
@@ -150,31 +202,43 @@ impl AggregateUDFImpl for VgiAggregateUdf {
                 .iter()
                 .map(|e| e.data_type(args.schema))
                 .collect::<DFResult<Vec<_>>>()?,
+            specs: self.specs.clone(),
+            arguments: aggregate_arguments(&self.function, &self.specs, args.exprs)?,
+            required_secrets: self.required_secrets.clone(),
             buffered: Vec::new(),
         }))
     }
 }
 
 /// Bind the aggregate to learn its output type.
-fn bind_output_type(
+pub(crate) fn bind_output_type(
     conn: &VgiConnection,
     catalog: &str,
     schema_name: &str,
     function: &str,
     arg_types: &[DataType],
+    specs: &ArgSpecs,
+    required_secrets: &[vgi_client::SecretLookupRequest],
 ) -> DFResult<DataType> {
     use datafusion::arrow::datatypes::Schema;
     use vgi_client::{BindSpec, FunctionType};
 
-    let input_schema = Schema::new(input_fields(arg_types));
+    let (arguments, fields) = typed_null_arguments(arg_types, specs);
+    let input_schema = Schema::new(fields);
     let mut client = conn.connect()?;
     let attached = conn.attach(&mut client, catalog)?;
     let mut spec = BindSpec::table(function).in_schema(schema_name);
     spec.function_type = FunctionType::Aggregate;
+    spec.arguments = arguments;
 
-    let bound = client
-        .aggregate_bind(&attached, &spec, &input_schema)
-        .map_err(to_df)?;
+    let bound = aggregate_bind(
+        conn,
+        &mut client,
+        &attached,
+        &spec,
+        &input_schema,
+        required_secrets,
+    )?;
     let out = bound
         .output_schema()
         .fields()
@@ -191,13 +255,58 @@ fn bind_output_type(
     Ok(out)
 }
 
-/// The worker's expected input column names, matching the extension's `col_<i>`.
-fn input_fields(arg_types: &[DataType]) -> Vec<Field> {
+fn column_input_fields(arg_types: &[DataType], specs: &ArgSpecs) -> Vec<Field> {
     arg_types
         .iter()
         .enumerate()
-        .map(|(i, t)| Field::new(format!("col_{i}"), t.clone(), true))
+        .filter(|(i, _)| !specs.positional_is_const(*i))
+        .enumerate()
+        .map(|(column, (_, ty))| Field::new(format!("col_{column}"), ty.clone(), true))
         .collect()
+}
+
+fn typed_null_arguments(arg_types: &[DataType], specs: &ArgSpecs) -> (Arguments, Vec<Field>) {
+    let mut arguments = Arguments::new();
+    for (i, ty) in arg_types.iter().enumerate() {
+        if specs.positional_is_const(i) {
+            arguments = arguments.positional(ArgValue::Null(ty.clone()));
+        }
+    }
+    (arguments, column_input_fields(arg_types, specs))
+}
+
+/// Extract aggregate ConstParams from DataFusion's physical expressions.
+///
+/// Evaluating against an empty batch handles literals wrapped in casts as well
+/// as bare `Literal` expressions. A real column cannot evaluate there and is
+/// rejected: taking row zero would silently give a row-varying argument
+/// bind-time semantics.
+fn aggregate_arguments(
+    function: &str,
+    specs: &ArgSpecs,
+    exprs: &[Arc<dyn datafusion::physical_expr::PhysicalExpr>],
+) -> DFResult<Arguments> {
+    use datafusion::arrow::array::RecordBatch;
+    use datafusion::arrow::datatypes::Schema;
+
+    let empty = RecordBatch::new_empty(Arc::new(Schema::empty()));
+    let mut arguments = Arguments::new();
+    for (i, expr) in exprs.iter().enumerate() {
+        if !specs.positional_is_const(i) {
+            continue;
+        }
+        let value = match expr.evaluate(&empty) {
+            Ok(ColumnarValue::Scalar(value)) => value,
+            _ => {
+                return Err(DataFusionError::Plan(format!(
+                    "VGI aggregate `{function}` argument {i} is a ConstParam and must be a constant"
+                )))
+            }
+        };
+        arguments =
+            arguments.positional(crate::table_function::scalar_to_arg(function, i, &value)?);
+    }
+    Ok(arguments)
 }
 
 /// Accumulates input rows, then runs the whole aggregate at `evaluate`.
@@ -208,6 +317,9 @@ struct VgiAccumulator {
     schema_name: String,
     function: String,
     arg_types: Vec<DataType>,
+    specs: ArgSpecs,
+    arguments: Arguments,
+    required_secrets: Vec<vgi_client::SecretLookupRequest>,
     /// One buffer per argument; `buffered[i]` are the chunks seen for argument
     /// `i`, concatenated only when needed.
     buffered: Vec<Vec<ArrayRef>>,
@@ -285,6 +397,39 @@ impl Accumulator for VgiAccumulator {
         Ok(())
     }
 
+    fn retract_batch(&mut self, values: &[ArrayRef]) -> DFResult<()> {
+        let rows = values.first().map(|array| array.len()).unwrap_or(0);
+        if values.iter().any(|array| array.len() != rows) {
+            return Err(DataFusionError::Internal(format!(
+                "VGI aggregate `{}` received retract columns with different lengths",
+                self.function
+            )));
+        }
+        for chunks in &mut self.buffered {
+            let mut remaining = rows;
+            while remaining > 0 {
+                let Some(first) = chunks.first() else {
+                    return Err(DataFusionError::Internal(format!(
+                        "VGI aggregate `{}` retracted more rows than it holds",
+                        self.function
+                    )));
+                };
+                if first.len() <= remaining {
+                    remaining -= first.len();
+                    chunks.remove(0);
+                } else {
+                    chunks[0] = first.slice(remaining, first.len() - remaining);
+                    remaining = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn supports_retract_batch(&self) -> bool {
+        true
+    }
+
     fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
         // One list per argument, each holding every row this accumulator saw.
         self.collected()?
@@ -304,42 +449,69 @@ impl Accumulator for VgiAccumulator {
     fn evaluate(&mut self) -> DFResult<ScalarValue> {
         use datafusion::arrow::array::RecordBatch;
         use datafusion::arrow::datatypes::Schema;
-        use vgi_client::{with_group_ids, BindSpec, FunctionType};
 
-        let columns = self.collected()?;
-        let schema = Arc::new(Schema::new(input_fields(&self.arg_types)));
+        let columns = self
+            .collected()?
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !self.specs.positional_is_const(*i))
+            .map(|(_, column)| column)
+            .collect();
+        let schema = Arc::new(Schema::new(column_input_fields(
+            &self.arg_types,
+            &self.specs,
+        )));
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
+        let conn = self.conn.clone();
+        let catalog = self.catalog.clone();
+        let schema_name = self.schema_name.clone();
+        let function = self.function.clone();
+        let arguments = self.arguments.clone();
+        let required_secrets = self.required_secrets.clone();
 
-        let mut client = self.conn.connect()?;
-        let attached = self.conn.attach(&mut client, &self.catalog)?;
-        let mut spec = BindSpec::table(&self.function).in_schema(&self.schema_name);
-        spec.function_type = FunctionType::Aggregate;
-        let bound = client
-            .aggregate_bind(&attached, &spec, &schema)
-            .map_err(to_df)?;
+        // DataFusion invokes `Accumulator::evaluate` synchronously while
+        // polling its async execution streams. HTTP uses reqwest::blocking,
+        // which panics if it creates or destroys its private runtime there, so
+        // the whole aggregate RPC lifecycle belongs on a blocking OS thread.
+        crate::run_blocking_planner_call(move || {
+            use vgi_client::{with_group_ids, BindSpec, FunctionType};
 
-        // A single group: this accumulator *is* one group, and DataFusion has
-        // already partitioned the rows for us.
-        let group_ids = vec![0i64; batch.num_rows()];
-        let with_ids = with_group_ids(&group_ids, &batch).map_err(to_df)?;
-        client
-            .aggregate_update(&attached, &bound, &with_ids)
-            .map_err(to_df)?;
+            let mut client = conn.connect()?;
+            let attached = conn.attach(&mut client, &catalog)?;
+            let mut spec = BindSpec::table(&function).in_schema(&schema_name);
+            spec.function_type = FunctionType::Aggregate;
+            spec.arguments = arguments;
+            let bound = aggregate_bind(
+                &conn,
+                &mut client,
+                &attached,
+                &spec,
+                &schema,
+                &required_secrets,
+            )?;
 
-        let out = client
-            .aggregate_finalize(&attached, &bound, &[0])
-            .map_err(to_df)?;
-        let _ = client.aggregate_destroy(&attached, &bound, &[0]);
+            // A single group: this accumulator *is* one group, and DataFusion
+            // has already partitioned the rows for us.
+            let group_ids = vec![0i64; batch.num_rows()];
+            let with_ids = with_group_ids(&group_ids, &batch).map_err(to_df)?;
+            client
+                .aggregate_update(&attached, &bound, &with_ids)
+                .map_err(to_df)?;
 
-        if out.num_rows() != 1 || out.num_columns() == 0 {
-            return Err(DataFusionError::Execution(format!(
-                "VGI aggregate `{}` finalized to {} rows / {} columns; expected one value",
-                self.function,
-                out.num_rows(),
-                out.num_columns()
-            )));
-        }
-        ScalarValue::try_from_array(out.column(0), 0)
+            let out = client
+                .aggregate_finalize(&attached, &bound, &[0])
+                .map_err(to_df)?;
+            let _ = client.aggregate_destroy(&attached, &bound, &[0]);
+
+            if out.num_rows() != 1 || out.num_columns() == 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "VGI aggregate `{function}` finalized to {} rows / {} columns; expected one value",
+                    out.num_rows(),
+                    out.num_columns()
+                )));
+            }
+            ScalarValue::try_from_array(out.column(0), 0)
+        })
     }
 
     fn size(&self) -> usize {
@@ -353,4 +525,23 @@ impl Accumulator for VgiAccumulator {
                 .map(|a| a.get_array_memory_size())
                 .sum::<usize>()
     }
+}
+
+fn aggregate_bind(
+    conn: &VgiConnection,
+    client: &mut vgi_client::VgiClient,
+    attached: &vgi_client::AttachedCatalog,
+    spec: &vgi_client::BindSpec,
+    input_schema: &datafusion::arrow::datatypes::Schema,
+    required_secrets: &[vgi_client::SecretLookupRequest],
+) -> DFResult<vgi_client::BoundAggregate> {
+    if required_secrets.is_empty() {
+        return client
+            .aggregate_bind(attached, spec, input_schema)
+            .map_err(to_df);
+    }
+    let secrets = crate::resolve_secret_batch(conn.runtime(), required_secrets.to_vec())?;
+    client
+        .aggregate_bind_with_resolved_secrets(attached, spec, input_schema, secrets)
+        .map_err(to_df)
 }

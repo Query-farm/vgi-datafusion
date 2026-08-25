@@ -55,9 +55,10 @@
 //! [`FunctionFactory`]: datafusion::execution::context::FunctionFactory
 //! [`AttachDuckDBDatabaseOption`]: datafusion::sql::sqlparser::ast::AttachDuckDBDatabaseOption
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::ControlFlow;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use datafusion::arrow::array::{ArrayRef, BinaryArray, LargeBinaryArray};
 use datafusion::arrow::compute::cast;
@@ -73,8 +74,11 @@ use datafusion::sql::parser::{DFParser, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
     Expr, Statement as SQLStatement, Value, ValueWithSpan, VisitMut, Visitor,
 };
+use datafusion::sql::sqlparser::dialect::SnowflakeDialect;
 
-use crate::{VgiAggregateUdf, VgiCatalogProvider, VgiConnection, VgiScalarUdf, VgiTableFunction};
+use crate::{
+    VgiAggregateUdf, VgiCatalogProvider, VgiConnection, VgiRuntime, VgiScalarUdf, VgiTableFunction,
+};
 
 /// Private struct-field prefix used to carry a SQL named table-function
 /// argument through DataFusion's positional-only `TableFunctionArgs` API.
@@ -91,6 +95,83 @@ type SessionMacros = HashMap<String, HashMap<String, SqlMacro>>;
 fn macro_registry() -> &'static Mutex<SessionMacros> {
     static REGISTRY: OnceLock<Mutex<SessionMacros>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn runtime_registry() -> &'static Mutex<HashMap<String, Weak<VgiRuntime>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Weak<VgiRuntime>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Default)]
+struct RegisteredNames {
+    scalar: HashSet<String>,
+    aggregate: HashSet<String>,
+    table: HashSet<String>,
+}
+
+type SessionRegistrations = HashMap<String, HashMap<String, RegisteredNames>>;
+
+fn registration_registry() -> &'static Mutex<SessionRegistrations> {
+    static REGISTRY: OnceLock<Mutex<SessionRegistrations>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+enum RegistrationKind {
+    Scalar,
+    Aggregate,
+    Table,
+}
+
+fn record_registration(ctx: &SessionContext, alias: &str, kind: RegistrationKind, name: String) {
+    let mut sessions = registration_registry().lock().unwrap();
+    let registered = sessions
+        .entry(ctx.session_id())
+        .or_default()
+        .entry(alias.to_ascii_lowercase())
+        .or_default();
+    match kind {
+        RegistrationKind::Scalar => registered.scalar.insert(name),
+        RegistrationKind::Aggregate => registered.aggregate.insert(name),
+        RegistrationKind::Table => registered.table.insert(name),
+    };
+}
+
+fn deregister_alias_functions(ctx: &SessionContext, alias: &str) {
+    let registered = registration_registry()
+        .lock()
+        .ok()
+        .and_then(|mut sessions| {
+            sessions
+                .get_mut(&ctx.session_id())?
+                .remove(&alias.to_ascii_lowercase())
+        });
+    let Some(registered) = registered else {
+        return;
+    };
+    for name in registered.scalar {
+        ctx.deregister_udf(&name);
+    }
+    for name in registered.aggregate {
+        ctx.deregister_udaf(&name);
+    }
+    for name in registered.table {
+        ctx.deregister_udtf(&name);
+    }
+}
+
+fn session_runtime(ctx: &SessionContext) -> Arc<VgiRuntime> {
+    if let Some(runtime) = ctx.copied_config().get_extension::<VgiRuntime>() {
+        return runtime;
+    }
+    let session_id = ctx.session_id();
+    let mut runtimes = runtime_registry().lock().unwrap();
+    runtimes.retain(|_, runtime| runtime.strong_count() > 0);
+    if let Some(runtime) = runtimes.get(&session_id).and_then(Weak::upgrade) {
+        return runtime;
+    }
+    let runtime = Arc::new(VgiRuntime::default());
+    runtimes.insert(session_id, Arc::downgrade(&runtime));
+    runtime
 }
 
 /// Run one SQL statement, handling `ATTACH` and `DETACH` for VGI catalogs.
@@ -120,7 +201,21 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
     }
     let state = ctx.state();
     let dialect = state.config_options().sql_parser.dialect;
-    let statement = state.sql_to_statement(query, &dialect)?;
+    let statement = match state.sql_to_statement(query, &dialect) {
+        Ok(statement) => statement,
+        Err(original) if contains_time_travel_clause(query) => {
+            // The default and DuckDB dialects parse `AT` as a table alias.
+            // Snowflake's dialect enables sqlparser's TableVersion AST while
+            // preserving the rest of the statement for DataFusion planning.
+            let mut statements = DFParser::parse_sql_with_dialect(query, &SnowflakeDialect {})
+                .map_err(|_| original)?;
+            if statements.len() != 1 {
+                return plan_err!("the context currently only supports a single SQL statement");
+            }
+            statements.pop_front().expect("length checked")
+        }
+        Err(error) => return Err(error),
+    };
 
     match classify(&statement)? {
         Some(Intercepted::Attach { target, alias }) => {
@@ -134,11 +229,220 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
         }
         None => {
             let mut statement = statement;
-            rewrite_vgi_sql(ctx, &mut statement)?;
-            let plan = state.statement_to_plan(statement).await?;
+            let temporary_tables = rewrite_time_travel(ctx, &mut statement).await?;
+            let rewritten = rewrite_vgi_sql(ctx, &mut statement);
+            let plan = match rewritten {
+                Ok(()) => state.statement_to_plan(statement).await,
+                Err(error) => Err(error),
+            };
+            // Logical plans retain their provider Arcs, so these private names
+            // only need to exist while the SQL planner resolves the relation.
+            for table in temporary_tables {
+                let _ = ctx.deregister_table(table);
+            }
+            let plan = plan?;
             ctx.execute_logical_plan(plan).await
         }
     }
+}
+
+fn contains_time_travel_clause(sql: &str) -> bool {
+    let upper = sql.to_ascii_uppercase();
+    upper.contains(" AT (") || upper.contains(" AT(")
+}
+
+/// Replace each VGI `table AT (...)` relation with a private, version-bound
+/// provider for the duration of logical planning.
+async fn rewrite_time_travel(
+    ctx: &SessionContext,
+    statement: &mut DFStatement,
+) -> DFResult<Vec<String>> {
+    use datafusion::sql::sqlparser::ast::{
+        Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, ObjectName,
+        ObjectNamePart, TableAlias, TableFactor, TableVersion, UnaryOperator, VisitorMut,
+    };
+
+    #[derive(Debug)]
+    struct HistoricalTable {
+        hidden: String,
+        catalog: String,
+        schema: String,
+        table: String,
+        at: vgi_client::At,
+    }
+
+    fn expr_value(expr: &SQLExpr, unit: &str) -> DFResult<String> {
+        match (unit, expr) {
+            (_, SQLExpr::Value(value)) if matches!(value.value, Value::Null) => {
+                plan_err!("VGI time travel value must not be NULL")
+            }
+            ("VERSION", SQLExpr::Value(value)) => match &value.value {
+                Value::Number(number, _) => Ok(number.to_string()),
+                _ => plan_err!("VGI AT VERSION value must be an integer literal"),
+            },
+            (
+                "VERSION",
+                SQLExpr::UnaryOp {
+                    op: UnaryOperator::Minus,
+                    expr,
+                },
+            ) => match expr.as_ref() {
+                SQLExpr::Value(value) => match &value.value {
+                    Value::Number(number, _) => Ok(format!("-{number}")),
+                    _ => plan_err!("VGI AT VERSION value must be an integer literal"),
+                },
+                _ => plan_err!("VGI AT VERSION value must be an integer literal"),
+            },
+            ("TIMESTAMP", SQLExpr::TypedString(value))
+                if value
+                    .data_type
+                    .to_string()
+                    .to_ascii_uppercase()
+                    .starts_with("TIMESTAMP") =>
+            {
+                value.value.clone().into_string().ok_or_else(|| {
+                    plan_datafusion_err!("VGI AT TIMESTAMP value must be a timestamp literal")
+                })
+            }
+            ("TIMESTAMP", SQLExpr::Value(value)) => value.clone().into_string().ok_or_else(|| {
+                plan_datafusion_err!("VGI AT TIMESTAMP value must be a timestamp literal")
+            }),
+            ("VERSION", _) => plan_err!("VGI AT VERSION value must be an integer literal"),
+            ("TIMESTAMP", _) => {
+                plan_err!("VGI AT TIMESTAMP value must be a timestamp literal")
+            }
+            _ => plan_err!("VGI time travel unit must be VERSION or TIMESTAMP"),
+        }
+    }
+
+    fn parse_at(version: TableVersion) -> DFResult<vgi_client::At> {
+        let TableVersion::Function(SQLExpr::Function(function)) = version else {
+            return plan_err!("VGI time travel uses AT (VERSION => ...) or AT (TIMESTAMP => ...)");
+        };
+        if !function.name.to_string().eq_ignore_ascii_case("AT") {
+            return plan_err!("VGI time travel only supports the AT clause");
+        }
+        let FunctionArguments::List(arguments) = function.args else {
+            return plan_err!("VGI AT requires exactly one named argument");
+        };
+        if arguments.args.len() != 1 || !arguments.clauses.is_empty() {
+            return plan_err!("VGI AT requires exactly one named argument");
+        }
+        let (name, value) = match &arguments.args[0] {
+            FunctionArg::Named {
+                name,
+                arg: FunctionArgExpr::Expr(value),
+                ..
+            } => (name.value.as_str(), value),
+            FunctionArg::ExprNamed {
+                name: SQLExpr::Identifier(name),
+                arg: FunctionArgExpr::Expr(value),
+                ..
+            } => (name.value.as_str(), value),
+            _ => return plan_err!("VGI AT requires VERSION => value or TIMESTAMP => value"),
+        };
+        let unit = name.to_ascii_uppercase();
+        let value = expr_value(value, &unit)?;
+        Ok(vgi_client::At { unit, value })
+    }
+
+    static NEXT_HIDDEN_TABLE: AtomicU64 = AtomicU64::new(0);
+    struct Extract {
+        tables: Vec<HistoricalTable>,
+    }
+    impl VisitorMut for Extract {
+        type Break = Box<datafusion::common::DataFusionError>;
+
+        fn pre_visit_table_factor(&mut self, factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+            let TableFactor::Table {
+                name,
+                alias,
+                version,
+                ..
+            } = factor
+            else {
+                return ControlFlow::Continue(());
+            };
+            if version.is_none() {
+                return ControlFlow::Continue(());
+            }
+            let parts = name
+                .0
+                .iter()
+                .filter_map(|part| part.as_ident().cloned())
+                .collect::<Vec<_>>();
+            let [catalog, schema, table] = parts.as_slice() else {
+                return ControlFlow::Break(Box::new(plan_datafusion_err!(
+                    "VGI time travel requires a fully qualified catalog.schema.table name"
+                )));
+            };
+            let at = match parse_at(version.take().expect("matched Some above")) {
+                Ok(at) => at,
+                Err(error) => return ControlFlow::Break(Box::new(error)),
+            };
+            let hidden = format!(
+                "__vgi_time_travel_{}",
+                NEXT_HIDDEN_TABLE.fetch_add(1, Ordering::Relaxed)
+            );
+            if alias.is_none() {
+                *alias = Some(TableAlias {
+                    explicit: false,
+                    name: table.clone(),
+                    columns: vec![],
+                    at: None,
+                });
+            }
+            *name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new(&hidden))]);
+            self.tables.push(HistoricalTable {
+                hidden,
+                catalog: catalog.value.clone(),
+                schema: schema.value.clone(),
+                table: table.value.clone(),
+                at,
+            });
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut extracted = Extract { tables: Vec::new() };
+    match statement {
+        DFStatement::Statement(inner) => {
+            if let ControlFlow::Break(error) = inner.as_mut().visit(&mut extracted) {
+                return Err(*error);
+            }
+        }
+        DFStatement::Explain(explain) => {
+            return Box::pin(rewrite_time_travel(ctx, explain.statement.as_mut())).await;
+        }
+        _ => return Ok(Vec::new()),
+    }
+
+    let mut providers = Vec::with_capacity(extracted.tables.len());
+    for table in extracted.tables {
+        let catalog = ctx
+            .catalog(&table.catalog)
+            .ok_or_else(|| plan_datafusion_err!("catalog `{}` does not exist", table.catalog))?;
+        let provider = catalog
+            .downcast_ref::<VgiCatalogProvider>()
+            .ok_or_else(|| {
+                plan_datafusion_err!(
+                    "time travel relation `{}.{}` is not in a VGI catalog",
+                    table.schema,
+                    table.table
+                )
+            })?;
+        let bound = provider
+            .table_at(&table.schema, &table.table, table.at)
+            .await?;
+        providers.push((table.hidden, bound));
+    }
+
+    let mut registered = Vec::with_capacity(providers.len());
+    for (hidden, provider) in providers {
+        ctx.register_table(hidden.clone(), provider)?;
+        registered.push(hidden);
+    }
+    Ok(registered)
 }
 
 /// Parse DuckDB's `ATTACH '<catalog>' AS <alias> (TYPE vgi, LOCATION '<loc>')`.
@@ -768,13 +1072,15 @@ impl AttachSpec {
                     .unwrap_or(defaults.idle_timeout),
             })
         };
-        let mut connection = VgiConnection::pooled(location, pool).with_connection_options(
-            vgi_client::ConnectionOptions {
+        let cache_enabled = bool_option("cache", true)?;
+        let mut connection = VgiConnection::pooled(location, pool)
+            .with_cache_enabled(cache_enabled)
+            .with_connection_options(vgi_client::ConnectionOptions {
                 worker_debug,
                 launcher_idle_timeout,
                 launcher_state_dir: launcher_state_dir.map(Into::into),
-            },
-        );
+                rpc_timeout: None,
+            });
 
         let bearer = self
             .options
@@ -805,19 +1111,326 @@ impl AttachSpec {
 }
 
 async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
-    let mut conn = spec.connection()?;
+    let runtime = session_runtime(ctx);
+    let companions_enabled = spec
+        .options
+        .get("attach_companions")
+        .map(|value| option_string(value))
+        .transpose()?
+        .map(|value| value.parse::<bool>())
+        .transpose()
+        .map_err(|_| {
+            plan_datafusion_err!("ATTACH option `attach_companions` must be true or false")
+        })?
+        .unwrap_or(true);
+    let companions = attach_one(ctx, spec, Arc::clone(&runtime)).await?;
+    if !companions_enabled {
+        return Ok(());
+    }
+
+    let mut pending = std::collections::VecDeque::new();
+    for companion in companions {
+        pending.push_back((companion, 1usize));
+    }
+    let mut seen =
+        std::collections::HashSet::from([format!("{}\0{}", spec.location, spec.catalog)]);
+    while let Some((companion, depth)) = pending.pop_front() {
+        if depth > 8 {
+            if companion.required {
+                return plan_err!("required VGI companion catalog nesting exceeds 8 levels");
+            }
+            continue;
+        }
+        let companion_spec = match companion_spec(spec, &companion) {
+            Ok(Some(spec)) => spec,
+            Ok(None) => continue,
+            Err(error) if companion.required => return Err(error),
+            Err(_) => continue,
+        };
+        if ctx.catalog(&companion_spec.alias).is_some() {
+            if companion.required {
+                return plan_err!(
+                    "required VGI companion alias `{}` is already registered",
+                    companion_spec.alias
+                );
+            }
+            continue;
+        }
+        let key = format!("{}\0{}", companion_spec.location, companion_spec.catalog);
+        if !seen.insert(key) {
+            if companion.required {
+                return plan_err!("required VGI companion catalog cycle detected");
+            }
+            continue;
+        }
+        let nested = attach_one(ctx, &companion_spec, Arc::clone(&runtime)).await?;
+        for child in nested {
+            pending.push_back((child, depth + 1));
+        }
+    }
+    Ok(())
+}
+
+fn companion_spec(
+    parent: &AttachSpec,
+    info: &vgi_client::dtos::AttachCatalogInfo,
+) -> DFResult<Option<AttachSpec>> {
+    if !info.db_type.eq_ignore_ascii_case("vgi") {
+        return if info.required {
+            plan_err!(
+                "required companion `{}` has type `{}`; vgi-datafusion only attaches VGI companions",
+                info.alias,
+                info.db_type
+            )
+        } else {
+            Ok(None)
+        };
+    }
+    if !info.secret_ref.is_empty() {
+        return plan_err!(
+            "VGI companion `{}` requires secret reference `{}`; companion secrets are not exposed by DataFusion",
+            info.alias,
+            info.secret_ref
+        );
+    }
+    let alias = if info.alias.is_empty() {
+        info.target.split('?').next().unwrap_or(&info.target)
+    } else {
+        &info.alias
+    };
+    let mut options = info
+        .options
+        .iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), sql_string(value)))
+        .collect::<BTreeMap<_, _>>();
+    let (catalog, embedded) = info.target.split_once('?').unwrap_or((&info.target, ""));
+    for pair in embedded.split('&').filter(|pair| !pair.is_empty()) {
+        if let Some((name, value)) = pair.split_once('=') {
+            options
+                .entry(name.to_ascii_lowercase())
+                .or_insert_with(|| sql_string(value));
+        }
+    }
+    let location = options
+        .remove("location")
+        .map(|value| option_string(&value))
+        .transpose()?
+        .unwrap_or_else(|| parent.location.clone());
+    Ok(Some(AttachSpec {
+        catalog: catalog.to_string(),
+        alias: alias.to_string(),
+        location,
+        options,
+    }))
+}
+
+async fn attach_one(
+    ctx: &SessionContext,
+    spec: &AttachSpec,
+    runtime: Arc<VgiRuntime>,
+) -> DFResult<Vec<vgi_client::dtos::AttachCatalogInfo>> {
+    let started = std::time::Instant::now();
+    let mut conn = spec.connection()?.with_runtime(runtime);
+    crate::diagnostics::register(ctx, Arc::clone(conn.runtime()));
     let options = build_attach_options(ctx, &conn, spec).await?;
     conn = conn.with_catalog_attach_options(&spec.catalog, options);
     let provider = VgiCatalogProvider::discover(conn.clone(), &spec.catalog).await?;
+    // Re-attaching an alias refreshes its flat function registrations as well
+    // as its catalog provider.
+    deregister_alias_functions(ctx, &spec.alias);
     register_table_functions(ctx, &conn, spec, &provider);
     register_scalar_functions(ctx, &conn, spec, &provider);
     register_aggregate_functions(ctx, &conn, spec, &provider);
+    register_global_functions(ctx, &conn, spec, &provider)?;
     register_scalar_macros(ctx, spec, &provider);
-    ctx.register_catalog(&spec.alias, provider);
+    ctx.register_catalog(&spec.alias, provider.clone());
+    register_views(ctx, spec, &provider).await;
+    let mut event = crate::VgiEvent::new("catalog.attached");
+    event.catalog = Some(spec.alias.clone());
+    event.duration = Some(started.elapsed());
+    event.message = Some(format!("worker catalog `{}`", spec.catalog));
+    conn.runtime().emit(event);
+    Ok(provider.companion_catalogs().to_vec())
+}
+
+/// Plan worker-declared views against their owning schema and install ordinary
+/// DataFusion `ViewTable`s. A broken definition does not make ATTACH fail: the
+/// view remains discoverable and reports its retained error when queried.
+async fn register_views(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalogProvider) {
+    use datafusion::datasource::ViewTable;
+    use datafusion::sql::sqlparser::ast::{
+        Ident, ObjectName, ObjectNamePart, TableFactor, VisitorMut,
+    };
+
+    struct Qualify<'a> {
+        catalog: &'a str,
+        schema: &'a str,
+    }
+
+    impl VisitorMut for Qualify<'_> {
+        type Break = Box<datafusion::common::DataFusionError>;
+
+        fn pre_visit_table_factor(&mut self, factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+            let TableFactor::Table { name, .. } = factor else {
+                return ControlFlow::Continue(());
+            };
+            if name.0.len() == 1 {
+                let Some(local) = name.0[0].as_ident().map(|ident| ident.value.clone()) else {
+                    return ControlFlow::Continue(());
+                };
+                *name = ObjectName(vec![
+                    ObjectNamePart::Identifier(Ident::new(self.catalog)),
+                    ObjectNamePart::Identifier(Ident::new(self.schema)),
+                    ObjectNamePart::Identifier(Ident::new(local)),
+                ]);
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    for (schema_name, schema) in provider.vgi_schemas() {
+        for (view_name, info) in schema.views() {
+            let planned =
+                async {
+                    let state = ctx.state();
+                    let dialect = state.config_options().sql_parser.dialect;
+                    let mut statement = state.sql_to_statement(&info.definition, &dialect)?;
+                    if let DFStatement::Statement(inner) = &mut statement {
+                        if let ControlFlow::Break(error) = inner.as_mut().visit(&mut Qualify {
+                            catalog: &spec.alias,
+                            schema: schema_name,
+                        }) {
+                            return Err(*error);
+                        }
+                    }
+                    rewrite_vgi_sql(ctx, &mut statement)?;
+                    let plan = state.statement_to_plan(statement).await?;
+                    Ok::<
+                        Arc<dyn datafusion::catalog::TableProvider>,
+                        datafusion::common::DataFusionError,
+                    >(Arc::new(ViewTable::new(
+                        plan,
+                        Some(info.definition.clone()),
+                    )))
+                }
+                .await
+                .map_err(|error| error.to_string());
+            schema.install_view(view_name, planned);
+        }
+    }
+}
+
+fn metadata_volatility(
+    info: &vgi_client::dtos::FunctionInfo,
+) -> datafusion::logical_expr::Volatility {
+    use datafusion::logical_expr::Volatility;
+    match info.stability.as_ref().map(|value| value.0.as_str()) {
+        Some(value) if value.eq_ignore_ascii_case("VOLATILE") => Volatility::Volatile,
+        Some(value) if value.eq_ignore_ascii_case("CONSISTENT_WITHIN_QUERY") => Volatility::Stable,
+        _ => Volatility::Immutable,
+    }
+}
+
+fn metadata_secrets(info: &vgi_client::dtos::FunctionInfo) -> Vec<vgi_client::SecretLookupRequest> {
+    info.required_secrets
+        .iter()
+        .map(|secret| vgi_client::SecretLookupRequest {
+            secret_type: secret.secret_type.clone(),
+            scope: secret.scope.clone(),
+            name: secret.secret_name.clone(),
+        })
+        .collect()
+}
+
+fn register_global_functions(
+    ctx: &SessionContext,
+    conn: &VgiConnection,
+    spec: &AttachSpec,
+    provider: &VgiCatalogProvider,
+) -> DFResult<()> {
+    let prefix = provider.global_function_prefix();
+    for info in provider.global_functions() {
+        let name = if prefix.is_empty() {
+            info.name.to_ascii_lowercase()
+        } else {
+            format!("{prefix}_{}", info.name).to_ascii_lowercase()
+        };
+        let kind = info.function_type.0.to_ascii_lowercase();
+        let state = ctx.state();
+        let collision = match kind.as_str() {
+            "scalar" => state.scalar_functions().contains_key(&name),
+            "aggregate" => state.aggregate_functions().contains_key(&name),
+            "table" | "table_buffering" => state.table_functions().contains_key(&name),
+            _ => {
+                return plan_err!(
+                    "worker nominated global function `{}` with unsupported type `{}`",
+                    info.name,
+                    info.function_type.0
+                )
+            }
+        };
+        if collision {
+            return plan_err!("global VGI function `{name}` collides with an existing function");
+        }
+        match kind.as_str() {
+            "scalar" => {
+                let specs = vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?;
+                ctx.register_udf(
+                    AsyncScalarUDF::new(Arc::new(VgiScalarUdf::discovered_with_volatility(
+                        conn.clone(),
+                        &spec.catalog,
+                        &info.schema_name,
+                        &info.name,
+                        &name,
+                        specs,
+                        metadata_volatility(info),
+                    )))
+                    .into_scalar_udf(),
+                );
+                record_registration(ctx, &spec.alias, RegistrationKind::Scalar, name);
+            }
+            "aggregate" => {
+                let specs = vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?;
+                ctx.register_udaf(AggregateUDF::new_from_impl(
+                    VgiAggregateUdf::new_with_volatility(
+                        conn.clone(),
+                        &spec.catalog,
+                        &info.schema_name,
+                        &info.name,
+                        &name,
+                        metadata_volatility(info),
+                    )
+                    .with_arg_specs(specs)
+                    .with_required_secrets(metadata_secrets(info)),
+                ));
+                record_registration(ctx, &spec.alias, RegistrationKind::Aggregate, name);
+            }
+            "table" | "table_buffering" => {
+                let metadata = crate::catalog::TableFunctionMetadata {
+                    specs: vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?,
+                    buffered: kind == "table_buffering",
+                    input_from_args: info.input_from_args,
+                };
+                ctx.register_udtf(
+                    &name,
+                    Arc::new(VgiTableFunction::new(
+                        conn.clone(),
+                        &spec.catalog,
+                        &info.schema_name,
+                        &info.name,
+                        Some(metadata),
+                    )),
+                );
+                record_registration(ctx, &spec.alias, RegistrationKind::Table, name);
+            }
+            _ => unreachable!(),
+        }
+    }
     Ok(())
 }
 
 const IMPLEMENTED_LOCAL_OPTIONS: &[&str] = &[
+    "cache",
     "pool",
     "pool_max",
     "pool_timeout",
@@ -828,15 +1441,10 @@ const IMPLEMENTED_LOCAL_OPTIONS: &[&str] = &[
     "implementation_version",
     "bearer_token",
     "oauth_refresh_token",
+    "attach_companions",
 ];
 
-const UNAVAILABLE_LOCAL_OPTIONS: &[&str] = &[
-    "cache",
-    "secrets",
-    "attach_companions",
-    "attach_companion_secrets",
-    "global_functions",
-];
+const UNAVAILABLE_LOCAL_OPTIONS: &[&str] = &["secrets", "attach_companion_secrets"];
 
 async fn build_attach_options(
     ctx: &SessionContext,
@@ -1105,28 +1713,27 @@ fn register_table_functions(
     spec: &AttachSpec,
     provider: &VgiCatalogProvider,
 ) {
-    let state = ctx.state();
-
     for (schema_name, schema) in provider.vgi_schemas() {
-        for function in datafusion::catalog::SchemaProvider::table_names(schema.as_ref()) {
-            let metadata = schema.table_function_metadata(&function).cloned();
+        for function in schema.table_function_names() {
+            let metadata = schema.table_function_metadata(function).cloned();
             let make = || {
                 Arc::new(VgiTableFunction::new(
                     conn.clone(),
                     &spec.catalog,
                     schema_name,
-                    &function,
+                    function.as_str(),
                     metadata.clone(),
                 ))
             };
 
-            for name in publish_names(&spec.alias, schema_name, &function) {
+            for name in publish_names(&spec.alias, schema_name, function) {
                 // First-wins throughout: the two shorter forms cannot carry a
                 // schema, so a name published in two schemas collides on them,
                 // and the fully qualified form is always there as the
                 // unambiguous way to say which one you meant.
-                if !state.table_functions().contains_key(&name) {
+                if !ctx.state().table_functions().contains_key(&name) {
                     ctx.register_udtf(&name, make());
+                    record_registration(ctx, &spec.alias, RegistrationKind::Table, name);
                 }
             }
         }
@@ -1184,23 +1791,23 @@ fn register_scalar_functions(
     spec: &AttachSpec,
     provider: &VgiCatalogProvider,
 ) {
-    let state = ctx.state();
-
     for (schema_name, schema) in provider.vgi_schemas() {
-        for (function, specs) in schema.scalars() {
+        for (function, overloads, volatility) in schema.scalars() {
             let register = |name: String| {
-                if state.scalar_functions().contains_key(&name) {
+                if ctx.state().scalar_functions().contains_key(&name) {
                     return;
                 }
-                let udf = VgiScalarUdf::discovered(
+                let udf = VgiScalarUdf::discovered_overloads_with_volatility(
                     conn.clone(),
                     &spec.catalog,
                     schema_name,
                     function,
                     &name,
-                    specs.clone(),
+                    overloads.clone(),
+                    *volatility,
                 );
                 ctx.register_udf(AsyncScalarUDF::new(Arc::new(udf)).into_scalar_udf());
+                record_registration(ctx, &spec.alias, RegistrationKind::Scalar, name);
             };
             for name in publish_names(&spec.alias, schema_name, function) {
                 register(name);
@@ -1220,21 +1827,26 @@ fn register_aggregate_functions(
     spec: &AttachSpec,
     provider: &VgiCatalogProvider,
 ) {
-    let state = ctx.state();
-
     for (schema_name, schema) in provider.vgi_schemas() {
-        for function in schema.aggregates() {
+        for (function, specs, volatility, _supports_window, required_secrets) in schema.aggregates()
+        {
             for name in publish_names(&spec.alias, schema_name, function) {
-                if state.aggregate_functions().contains_key(&name) {
+                if ctx.state().aggregate_functions().contains_key(&name) {
                     continue;
                 }
-                ctx.register_udaf(AggregateUDF::new_from_impl(VgiAggregateUdf::new(
-                    conn.clone(),
-                    &spec.catalog,
-                    schema_name,
-                    function,
-                    &name,
-                )));
+                ctx.register_udaf(AggregateUDF::new_from_impl(
+                    VgiAggregateUdf::new_with_volatility(
+                        conn.clone(),
+                        &spec.catalog,
+                        schema_name,
+                        function,
+                        &name,
+                        *volatility,
+                    )
+                    .with_arg_specs(specs.clone())
+                    .with_required_secrets(required_secrets.clone()),
+                ));
+                record_registration(ctx, &spec.alias, RegistrationKind::Aggregate, name);
             }
         }
     }
@@ -1256,6 +1868,7 @@ fn detach(ctx: &SessionContext, alias: &str) -> DFResult<()> {
     if ctx.catalog(alias).is_none() {
         return plan_err!("no catalog attached as {alias:?}");
     }
+    deregister_alias_functions(ctx, alias);
     if let Ok(mut sessions) = macro_registry().lock() {
         if let Some(macros) = sessions.get_mut(&ctx.session_id()) {
             let prefix = format!("{}.", alias.to_ascii_lowercase());

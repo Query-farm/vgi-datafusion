@@ -104,13 +104,16 @@ async fn required_unknown_and_unsupported_options_are_clear() -> datafusion::err
         "{unknown}"
     );
 
-    let unsupported = vgi_datafusion::sql(
+    vgi_datafusion::sql(
         &ctx,
         &format!("ATTACH 'attach_options' (TYPE vgi, LOCATION '{worker}', cache true)"),
     )
     .await
-    .expect_err("cache is not implemented")
-    .to_string();
-    assert!(unsupported.contains("not supported"), "{unsupported}");
+    .expect("cache is a supported local option");
+    let stats = vgi_datafusion::sql(&ctx, "SELECT entries FROM vgi_cache_stats()")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(stats.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
     Ok(())
 }

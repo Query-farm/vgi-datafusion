@@ -6,6 +6,7 @@
 //! and the rows come from a worker process over Arrow IPC.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use datafusion::arrow::array::Array;
 use datafusion::catalog::TableProvider;
@@ -14,6 +15,39 @@ use datafusion::common::ScalarValue;
 use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use vgi_datafusion::{VgiConnection, VgiTableProvider};
+use vgi_datafusion::{VgiResolvedSecret, VgiRuntime, VgiSecretResolver, VgiSessionOptions};
+
+#[derive(Debug)]
+struct ExampleSecretResolver;
+
+#[async_trait::async_trait]
+impl VgiSecretResolver for ExampleSecretResolver {
+    async fn resolve(
+        &self,
+        secret_type: &str,
+        _scope: Option<&str>,
+        _name: Option<&str>,
+    ) -> datafusion::common::Result<Option<VgiResolvedSecret>> {
+        if secret_type != "vgi_example" {
+            return Ok(None);
+        }
+        Ok(Some(VgiResolvedSecret {
+            name: "datafusion_test_secret".to_string(),
+            fields: std::collections::BTreeMap::from([
+                (
+                    "type".to_string(),
+                    ScalarValue::Utf8(Some(secret_type.to_string())),
+                ),
+                (
+                    "secret_string".to_string(),
+                    ScalarValue::Utf8(Some("from-datafusion".to_string())),
+                ),
+                ("port".to_string(), ScalarValue::Int64(Some(5432))),
+                ("use_ssl".to_string(), ScalarValue::Boolean(Some(true))),
+            ]),
+        }))
+    }
+}
 
 /// Locate the worker built by the sibling `vgi-rust` workspace.
 ///
@@ -62,6 +96,323 @@ async fn selects_from_a_remote_table_function() -> datafusion::error::Result<()>
     let batches = ctx.sql("SELECT * FROM remote").await?.collect().await?;
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert!(rows > 0, "the remote scan produced no rows");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_opted_results_are_cached_per_session() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = std::sync::Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()])
+        .with_runtime(runtime.clone());
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote_cache_nonce",
+        VgiTableProvider::bind(conn, "example", "main", "cache_nonce").await?,
+    )?;
+
+    let read = || async {
+        let batches = ctx
+            .sql("SELECT nonce FROM remote_cache_nonce")
+            .await?
+            .collect()
+            .await?;
+        let values = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("nonce is Int64");
+        Ok::<i64, datafusion::error::DataFusionError>(values.value(0))
+    };
+    let first = read().await?;
+    let second = read().await?;
+    assert_eq!(first, second, "a cache hit must replay the stored nonce");
+    let stats = runtime.result_cache().stats();
+    assert_eq!(stats.inserts, 1, "events: {:?}", runtime.events());
+    assert_eq!(stats.hits, 1, "events: {:?}", runtime.events());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn split_results_commit_only_after_every_partition() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_extension(runtime.clone()));
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    for _ in 0..2 {
+        let batches = vgi_datafusion::sql(
+            &ctx,
+            "SELECT n FROM ex.main.split_cacheable(n := 100, splits := 4)",
+        )
+        .await?
+        .collect()
+        .await?;
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            100
+        );
+    }
+    let stats = runtime.result_cache().stats();
+    assert_eq!(stats.inserts, 1, "events: {:?}", runtime.events());
+    assert_eq!(stats.hits, 1, "events: {:?}", runtime.events());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn split_plans_are_reused_only_when_the_worker_allows_it() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_extension(runtime.clone()));
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    for _ in 0..2 {
+        vgi_datafusion::sql(
+            &ctx,
+            "SELECT count(*) FROM ex.main.split_partitioned(rows_per_country := 1)",
+        )
+        .await?
+        .collect()
+        .await?;
+    }
+    let stats = runtime.plan_cache_stats();
+    assert_eq!(stats.inserts, 1);
+    assert_eq!(stats.hits, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn advertised_aggregates_support_sliding_window_frames() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT ex.main.vgi_window_sum(x) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS s \
+         FROM (VALUES (1::BIGINT), (2::BIGINT), (3::BIGINT)) t(x) ORDER BY x",
+    )
+    .await?
+    .collect()
+    .await?;
+    let got = batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                .expect("window sum is Int64")
+                .clone();
+            (0..values.len()).map(move |index| values.value(index))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(got, vec![1, 3, 5]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn aggregate_const_parameters_reach_bind_and_finalize() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT ex.main.vgi_percentile(x::DOUBLE, 0.0) AS lo, \
+                ex.main.vgi_percentile(x::DOUBLE, 0.9) AS hi \
+         FROM range(10) t(x)",
+    )
+    .await?
+    .collect()
+    .await?;
+    let lo = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Float64Array>()
+        .expect("percentile returns Float64")
+        .value(0);
+    let hi = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Float64Array>()
+        .expect("percentile returns Float64")
+        .value(0);
+    assert_eq!((lo, hi), (0.0, 9.0));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_declared_views_use_datafusion_view_tables() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT (SELECT count(*) FROM ex.main.first_ten) AS first_ten, \
+                (SELECT count(*) FROM ex.main.even_numbers) AS evens",
+    )
+    .await?
+    .collect()
+    .await?;
+    let first_ten = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    let evens = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!((first_ten, evens), (10, 50));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_nominated_global_functions_are_published() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let scalar = vgi_datafusion::sql(&ctx, "SELECT vgi_example_global_scalar(7)")
+        .await?
+        .collect()
+        .await?;
+    let value = scalar[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .expect("global scalar returns Utf8")
+        .value(0);
+    assert_eq!(value, "global_scalar:7");
+
+    let table = vgi_datafusion::sql(&ctx, "SELECT count(*) FROM vgi_example_global_table()")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        table[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("count is Int64")
+            .value(0),
+        3
+    );
+
+    let aggregate = vgi_datafusion::sql(
+        &ctx,
+        "SELECT vgi_example_global_agg(x) FROM (VALUES (2::BIGINT), (3::BIGINT)) t(x)",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(
+        aggregate[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("global aggregate returns Int64")
+            .value(0),
+        5
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_secret_lookups_use_the_session_resolver() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = Arc::new(
+        VgiRuntime::new(VgiSessionOptions::default())
+            .with_secret_resolver(Arc::new(ExampleSecretResolver)),
+    );
+    let config = SessionConfig::new().with_extension(runtime);
+    let ctx = SessionContext::new_with_config(config);
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT value FROM ex.main.secret_demo() WHERE key = 'secret_string'",
+    )
+    .await?
+    .collect()
+    .await?;
+    let value = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .expect("secret value is Utf8")
+        .value(0);
+    assert_eq!(value, "from-datafusion");
+
+    let aggregate = vgi_datafusion::sql(
+        &ctx,
+        "SELECT ex.main.secret_typed_sum(x) FROM (VALUES (2::BIGINT), (3::BIGINT)) t(x)",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(
+        aggregate[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .expect("secret selected Float64 output")
+            .value(0),
+        5.0
+    );
     Ok(())
 }
 

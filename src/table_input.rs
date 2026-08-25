@@ -125,9 +125,7 @@ pub(crate) fn run_exchange(
     let spec = BindSpec::table(function)
         .in_schema(schema_name)
         .with_arguments(arguments);
-    let bound = client
-        .bind_with_input(&attached, &spec, input_schema)
-        .map_err(to_df)?;
+    let bound = crate::bind_with_input_secrets(conn, &mut client, &attached, &spec, input_schema)?;
 
     let mut ex = client
         .open_exchange(&bound, &ScanOptions::default())
@@ -177,9 +175,13 @@ impl VgiLiteralInputProvider {
         let spec = BindSpec::table(function)
             .in_schema(schema_name)
             .with_arguments(arguments.clone());
-        let bound = client
-            .bind_with_input(&attached, &spec, input_schema.as_ref())
-            .map_err(to_df)?;
+        let bound = crate::bind_with_input_secrets(
+            &conn,
+            &mut client,
+            &attached,
+            &spec,
+            input_schema.as_ref(),
+        )?;
         let output_schema = bound.output_schema().clone();
 
         Ok(Arc::new(Self {
@@ -279,9 +281,7 @@ pub(crate) fn run_buffered(
     let spec = BindSpec::table(function)
         .in_schema(schema_name)
         .with_arguments(arguments);
-    let bound = client
-        .bind_with_input(&attached, &spec, input_schema)
-        .map_err(to_df)?;
+    let bound = crate::bind_with_input_secrets(conn, &mut client, &attached, &spec, input_schema)?;
 
     let execution_id = client.buffering_begin(&bound).map_err(to_df)?;
 
@@ -351,9 +351,8 @@ impl VgiTableInputProvider {
         let spec = BindSpec::table(function)
             .in_schema(schema_name)
             .with_arguments(arguments.clone());
-        let bound = client
-            .bind_with_input(&attached, &spec, &input_schema)
-            .map_err(to_df)?;
+        let bound =
+            crate::bind_with_input_secrets(&conn, &mut client, &attached, &spec, &input_schema)?;
         let output_schema = bound.output_schema().clone();
 
         Ok(Arc::new(Self {

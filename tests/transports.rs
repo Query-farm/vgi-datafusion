@@ -127,7 +127,7 @@ async fn only_the_queried_table_is_bound() -> datafusion::error::Result<()> {
     let err = err.to_string();
     assert!(err.contains("does not bind as a bare table"), "{err}");
     assert!(
-        err.contains("positional"),
+        err.contains("positional") || err.contains("count cannot be NULL"),
         "worker reason not surfaced: {err}"
     );
     Ok(())
@@ -348,6 +348,90 @@ async fn const_parameters_reach_the_worker() -> datafusion::error::Result<()> {
         );
         assert_eq!(got.value(0), want, "{q}");
     }
+    Ok(())
+}
+
+/// ConstParams use their declared types and the overload matching this call.
+///
+/// This covers three distinct failure modes: an all-const scalar needs a
+/// zero-column input batch with a real row count, string literals must be cast
+/// to an integer ConstParam before bind, and overloads with different const
+/// layouts must not collapse to the first advertised FunctionInfo.
+#[tokio::test(flavor = "multi_thread")]
+async fn const_parameters_are_typed_and_overload_aware() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT \
+           ex.hash_seed('5') AS seeded, \
+           length(ex.conditional_message('5', 'X', true)) AS message_len, \
+           ex.format_number(2, 3.14159) AS precision, \
+           ex.format_number(1, '$', 10.0) AS prefixed, \
+           ex.smart_format('$', 3.14) AS typed_overload",
+    )
+    .await?
+    .collect()
+    .await?;
+    let batch = &batches[0];
+    let got = (0..batch.num_columns())
+        .map(|column| {
+            datafusion::arrow::util::display::array_value_to_string(batch.column(column), 0)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(got, ["5", "5", "3.14", "$10.0", "$3.14"]);
+
+    for (query, expected) in [
+        ("SELECT ex.pair_type(1::BIGINT, 2::BIGINT)", "int+int"),
+        ("SELECT ex.pair_type('a', 'b')", "str+str"),
+        ("SELECT ex.pair_type(1::BIGINT, 'b')", "int+str"),
+        ("SELECT ex.any_mixed(3.14, 42::BIGINT)", "any+int: 42"),
+        ("SELECT ex.any_mixed(3.14, 'hello')", "any+str: hello"),
+    ] {
+        let batches = vgi_datafusion::sql(&ctx, query).await?.collect().await?;
+        let actual =
+            datafusion::arrow::util::display::array_value_to_string(batches[0].column(0), 0)?;
+        assert_eq!(actual, expected, "{query}");
+    }
+    for query in [
+        "SELECT ex.pair_type(NULL::BIGINT, 1::BIGINT)",
+        "SELECT ex.pair_type(NULL::VARCHAR, NULL::VARCHAR)",
+        "SELECT ex.any_mixed(1.0, NULL::BIGINT)",
+        "SELECT ex.any_mixed(1.0, NULL::VARCHAR)",
+    ] {
+        let batches = vgi_datafusion::sql(&ctx, query).await?.collect().await?;
+        assert!(batches[0].column(0).is_null(0), "{query}");
+    }
+
+    let repeated = vgi_datafusion::sql(
+        &ctx,
+        "SELECT ex.hash_seed('42') AS seeded FROM (VALUES (1), (2), (3)) t(x)",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(
+        repeated.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3,
+        "an all-const scalar must preserve its input row count"
+    );
+    for batch in repeated {
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("hash_seed returns Int64");
+        assert!((0..values.len()).all(|row| values.value(row) == 42));
+    }
+
+    let error = vgi_datafusion::sql(&ctx, "SELECT ex.hash_seed('foo')")
+        .await
+        .expect_err("an invalid integer ConstParam must fail during planning");
+    let error = error.to_string();
+    assert!(error.contains("cannot be cast"), "{error}");
+    assert!(error.contains("Int64"), "{error}");
     Ok(())
 }
 

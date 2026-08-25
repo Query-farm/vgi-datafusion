@@ -38,6 +38,7 @@ pub struct VgiScalarUdf {
     /// dispatch to the same `function`.
     registered_name: String,
     signature: Signature,
+    volatility: Volatility,
     /// A fixed return type, when the caller knows it.
     ///
     /// `None` means "ask the worker", which is the normal case: VGI resolves a
@@ -50,7 +51,11 @@ pub struct VgiScalarUdf {
     /// constant, so its value belongs in the bind's `Arguments` and must not be
     /// shipped as a column. A worker that finds no value for it answers with
     /// NULLs rather than an error.
-    specs: ArgSpecs,
+    /// Every overload advertised under this SQL name. DataFusion owns one UDF
+    /// registry entry per name, while VGI resolves overloads at bind time.
+    /// Keeping the set is essential because overloads may put const parameters
+    /// in different positions.
+    overloads: Vec<ArgSpecs>,
     /// Memoised bind-time return types, keyed on the argument types **and** any
     /// const values, since a worker may resolve its output type from them.
     resolved: Arc<Mutex<HashMap<String, DataType>>>,
@@ -72,6 +77,7 @@ impl VgiScalarUdf {
         return_type: DataType,
     ) -> Self {
         let name = name.into();
+        let volatility = signature.volatility;
         Self {
             conn,
             catalog: catalog.into(),
@@ -79,8 +85,9 @@ impl VgiScalarUdf {
             function: name.clone(),
             registered_name: name,
             signature,
+            volatility,
             return_type: Some(return_type),
-            specs: ArgSpecs::default(),
+            overloads: vec![ArgSpecs::default()],
             resolved: Arc::new(Mutex::new(HashMap::new())),
             batch_size: None,
         }
@@ -109,15 +116,62 @@ impl VgiScalarUdf {
         registered_name: impl Into<String>,
         specs: ArgSpecs,
     ) -> Self {
+        Self::discovered_with_volatility(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            registered_name,
+            specs,
+            Volatility::Volatile,
+        )
+    }
+
+    /// Describe a discovered function with worker-declared volatility.
+    pub fn discovered_with_volatility(
+        conn: VgiConnection,
+        catalog: impl Into<String>,
+        schema_name: impl Into<String>,
+        function: impl Into<String>,
+        registered_name: impl Into<String>,
+        specs: ArgSpecs,
+        volatility: Volatility,
+    ) -> Self {
+        Self::discovered_overloads_with_volatility(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            registered_name,
+            vec![specs],
+            volatility,
+        )
+    }
+
+    /// Describe all VGI overloads published under one DataFusion UDF name.
+    pub fn discovered_overloads_with_volatility(
+        conn: VgiConnection,
+        catalog: impl Into<String>,
+        schema_name: impl Into<String>,
+        function: impl Into<String>,
+        registered_name: impl Into<String>,
+        overloads: Vec<ArgSpecs>,
+        volatility: Volatility,
+    ) -> Self {
         Self {
             conn,
             catalog: catalog.into(),
             schema_name: schema_name.into(),
             function: function.into(),
             registered_name: registered_name.into(),
-            signature: Signature::variadic_any(Volatility::Volatile),
+            signature: Signature::variadic_any(volatility),
+            volatility,
             return_type: None,
-            specs,
+            overloads: if overloads.is_empty() {
+                vec![ArgSpecs::default()]
+            } else {
+                overloads
+            },
             resolved: Arc::new(Mutex::new(HashMap::new())),
             batch_size: None,
         }
@@ -146,28 +200,137 @@ impl VgiScalarUdf {
     /// which is enough for the worker to resolve an output type.
     fn split_arguments(
         &self,
+        specs: &ArgSpecs,
         types: &[DataType],
         values: &[Option<ArgValue>],
     ) -> (Arguments, Vec<Field>) {
         let mut arguments = Arguments::new();
         let mut columns = Vec::new();
         for (i, ty) in types.iter().enumerate() {
-            if self.specs.positional_is_const(i) {
+            if specs.positional_is_const(i) {
+                let declared_type = specs
+                    .positional()
+                    .nth(i)
+                    .map(|spec| spec.data_type.clone())
+                    .filter(|ty| *ty != DataType::Null)
+                    .unwrap_or_else(|| ty.clone());
                 let value = values
                     .get(i)
                     .cloned()
                     .flatten()
-                    .unwrap_or_else(|| ArgValue::Null(ty.clone()));
+                    .unwrap_or_else(|| ArgValue::Null(declared_type));
                 arguments = arguments.positional(value);
             } else {
+                let column_type = Self::positional_spec(specs, i)
+                    .map(|spec| spec.data_type.clone())
+                    .filter(|declared| *declared != DataType::Null)
+                    .unwrap_or_else(|| ty.clone());
                 columns.push(Field::new(
                     format!("col_{}", columns.len()),
-                    ty.clone(),
+                    column_type,
                     true,
                 ));
             }
         }
         (arguments, columns)
+    }
+
+    /// Pick the advertised overload whose arity and declared types best match
+    /// this call. The worker remains the final overload authority at bind; this
+    /// selection only decides which arguments are constants and therefore must
+    /// be removed from the input batch.
+    fn select_specs(&self, types: &[DataType]) -> &ArgSpecs {
+        let mut best: Option<(&ArgSpecs, i64)> = None;
+        for specs in &self.overloads {
+            let positional: Vec<_> = specs.positional().collect();
+            let varargs = positional.iter().position(|spec| spec.is_varargs);
+            let arity_matches = match varargs {
+                Some(index) => types.len() >= index,
+                None => types.len() == positional.len(),
+            };
+            if !arity_matches {
+                continue;
+            }
+
+            let mut score = 0i64;
+            for (index, actual) in types.iter().enumerate() {
+                let Some(spec) = positional
+                    .get(index)
+                    .copied()
+                    .or_else(|| varargs.and_then(|i| positional.get(i).copied()))
+                else {
+                    continue;
+                };
+                score += scalar_type_score(actual, &spec.data_type);
+            }
+            if best.is_none_or(|(_, current)| score > current) {
+                best = Some((specs, score));
+            }
+        }
+        best.map(|(specs, _)| specs)
+            .unwrap_or_else(|| &self.overloads[0])
+    }
+
+    fn positional_spec(specs: &ArgSpecs, index: usize) -> Option<&vgi_client::ArgSpec> {
+        let positional: Vec<_> = specs.positional().collect();
+        positional
+            .get(index)
+            .copied()
+            .or_else(|| positional.iter().find(|spec| spec.is_varargs).copied())
+    }
+
+    fn declared_const_type(specs: &ArgSpecs, index: usize) -> Option<&DataType> {
+        Self::positional_spec(specs, index)
+            .filter(|spec| spec.is_const)
+            .map(|spec| &spec.data_type)
+    }
+
+    /// Coerce a literal to the ConstParam's declared type before encoding it.
+    /// VGI overload resolution and the function implementation both see the
+    /// bind value, so forwarding DataFusion's literal type unchanged can pick
+    /// the wrong overload or quietly produce a default value (`'5'` for an
+    /// integer ConstParam was the regression that exposed this).
+    fn const_scalar_to_arg(
+        &self,
+        specs: &ArgSpecs,
+        index: usize,
+        scalar: &datafusion::common::ScalarValue,
+    ) -> DFResult<ArgValue> {
+        let declared = Self::declared_const_type(specs, index).unwrap_or(&DataType::Null);
+        let coerced;
+        let scalar = if *declared == DataType::Null {
+            scalar
+        } else {
+            coerced = scalar.cast_to(declared).map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "VGI scalar `{}` const argument {index} cannot be cast from {} to {declared}: {error}",
+                    self.function,
+                    scalar.data_type()
+                ))
+            })?;
+            &coerced
+        };
+        crate::table_function::scalar_to_arg(&self.function, index, scalar)
+    }
+
+    fn const_array_to_arg(
+        &self,
+        specs: &ArgSpecs,
+        index: usize,
+        array: &dyn datafusion::arrow::array::Array,
+    ) -> DFResult<ArgValue> {
+        let declared = Self::declared_const_type(specs, index).unwrap_or(&DataType::Null);
+        if *declared == DataType::Null || array.data_type() == declared {
+            return ArgValue::from_array_row0(array, &self.function).map_err(to_df);
+        }
+        let coerced = datafusion::arrow::compute::cast(array, declared).map_err(|error| {
+            DataFusionError::Plan(format!(
+                "VGI scalar `{}` const argument {index} cannot be cast from {} to {declared}: {error}",
+                self.function,
+                array.data_type()
+            ))
+        })?;
+        ArgValue::from_array_row0(coerced.as_ref(), &self.function).map_err(to_df)
     }
 
     /// Ask the worker what this call returns, and remember the answer.
@@ -195,7 +358,8 @@ impl VgiScalarUdf {
         use datafusion::arrow::datatypes::Schema;
         use vgi_client::{BindSpec, FunctionType};
 
-        let (arguments, columns) = self.split_arguments(arg_types, values);
+        let specs = self.select_specs(arg_types);
+        let (arguments, columns) = self.split_arguments(specs, arg_types, values);
         let input_schema = Schema::new(columns);
 
         let conn = self.conn.clone();
@@ -209,9 +373,13 @@ impl VgiScalarUdf {
             spec.function_type = FunctionType::Scalar;
             spec.arguments = arguments;
 
-            let bound = client
-                .bind_with_input(&attached, &spec, &input_schema)
-                .map_err(to_df)?;
+            let bound = crate::bind_with_input_secrets(
+                &conn,
+                &mut client,
+                &attached,
+                &spec,
+                &input_schema,
+            )?;
             bound
                 .output_schema()
                 .fields()
@@ -256,6 +424,47 @@ impl PartialEq for VgiScalarUdf {
 
 impl Eq for VgiScalarUdf {}
 
+fn scalar_type_score(actual: &DataType, expected: &DataType) -> i64 {
+    use DataType::*;
+    if actual == expected {
+        return 4;
+    }
+    if *actual == Null || *expected == Null {
+        return 0;
+    }
+    let integer = |ty: &DataType| {
+        matches!(
+            ty,
+            Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64
+        )
+    };
+    let numeric = |ty: &DataType| {
+        integer(ty)
+            || matches!(
+                ty,
+                Float16 | Float32 | Float64 | Decimal128(_, _) | Decimal256(_, _)
+            )
+    };
+    if integer(actual) && integer(expected) {
+        3
+    } else if numeric(actual) && numeric(expected) {
+        2
+    } else if matches!(actual, Utf8 | LargeUtf8 | Utf8View)
+        && matches!(expected, Utf8 | LargeUtf8 | Utf8View)
+    {
+        3
+    } else if matches!(actual, Binary | LargeBinary | BinaryView)
+        && matches!(expected, Binary | LargeBinary | BinaryView)
+    {
+        3
+    } else {
+        // Keep an arity-compatible candidate in play. DataFusion/Arrow may be
+        // able to cast a const value, and the VGI worker remains the final
+        // authority for column-type overload resolution.
+        0
+    }
+}
+
 impl ScalarUDFImpl for VgiScalarUdf {
     fn name(&self) -> &str {
         &self.registered_name
@@ -281,14 +490,20 @@ impl ScalarUDFImpl for VgiScalarUdf {
             .iter()
             .map(|f| f.data_type().clone())
             .collect();
+        let specs = self.select_specs(&types);
         let values: Vec<Option<ArgValue>> = args
             .scalar_arguments
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                v.and_then(|s| crate::table_function::scalar_to_arg(&self.function, i, s).ok())
+                if specs.positional_is_const(i) {
+                    v.map(|scalar| self.const_scalar_to_arg(specs, i, scalar))
+                        .transpose()
+                } else {
+                    Ok(None)
+                }
             })
-            .collect();
+            .collect::<DFResult<_>>()?;
         let out = self.resolve_return_type(&types, &values)?;
         Ok(Arc::new(Field::new(self.name(), out, true)))
     }
@@ -310,7 +525,7 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
     }
 
     async fn invoke_async_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        use datafusion::arrow::array::RecordBatch;
+        use datafusion::arrow::array::{RecordBatch, RecordBatchOptions};
         use datafusion::arrow::datatypes::{Field, Schema};
 
         let rows = args.number_rows;
@@ -318,34 +533,61 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
         // Const parameters are resolved at bind and must not be shipped as
         // columns; everything else is a column. See `split_arguments`.
         let types: Vec<DataType> = args.args.iter().map(|a| a.data_type()).collect();
+        let specs = self.select_specs(&types);
         let values: Vec<Option<ArgValue>> = args
             .args
             .iter()
             .enumerate()
             .map(|(i, a)| match a {
-                ColumnarValue::Scalar(s) => {
-                    crate::table_function::scalar_to_arg(&self.function, i, s).ok()
+                ColumnarValue::Scalar(s) if specs.positional_is_const(i) => {
+                    self.const_scalar_to_arg(specs, i, s).map(Some)
                 }
+                ColumnarValue::Scalar(_) => Ok(None),
                 // A literal may arrive already expanded across the batch — the
                 // engine is free to materialise it — and then every row holds
                 // the same constant, so row 0 is the value the bind needs.
                 // Without this a const parameter silently becomes a typed null
                 // and the worker answers with NULLs.
-                ColumnarValue::Array(arr) if self.specs.positional_is_const(i) => {
-                    ArgValue::from_array_row0(arr.as_ref(), &self.function).ok()
+                ColumnarValue::Array(arr) if specs.positional_is_const(i) => {
+                    self.const_array_to_arg(specs, i, arr.as_ref()).map(Some)
                 }
-                ColumnarValue::Array(_) => None,
+                ColumnarValue::Array(_) => Ok(None),
             })
-            .collect();
-        let (arguments, _) = self.split_arguments(&types, &values);
+            .collect::<DFResult<_>>()?;
+        let (arguments, _) = self.split_arguments(specs, &types, &values);
 
         let columns: Vec<datafusion::arrow::array::ArrayRef> = args
             .args
             .iter()
             .enumerate()
-            .filter(|(i, _)| !self.specs.positional_is_const(*i))
-            .map(|(_, a)| a.to_array(rows))
+            .filter(|(i, _)| !specs.positional_is_const(*i))
+            .map(|(i, a)| {
+                let array = a.to_array(rows)?;
+                let declared = Self::positional_spec(specs, i).map(|spec| &spec.data_type);
+                match declared.filter(|ty| **ty != DataType::Null) {
+                    Some(declared) if array.data_type() != declared => {
+                        datafusion::arrow::compute::cast(array.as_ref(), declared).map_err(|error| {
+                            DataFusionError::Execution(format!(
+                                "VGI scalar `{}` argument {i} cannot be cast from {} to {declared}: {error}",
+                                self.function,
+                                array.data_type()
+                            ))
+                        })
+                    }
+                    _ => Ok(array),
+                }
+            })
             .collect::<DFResult<_>>()?;
+        // DataFusion does not currently constant-fold async UDFs. Preserve the
+        // ordinary SQL semantics for an immutable/stable all-const call by
+        // evaluating one worker row and broadcasting it, while volatile calls
+        // still receive every row and may produce a different value each time.
+        let rpc_rows = if rows > 0 && columns.is_empty() && self.volatility != Volatility::Volatile
+        {
+            1
+        } else {
+            rows
+        };
         // `col_<i>`, not any other spelling: this is the wire convention the
         // DuckDB extension uses (`vgi_scalar_function_impl.cpp` builds
         // `input_names` as `"col_" + i`), and a worker that reads its arguments
@@ -358,7 +600,11 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             .enumerate()
             .map(|(i, c)| Field::new(format!("col_{i}"), c.data_type().clone(), true))
             .collect();
-        let input = RecordBatch::try_new(Arc::new(Schema::new(fields.clone())), columns)?;
+        let input = RecordBatch::try_new_with_options(
+            Arc::new(Schema::new(fields.clone())),
+            columns,
+            &RecordBatchOptions::new().with_row_count(Some(rpc_rows)),
+        )?;
 
         let (conn, cat, sch, name) = (
             self.conn.clone(),
@@ -376,9 +622,13 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             spec.function_type = FunctionType::Scalar;
             spec.arguments = arguments;
 
-            let bound = client
-                .bind_with_input(&attached, &spec, &input_schema)
-                .map_err(to_df)?;
+            let bound = crate::bind_with_input_secrets(
+                &conn,
+                &mut client,
+                &attached,
+                &spec,
+                &input_schema,
+            )?;
             let mut ex = client
                 .open_exchange(&bound, &ScanOptions::default())
                 .map_err(to_df)?;
@@ -391,14 +641,27 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
-        if out.num_rows() != rows {
+        if out.num_rows() != rpc_rows {
             return Err(DataFusionError::Execution(format!(
                 "{} answered {} rows for {} input rows; a scalar function must be 1:1",
                 self.registered_name,
                 out.num_rows(),
-                rows
+                rpc_rows
             )));
         }
-        Ok(ColumnarValue::Array(out.column(0).clone()))
+        if out.num_columns() != 1 {
+            return Err(DataFusionError::Execution(format!(
+                "{} answered {} columns; a scalar function must return exactly one",
+                self.registered_name,
+                out.num_columns()
+            )));
+        }
+        let output = if rpc_rows == 1 && rows > 1 {
+            datafusion::common::ScalarValue::try_from_array(out.column(0), 0)?
+                .to_array_of_size(rows)?
+        } else {
+            out.column(0).clone()
+        };
+        Ok(ColumnarValue::Array(output))
     }
 }

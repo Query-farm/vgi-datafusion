@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{SessionConfig, SessionContext};
 
 /// One directive from a `.test` file.
 #[derive(Debug)]
@@ -371,7 +371,11 @@ async fn run_file(path: &Path, tally: &mut Tally) {
         .to_string();
     let group = file_label.split('/').next().unwrap_or("?").to_string();
 
-    let ctx = SessionContext::new();
+    // Match datafusion-cli: SHOW and standards-based metadata are part of the
+    // user-facing SQL surface, and the CLI enables information_schema by
+    // default. Leaving it off here misclassifies supported VGI metadata as an
+    // adapter failure.
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
     for record in records {
         let (sql, expected) = match &record {
             Record::Statement { sql, .. } => (expand(sql), None),
