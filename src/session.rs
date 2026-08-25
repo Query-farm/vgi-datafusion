@@ -1238,6 +1238,9 @@ async fn attach_one(
     conn.runtime().set_catalog_metadata(
         &spec.alias,
         crate::runtime::VgiCatalogMetadata {
+            connection: conn.metadata_connection(),
+            worker_catalog: spec.catalog.clone(),
+            tables: provider.tables().cloned().collect(),
             functions: provider.functions().cloned().collect(),
             macros: provider.metadata_macros().cloned().collect(),
             global_function_prefix: provider.global_function_prefix().to_string(),

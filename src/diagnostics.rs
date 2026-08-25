@@ -5,15 +5,15 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    ArrayRef, BooleanArray, Int64Array, ListBuilder, MapBuilder, StringArray, StringBuilder,
-    UInt64Array,
+    new_empty_array, ArrayRef, BooleanArray, Int64Array, ListBuilder, MapBuilder, StringArray,
+    StringBuilder, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::{MemTable, TableFunctionArgs, TableFunctionImpl, TableProvider};
 use datafusion::common::{plan_err, Result as DFResult, ScalarValue};
 use datafusion::logical_expr::{
-    create_udf, ColumnarValue, ScalarFunctionArgs, ScalarFunctionImplementation, ScalarUDF,
+    create_udf, ColumnarValue, Expr, ScalarFunctionArgs, ScalarFunctionImplementation, ScalarUDF,
     ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion::prelude::SessionContext;
@@ -24,6 +24,262 @@ use crate::VgiRuntime;
 struct DiagnosticsTable {
     runtime: Arc<VgiRuntime>,
     kind: DiagnosticsKind,
+}
+
+#[derive(Debug)]
+struct TableStatistics {
+    runtime: Arc<VgiRuntime>,
+}
+
+impl TableFunctionImpl for TableStatistics {
+    fn call_with_args(&self, args: TableFunctionArgs) -> DFResult<Arc<dyn TableProvider>> {
+        let [catalog, schema, table] = literal_strings(args.exprs(), "vgi_table_statistics")?
+            .try_into()
+            .map_err(|_| {
+                datafusion::common::plan_datafusion_err!(
+                    "vgi_table_statistics expects catalog, schema, and table arguments"
+                )
+            })?;
+        let metadata = self
+            .runtime
+            .catalog_metadata()
+            .into_iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(&catalog))
+            .map(|(_, metadata)| metadata)
+            .ok_or_else(|| {
+                datafusion::common::plan_datafusion_err!("VGI catalog `{catalog}` is not attached")
+            })?;
+        let table_info = metadata
+            .tables
+            .iter()
+            .find(|info| {
+                info.schema_name.eq_ignore_ascii_case(&schema)
+                    && info.name.eq_ignore_ascii_case(&table)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                datafusion::common::plan_datafusion_err!(
+                    "VGI table `{catalog}.{schema}.{table}` does not exist"
+                )
+            })?;
+
+        let raw = if !table_info.supports_column_statistics {
+            RecordBatch::new_empty(Arc::new(Schema::empty()))
+        } else if let Some(inline) = table_info
+            .column_statistics
+            .as_ref()
+            .filter(|value| !value.0.is_empty())
+        {
+            vgi_protocol::ipc::read_batch(&inline.0).map_err(vgi_error)?
+        } else {
+            let connection = metadata.connection;
+            let worker_catalog = metadata.worker_catalog;
+            let rpc_schema = table_info.schema_name.clone();
+            let rpc_table = table_info.name.clone();
+            crate::run_blocking_planner_call(move || {
+                let mut client = connection.connect()?;
+                let attached = connection.attach(&mut client, &worker_catalog)?;
+                client
+                    .table_column_statistics(&attached, &rpc_schema, &rpc_table)
+                    .map_err(vgi_error)
+            })?
+        };
+        let batch = table_statistics_batch(&table_info, &raw)?;
+        Ok(Arc::new(MemTable::try_new(
+            batch.schema(),
+            vec![vec![batch]],
+        )?))
+    }
+}
+
+fn literal_strings(exprs: &[Expr], function: &str) -> DFResult<Vec<String>> {
+    exprs
+        .iter()
+        .enumerate()
+        .map(|(index, expr)| match expr {
+            Expr::Literal(
+                ScalarValue::Utf8(Some(value))
+                | ScalarValue::Utf8View(Some(value))
+                | ScalarValue::LargeUtf8(Some(value)),
+                _,
+            ) => Ok(value.clone()),
+            _ => plan_err!("{function} argument {index} must be a non-NULL string literal"),
+        })
+        .collect()
+}
+
+fn vgi_error(error: impl std::fmt::Display) -> datafusion::common::DataFusionError {
+    datafusion::common::DataFusionError::External(Box::new(std::io::Error::other(
+        error.to_string(),
+    )))
+}
+
+fn table_statistics_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("column_name", DataType::Utf8, false),
+        Field::new("column_type", DataType::Utf8, false),
+        // DataFusion cannot cast an Arrow sparse union to VARCHAR. The
+        // diagnostic surface therefore publishes its display form directly;
+        // the worker's typed values remain untouched in optimizer metadata.
+        Field::new("min", DataType::Utf8, true),
+        Field::new("max", DataType::Utf8, true),
+        Field::new("has_null", DataType::Boolean, true),
+        Field::new("has_not_null", DataType::Boolean, true),
+        Field::new("distinct_count", DataType::Int64, true),
+        Field::new("contains_unicode", DataType::Boolean, true),
+        Field::new("max_string_length", DataType::UInt64, true),
+    ]))
+}
+
+fn table_statistics_batch(
+    table: &vgi_client::dtos::TableInfo,
+    raw: &RecordBatch,
+) -> DFResult<RecordBatch> {
+    let output_schema = table_statistics_schema();
+    if raw.num_columns() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema));
+    }
+    let names = raw
+        .column_by_name("column_name")
+        .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| {
+            datafusion::common::plan_datafusion_err!(
+                "VGI column statistics are missing the UTF-8 `column_name` field"
+            )
+        })?;
+    let table_schema = vgi_protocol::ipc::read_schema(&table.columns.0).map_err(vgi_error)?;
+    let column_types = names
+        .iter()
+        .map(|name| {
+            let name = name.ok_or_else(|| {
+                datafusion::common::plan_datafusion_err!(
+                    "VGI column statistics contain a NULL column name"
+                )
+            })?;
+            let field = table_schema.field_with_name(name).map_err(|_| {
+                datafusion::common::plan_datafusion_err!(
+                    "VGI statistics reference unknown column `{name}`"
+                )
+            })?;
+            Ok(
+                if field
+                    .metadata()
+                    .get("ARROW:extension:name")
+                    .is_some_and(|extension| extension.starts_with("geoarrow."))
+                {
+                    "GEOMETRY".to_string()
+                } else {
+                    duckdb_type_name(field.data_type())
+                },
+            )
+        })
+        .collect::<DFResult<Vec<_>>>()?;
+
+    let min = statistic_strings(raw, "min", &column_types)?;
+    let max = statistic_strings(raw, "max", &column_types)?;
+    let (min, max) = normalize_statistic_bounds(min, max, &column_types);
+    let mut columns: Vec<ArrayRef> = vec![
+        Arc::new(names.clone()),
+        Arc::new(StringArray::from_iter_values(column_types)),
+        Arc::new(StringArray::from(min)),
+        Arc::new(StringArray::from(max)),
+    ];
+    for (name, data_type) in [
+        ("has_null", DataType::Boolean),
+        ("has_not_null", DataType::Boolean),
+        ("distinct_count", DataType::Int64),
+        ("contains_unicode", DataType::Boolean),
+        ("max_string_length", DataType::UInt64),
+    ] {
+        let array = raw
+            .column_by_name(name)
+            .cloned()
+            .unwrap_or_else(|| new_empty_array(&data_type));
+        if array.data_type() != &data_type || array.len() != raw.num_rows() {
+            return plan_err!("VGI column statistics field `{name}` has an invalid type or length");
+        }
+        columns.push(array);
+    }
+    Ok(RecordBatch::try_new(output_schema, columns)?)
+}
+
+fn statistic_strings(
+    batch: &RecordBatch,
+    name: &str,
+    column_types: &[String],
+) -> DFResult<Vec<Option<String>>> {
+    let array = batch.column_by_name(name).ok_or_else(|| {
+        datafusion::common::plan_datafusion_err!(
+            "VGI column statistics are missing the `{name}` field"
+        )
+    })?;
+    (0..batch.num_rows())
+        .map(|row| {
+            let scalar = ScalarValue::try_from_array(array, row)?;
+            statistic_string(scalar, &column_types[row])
+        })
+        .collect()
+}
+
+fn statistic_string(value: ScalarValue, column_type: &str) -> DFResult<Option<String>> {
+    match value {
+        ScalarValue::Union(None, _, _) | ScalarValue::Null => Ok(None),
+        ScalarValue::Union(Some((_, value)), _, _) => statistic_string(*value, column_type),
+        ScalarValue::Int64(value) => Ok(value.map(|value| value.to_string())),
+        ScalarValue::Float64(value) => Ok(value.map(|value| {
+            if value.fract() == 0.0 {
+                format!("{value:.1}")
+            } else {
+                value.to_string()
+            }
+        })),
+        ScalarValue::Utf8(value) | ScalarValue::LargeUtf8(value) => Ok(value),
+        ScalarValue::Binary(value) if column_type == "GEOMETRY" => {
+            Ok(value.and_then(|bytes| wkb_point(&bytes).map(|(x, y)| format!("{x} {y}"))))
+        }
+        other if other.is_null() => Ok(None),
+        other => Ok(Some(other.to_string())),
+    }
+}
+
+fn normalize_statistic_bounds(
+    mut min: Vec<Option<String>>,
+    mut max: Vec<Option<String>>,
+    column_types: &[String],
+) -> (Vec<Option<String>>, Vec<Option<String>>) {
+    for row in 0..min.len() {
+        if column_types[row] == "VARCHAR" {
+            let truncate = |value: &str| {
+                let mut end = value.len().min(8);
+                while !value.is_char_boundary(end) {
+                    end -= 1;
+                }
+                value[..end].to_string()
+            };
+            min[row] = min[row].as_deref().map(truncate);
+            max[row] = max[row].as_deref().map(truncate);
+            if min[row] > max[row] {
+                std::mem::swap(&mut min[row], &mut max[row]);
+            }
+        } else if column_types[row] == "GEOMETRY" {
+            if let (Some(lo), Some(hi)) = (&min[row], &max[row]) {
+                let extent = format!("BOX({lo}, {hi})");
+                min[row] = Some(extent.clone());
+                max[row] = Some(extent);
+            }
+        }
+    }
+    (min, max)
+}
+
+fn wkb_point(bytes: &[u8]) -> Option<(f64, f64)> {
+    if bytes.len() < 21 || bytes[0] != 1 || u32::from_le_bytes(bytes[1..5].try_into().ok()?) != 1 {
+        return None;
+    }
+    Some((
+        f64::from_le_bytes(bytes[5..13].try_into().ok()?),
+        f64::from_le_bytes(bytes[13..21].try_into().ok()?),
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1002,6 +1258,15 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
                 }),
             );
         }
+    }
+
+    if !state.table_functions().contains_key("vgi_table_statistics") {
+        ctx.register_udtf(
+            "vgi_table_statistics",
+            Arc::new(TableStatistics {
+                runtime: Arc::clone(&runtime),
+            }),
+        );
     }
 
     if !state.scalar_functions().contains_key("typeof") {

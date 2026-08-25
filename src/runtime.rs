@@ -16,6 +16,9 @@ use vgi_client::{CacheLimits, ResultCache};
 /// declarations, so the metadata view cannot drift from what was published.
 #[derive(Debug, Clone)]
 pub(crate) struct VgiCatalogMetadata {
+    pub connection: crate::VgiConnection,
+    pub worker_catalog: String,
+    pub tables: Vec<vgi_client::dtos::TableInfo>,
     pub functions: Vec<vgi_client::dtos::FunctionInfo>,
     pub macros: Vec<vgi_client::dtos::MacroInfo>,
     pub global_function_prefix: String,

@@ -123,6 +123,44 @@ async fn worker_function_metadata_is_queryable_and_detaches() -> datafusion::err
         .value(0);
     assert_eq!(documented_const, 1);
 
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT column_name, column_type, min, max, distinct_count \
+         FROM vgi_table_statistics('ex', 'data', 'departments') \
+         ORDER BY column_name",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3
+    );
+    let rendered = datafusion::arrow::util::pretty::pretty_format_batches(&batches)?.to_string();
+    for expected in [
+        "budget", "DOUBLE", "50000.0", "500000.0", "id", "BIGINT", "Accounti", "Sales", "VARCHAR",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "missing {expected} from {rendered}"
+        );
+    }
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT count(*) FROM vgi_table_statistics('ex', 'data', 'versioned_data')",
+    )
+    .await?
+    .collect()
+    .await?;
+    let no_statistics = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(no_statistics, 0);
+
     vgi_datafusion::sql(&ctx, "DETACH ex").await?;
     let batches = vgi_datafusion::sql(
         &ctx,

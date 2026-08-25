@@ -429,6 +429,10 @@ impl VgiSchemaProvider {
         &self.metadata_macros
     }
 
+    pub(crate) fn tables(&self) -> impl Iterator<Item = &vgi_client::dtos::TableInfo> {
+        self.tables.values()
+    }
+
     /// Install a planned view (or its durable planning error) in the same lazy
     /// table cache used for remote tables.
     pub(crate) fn install_view(&self, name: &str, table: CachedTable) {
@@ -684,6 +688,10 @@ impl VgiCatalogProvider {
         self.schemas
             .values()
             .flat_map(|schema| schema.metadata_macros())
+    }
+
+    pub(crate) fn tables(&self) -> impl Iterator<Item = &vgi_client::dtos::TableInfo> {
+        self.schemas.values().flat_map(|schema| schema.tables())
     }
 
     /// Resolve one historical table through its concrete VGI schema.

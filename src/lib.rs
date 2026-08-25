@@ -216,6 +216,18 @@ impl VgiConnection {
         &self.runtime
     }
 
+    /// Clone this attachment for metadata RPCs without retaining its owning
+    /// session runtime through that runtime's metadata registry.
+    ///
+    /// Pool, authentication, attach handles, options, and timeout settings are
+    /// still shared. Only the event/cache runtime is replaced, breaking the
+    /// otherwise circular `runtime -> metadata -> connection -> runtime` link.
+    pub(crate) fn metadata_connection(&self) -> Self {
+        let mut connection = self.clone();
+        connection.runtime = Arc::new(VgiRuntime::default());
+        connection
+    }
+
     fn cache_identity_scope(&self, catalog: &str) -> Option<String> {
         let identity = self
             .auth
