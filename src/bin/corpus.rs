@@ -853,7 +853,6 @@ fn compare_reports(baseline_path: &Path, current_path: &Path) -> Result<Vec<Stri
             ("/executed", "executed records", false),
             ("/failed", "failed records", true),
             ("/timed_out", "timeouts", true),
-            ("/values/different", "value mismatches", true),
         ] {
             let old = number(&before, pointer);
             let new = number(after, pointer);
@@ -868,6 +867,19 @@ fn compare_reports(baseline_path: &Path, current_path: &Path) -> Result<Vec<Stri
         if new_agree < old_agree {
             regressions.push(format!(
                 "{path}: agreeing value checks changed from {old_agree} to {new_agree}"
+            ));
+        }
+        let old_different = number(&before, "/values/different");
+        let new_different = number(after, "/values/different");
+        let old_compared = old_agree + old_different;
+        let new_compared = new_agree + new_different;
+        // A formerly failing query that starts executing can reveal a value
+        // mismatch for the first time. That is new evidence to triage, not a
+        // regression. Only flag additional mismatches when the comparison set
+        // did not grow; lost agreements are independently guarded above.
+        if new_compared <= old_compared && new_different > old_different {
+            regressions.push(format!(
+                "{path}: value mismatches changed from {old_different} to {new_different}"
             ));
         }
     }
