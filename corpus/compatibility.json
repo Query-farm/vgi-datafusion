@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "source": "../vgi/test/sql/integration",
+  "goal": "Make every applicable VGI SQLLogicTest execute and agree, adapting DuckDB syntax only where DataFusion has an equivalent semantic surface.",
+  "status_definitions": {
+    "complete": "All applicable records in this area pass or have an explicitly reviewed SQL adaptation.",
+    "partial": "Useful functionality passes, but one or more applicable capability slices remain incomplete.",
+    "not_started": "The VGI surface has no DataFusion integration yet.",
+    "blocked": "Coverage requires credentials, services, containers, or another external fixture not present in the normal run.",
+    "out_of_scope": "The assertion is specifically about DuckDB or its extension and has no DataFusion equivalent."
+  },
+  "sql_policy": [
+    "Run standard SQL and SQL accepted by DataFusion unchanged.",
+    "Adapt DuckDB syntax only when DataFusion exposes equivalent semantics; keep the original test path traceable in the report.",
+    "Mark DuckDB extension settings, PRAGMAs, duckdb_* metadata, extension logs, and storage internals out_of_scope rather than treating them as adapter failures.",
+    "Do not adapt away a missing VGI protocol feature or a wrong result.",
+    "Expected-error statements are tracked but excluded from positive execution rates until error-contract comparison is implemented."
+  ],
+  "areas": [
+    {
+      "id": "table_scans",
+      "title": "Table functions and scans",
+      "status": "partial",
+      "groups": ["table"],
+      "remaining": ["ORDER BY and TABLESAMPLE hints", "late materialization", "transaction storage", "some required-filter and rowid forms"]
+    },
+    {
+      "id": "scalar_functions",
+      "title": "Scalar functions and overloads",
+      "status": "partial",
+      "groups": ["scalar", "overload"],
+      "remaining": ["DuckDB ANY/unsigned type spellings", "struct field syntax", "remaining varargs and null-coercion cases"]
+    },
+    {
+      "id": "aggregates",
+      "title": "Aggregates, windows, and accumulation",
+      "status": "partial",
+      "groups": ["aggregate", "accumulate"],
+      "remaining": ["window-frame correctness", "zero-argument aggregate signatures", "remaining ANY/varargs forms"]
+    },
+    {
+      "id": "table_input",
+      "title": "Table-in/out and buffering functions",
+      "status": "partial",
+      "groups": ["table_in_out"],
+      "remaining": ["correlated LATERAL calls", "multi-column table inputs", "buffering/finalize parallel semantics"]
+    },
+    {
+      "id": "filter_pushdown",
+      "title": "Static and dynamic filter pushdown",
+      "status": "partial",
+      "groups": ["filter_pushdown"],
+      "remaining": ["wide and engine-specific scalar types", "large hash lookup and multi-column dynamic join filters"]
+    },
+    {
+      "id": "splits",
+      "title": "Split planning and redemption",
+      "status": "partial",
+      "groups": ["splits"],
+      "remaining": ["transaction-scoped cases", "long-lived cancellation and expiry hardening", "DuckDB-only diagnostics adaptations"]
+    },
+    {
+      "id": "result_cache",
+      "title": "VGI result cache",
+      "status": "partial",
+      "groups": ["cache"],
+      "remaining": ["exchange/per-value caching", "disk persistence and spilling", "compression", "single-flight", "DataFusion-native EXPLAIN and metrics"]
+    },
+    {
+      "id": "catalog_metadata",
+      "title": "Catalogs, views, macros, and global functions",
+      "status": "partial",
+      "groups": ["catalog", "view", "macro", "global_functions", "schema_reconcile.test"],
+      "remaining": ["macro publication", "multi-branch catalogs", "broader view translation", "DuckDB metadata-function adaptations"]
+    },
+    {
+      "id": "attach_settings",
+      "title": "Attach, versions, settings, and validation",
+      "status": "partial",
+      "groups": ["attach", "settings", "connection_string.test", "bad_enum.test"],
+      "remaining": ["remaining settings application", "DDL metadata equivalence", "HTTP fixture variants"]
+    },
+    {
+      "id": "authentication_secrets",
+      "title": "Authentication and secrets",
+      "status": "partial",
+      "groups": ["bearer_auth", "secret"],
+      "remaining": ["corpus secret resolver fixtures", "multi-scope secret policy", "OAuth identity fixture coverage"]
+    },
+    {
+      "id": "copy",
+      "title": "COPY FROM and COPY TO functions",
+      "status": "partial",
+      "groups": ["copy_from", "copy_to"],
+      "remaining": ["DataFusion COPY syntax adaptation", "secret-backed files", "parallel and ordered output semantics"]
+    },
+    {
+      "id": "writes",
+      "title": "Writable tables and mutations",
+      "status": "not_started",
+      "groups": ["simple_writable"],
+      "remaining": ["INSERT", "UPDATE", "DELETE", "RETURNING", "transaction and cache invalidation semantics"]
+    },
+    {
+      "id": "transport_external",
+      "title": "Transport, launcher, protocol, and external fixtures",
+      "status": "blocked",
+      "groups": ["http", "launcher", "protocol_version", "container", "github"],
+      "remaining": ["provide container/GitHub fixtures", "adapt transport-specific extension diagnostics", "run the same corpus over Unix and HTTP"]
+    },
+    {
+      "id": "regression_contracts",
+      "title": "Focused adapter regression contracts",
+      "status": "complete",
+      "groups": ["projection_pushdown_repro.test", "narrow_bind_mismatch.test", "unary_error_propagation.test"],
+      "remaining": []
+    }
+  ]
+}

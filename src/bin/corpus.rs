@@ -138,6 +138,35 @@ struct Tally {
     /// A count alone cannot distinguish "renders 42 as 42.0" from "returns the
     /// wrong answer", and only one of those is a bug.
     mismatches: Vec<Mismatch>,
+    /// Machine-readable outcomes by corpus-relative file.
+    files: BTreeMap<String, FileTally>,
+    /// Expected-error statements are syntax/error-contract tests, not positive
+    /// capability evidence, so they are recorded but excluded from rates.
+    expected_errors_ignored: usize,
+}
+
+#[derive(Default)]
+struct FileTally {
+    skipped: bool,
+    records: usize,
+    expected_errors_ignored: usize,
+    executed: usize,
+    failed: usize,
+    not_applicable: usize,
+    timed_out: usize,
+    values_matched: usize,
+    values_rendering: usize,
+    values_unordered_subset: usize,
+    values_differed: usize,
+    buckets: BTreeMap<Bucket, usize>,
+}
+
+#[derive(Clone)]
+struct Area {
+    id: String,
+    title: String,
+    status: String,
+    groups: Vec<String>,
 }
 
 /// Do two result sets agree once DuckDB's *rendering* conventions are allowed
@@ -354,22 +383,32 @@ fn render(batches: &[datafusion::arrow::array::RecordBatch]) -> Vec<String> {
 }
 
 async fn run_file(path: &Path, tally: &mut Tally) {
+    let file_label = corpus_relative(path);
+    let group = corpus_group(&file_label).to_string();
     let Some(records) = parse(path) else {
         tally.files_skipped += 1;
+        tally.files.insert(
+            file_label,
+            FileTally {
+                skipped: true,
+                ..Default::default()
+            },
+        );
         return;
     };
     if records.is_empty() {
         tally.files_skipped += 1;
+        tally.files.insert(
+            file_label,
+            FileTally {
+                skipped: true,
+                ..Default::default()
+            },
+        );
         return;
     }
     tally.files_run += 1;
-    let file_label = path
-        .to_string_lossy()
-        .rsplit("integration/")
-        .next()
-        .unwrap_or("")
-        .to_string();
-    let group = file_label.split('/').next().unwrap_or("?").to_string();
+    let mut file = FileTally::default();
 
     // Match datafusion-cli: SHOW and standards-based metadata are part of the
     // user-facing SQL surface, and the CLI enables information_schema by
@@ -377,6 +416,7 @@ async fn run_file(path: &Path, tally: &mut Tally) {
     // adapter failure.
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
     for record in records {
+        file.records += 1;
         let (sql, expected) = match &record {
             Record::Statement { sql, .. } => (expand(sql), None),
             Record::Query { sql, expected } => (expand(sql), Some(expected)),
@@ -391,6 +431,8 @@ async fn run_file(path: &Path, tally: &mut Tally) {
                 ..
             }
         ) {
+            tally.expected_errors_ignored += 1;
+            file.expected_errors_ignored += 1;
             continue;
         }
 
@@ -407,6 +449,7 @@ async fn run_file(path: &Path, tally: &mut Tally) {
         let outcome = match outcome {
             Err(_) => {
                 tally.timed_out += 1;
+                file.timed_out += 1;
                 continue;
             }
             Ok(o) => o,
@@ -416,13 +459,17 @@ async fn run_file(path: &Path, tally: &mut Tally) {
             Err(e) if not_applicable(&sql) => {
                 let _ = e;
                 tally.not_applicable += 1;
+                file.not_applicable += 1;
             }
             Err(e) => {
                 tally.groups.entry(group.clone()).or_default().1 += 1;
-                record_failure(tally, &sql, &e.to_string())
+                file.failed += 1;
+                let bucket = record_failure(tally, &sql, &e.to_string());
+                *file.buckets.entry(bucket).or_default() += 1;
             }
             Ok(batches) => {
                 tally.executed += 1;
+                file.executed += 1;
                 tally.groups.entry(group.clone()).or_default().0 += 1;
                 if let Some(expected) = expected {
                     if !expected.is_empty() {
@@ -432,6 +479,7 @@ async fn run_file(path: &Path, tally: &mut Tally) {
                         // No comparison can tell that apart from a defect.
                         if is_arbitrary_subset(&sql) {
                             tally.values_unordered_subset += 1;
+                            file.values_unordered_subset += 1;
                             continue;
                         }
                         let mut got = render(&batches);
@@ -445,10 +493,13 @@ async fn run_file(path: &Path, tally: &mut Tally) {
                         let expected = &expected;
                         if got == *expected {
                             tally.values_matched += 1;
+                            file.values_matched += 1;
                         } else if agrees_modulo_rendering(expected, &got) {
                             tally.values_rendering += 1;
+                            file.values_rendering += 1;
                         } else {
                             tally.values_differed += 1;
+                            file.values_differed += 1;
                             tally.mismatches.push(Mismatch {
                                 file: file_label.clone(),
                                 sql: first_line(&sql),
@@ -461,9 +512,10 @@ async fn run_file(path: &Path, tally: &mut Tally) {
             }
         }
     }
+    tally.files.insert(file_label, file);
 }
 
-fn record_failure(tally: &mut Tally, sql: &str, err: &str) {
+fn record_failure(tally: &mut Tally, sql: &str, err: &str) -> Bucket {
     tally.failed += 1;
     *tally.error_shapes.entry(error_shape(err)).or_default() += 1;
     let bucket = Bucket::classify(err);
@@ -472,6 +524,19 @@ fn record_failure(tally: &mut Tally, sql: &str, err: &str) {
         .examples
         .entry(bucket)
         .or_insert_with(|| (first_line(sql), first_line(err)));
+    bucket
+}
+
+fn corpus_relative(path: &Path) -> String {
+    path.to_string_lossy()
+        .rsplit("integration/")
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn corpus_group(file: &str) -> &str {
+    file.split('/').next().unwrap_or("?")
 }
 
 /// Is this record about engine configuration rather than the worker protocol?
@@ -548,15 +613,319 @@ fn collect_tests(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn load_manifest(path: &Path) -> Result<Vec<Area>, String> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        format!(
+            "could not read compatibility manifest {}: {e}",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid compatibility manifest {}: {e}", path.display()))?;
+    let definitions = value
+        .get("areas")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "compatibility manifest must contain an `areas` array".to_string())?;
+    definitions
+        .iter()
+        .map(|area| {
+            let string = |key: &str| {
+                area.get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("compatibility area is missing string `{key}`"))
+            };
+            let groups = area
+                .get("groups")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "compatibility area is missing array `groups`".to_string())?
+                .iter()
+                .map(|group| {
+                    group
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "compatibility group must be a string".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Area {
+                id: string("id")?,
+                title: string("title")?,
+                status: string("status")?,
+                groups,
+            })
+        })
+        .collect()
+}
+
+fn area_map(areas: &[Area]) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    for area in areas {
+        for group in &area.groups {
+            if let Some(previous) = out.insert(group.clone(), area.id.clone()) {
+                return Err(format!(
+                    "corpus group `{group}` is assigned to both `{previous}` and `{}`",
+                    area.id
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn validate_manifest_coverage(
+    files: &[PathBuf],
+    groups: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut missing = Vec::new();
+    for file in files {
+        let relative = corpus_relative(file);
+        let group = corpus_group(&relative);
+        if !groups.contains_key(group) && !missing.iter().any(|item| item == group) {
+            missing.push(group.to_string());
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "compatibility manifest does not assign corpus group(s): {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+fn write_json_report(
+    path: &Path,
+    roots: &[PathBuf],
+    source_files: usize,
+    tally: &Tally,
+    areas: &[Area],
+    group_areas: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    use serde_json::json;
+
+    let files = tally
+        .files
+        .iter()
+        .map(|(name, file)| {
+            let buckets = file
+                .buckets
+                .iter()
+                .map(|(bucket, count)| (bucket.label().to_string(), json!(count)))
+                .collect::<serde_json::Map<_, _>>();
+            json!({
+                "path": name,
+                "area": group_areas.get(corpus_group(name)),
+                "skipped": file.skipped,
+                "records": file.records,
+                "expected_errors_ignored": file.expected_errors_ignored,
+                "executed": file.executed,
+                "failed": file.failed,
+                "not_applicable": file.not_applicable,
+                "timed_out": file.timed_out,
+                "values": {
+                    "exact": file.values_matched,
+                    "rendering_equivalent": file.values_rendering,
+                    "different": file.values_differed,
+                    "unordered_subset": file.values_unordered_subset,
+                },
+                "failure_buckets": buckets,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let groups = tally
+        .groups
+        .iter()
+        .map(|(group, (executed, failed))| {
+            json!({
+                "group": group,
+                "area": group_areas.get(group),
+                "executed": executed,
+                "failed": failed,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let area_summaries = areas
+        .iter()
+        .map(|area| {
+            let mut file_count = 0usize;
+            let mut files_skipped = 0usize;
+            let mut executed = 0usize;
+            let mut failed = 0usize;
+            let mut not_applicable = 0usize;
+            let mut timed_out = 0usize;
+            for (name, file) in &tally.files {
+                if group_areas.get(corpus_group(name)) == Some(&area.id) {
+                    file_count += 1;
+                    files_skipped += usize::from(file.skipped);
+                    executed += file.executed;
+                    failed += file.failed;
+                    not_applicable += file.not_applicable;
+                    timed_out += file.timed_out;
+                }
+            }
+            json!({
+                "id": area.id,
+                "title": area.title,
+                "declared_status": area.status,
+                "groups": area.groups,
+                "files": file_count,
+                "files_skipped": files_skipped,
+                "executed": executed,
+                "failed": failed,
+                "not_applicable": not_applicable,
+                "timed_out": timed_out,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let failure_buckets = tally
+        .buckets
+        .iter()
+        .map(|(bucket, count)| (bucket.label().to_string(), json!(count)))
+        .collect::<serde_json::Map<_, _>>();
+    let measured = tally.executed + tally.failed + tally.timed_out;
+    let report = json!({
+        "schema_version": 1,
+        "source_roots": roots.iter().map(|root| root.display().to_string()).collect::<Vec<_>>(),
+        "source_files": source_files,
+        "totals": {
+            "files_run": tally.files_run,
+            "files_skipped": tally.files_skipped,
+            "measured_records": measured,
+            "executed": tally.executed,
+            "failed": tally.failed,
+            "not_applicable": tally.not_applicable,
+            "timed_out": tally.timed_out,
+            "expected_errors_ignored": tally.expected_errors_ignored,
+            "values": {
+                "exact": tally.values_matched,
+                "rendering_equivalent": tally.values_rendering,
+                "different": tally.values_differed,
+                "unordered_subset": tally.values_unordered_subset,
+            },
+        },
+        "failure_buckets": failure_buckets,
+        "areas": area_summaries,
+        "groups": groups,
+        "files": files,
+    });
+    let bytes = serde_json::to_vec_pretty(&report)
+        .map_err(|e| format!("could not serialize corpus report: {e}"))?;
+    std::fs::write(path, bytes)
+        .map_err(|e| format!("could not write corpus report {}: {e}", path.display()))
+}
+
+fn compare_reports(baseline_path: &Path, current_path: &Path) -> Result<Vec<String>, String> {
+    let read = |path: &Path| -> Result<serde_json::Value, String> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("could not read corpus report {}: {e}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| format!("invalid corpus report {}: {e}", path.display()))
+    };
+    let baseline = read(baseline_path)?;
+    let current = read(current_path)?;
+    let index = |report: &serde_json::Value| {
+        report
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|file| Some((file.get("path")?.as_str()?.to_string(), file.clone())))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let baseline_files = index(&baseline);
+    let current_files = index(&current);
+    let number = |file: &serde_json::Value, pointer: &str| {
+        file.pointer(pointer)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let mut regressions = Vec::new();
+    for (path, before) in baseline_files {
+        let Some(after) = current_files.get(&path) else {
+            regressions.push(format!("{path}: missing from current report"));
+            continue;
+        };
+        for (pointer, label, higher_is_bad) in [
+            ("/executed", "executed records", false),
+            ("/failed", "failed records", true),
+            ("/timed_out", "timeouts", true),
+            ("/values/different", "value mismatches", true),
+        ] {
+            let old = number(&before, pointer);
+            let new = number(after, pointer);
+            if (higher_is_bad && new > old) || (!higher_is_bad && new < old) {
+                regressions.push(format!("{path}: {label} changed from {old} to {new}"));
+            }
+        }
+        let old_agree =
+            number(&before, "/values/exact") + number(&before, "/values/rendering_equivalent");
+        let new_agree =
+            number(after, "/values/exact") + number(after, "/values/rendering_equivalent");
+        if new_agree < old_agree {
+            regressions.push(format!(
+                "{path}: agreeing value checks changed from {old_agree} to {new_agree}"
+            ));
+        }
+    }
+    Ok(regressions)
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let roots: Vec<PathBuf> = if args.is_empty() {
+    let mut roots = Vec::new();
+    let mut json_path = std::env::var_os("CORPUS_JSON").map(PathBuf::from);
+    let mut compare_path: Option<PathBuf> = None;
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("corpus")
+        .join("compatibility.json");
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--json" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--json requires a path");
+                    std::process::exit(2);
+                };
+                json_path = Some(PathBuf::from(path));
+            }
+            "--manifest" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--manifest requires a path");
+                    std::process::exit(2);
+                };
+                manifest_path = PathBuf::from(path);
+            }
+            "--compare" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--compare requires a baseline report path");
+                    std::process::exit(2);
+                };
+                compare_path = Some(PathBuf::from(path));
+            }
+            "--help" | "-h" => {
+                println!(
+                    "Usage: corpus [--json REPORT.json] [--compare BASELINE.json] \
+                     [--manifest compatibility.json] [PATH ...]"
+                );
+                return;
+            }
+            _ if arg.starts_with('-') => {
+                eprintln!("unknown option: {arg}");
+                std::process::exit(2);
+            }
+            _ => roots.push(PathBuf::from(arg)),
+        }
+    }
+    let roots: Vec<PathBuf> = if roots.is_empty() {
         vec![PathBuf::from(
             std::env::var("HOME").unwrap_or_default() + "/Development/vgi/test/sql/integration",
         )]
     } else {
-        args.iter().map(PathBuf::from).collect()
+        roots
     };
 
     let mut files = Vec::new();
@@ -567,6 +936,23 @@ async fn main() {
             files.push(root.clone());
         }
     }
+
+    let areas = match load_manifest(&manifest_path) {
+        Ok(areas) => areas,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    let group_areas = match area_map(&areas)
+        .and_then(|groups| validate_manifest_coverage(&files, &groups).map(|_| groups))
+    {
+        Ok(groups) => groups,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
 
     if std::env::var("VGI_TEST_WORKER").is_err() {
         eprintln!("VGI_TEST_WORKER is not set — every file will skip.");
@@ -675,5 +1061,71 @@ async fn main() {
             println!("          e.g. {sql}");
             println!("            -> {err}");
         }
+    }
+
+    println!("\nby compatibility area:");
+    for area in &areas {
+        let (mut executed, mut failed) = (0usize, 0usize);
+        for group in &area.groups {
+            if let Some((ok, bad)) = tally.groups.get(group) {
+                executed += ok;
+                failed += bad;
+            }
+        }
+        let total = executed + failed;
+        println!(
+            "  {:>5}/{:<5} {:>5.1}%  {:<14} {}",
+            executed,
+            total,
+            pct(executed, total),
+            area.status,
+            area.title,
+        );
+    }
+
+    if let Some(path) = json_path {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "could not create report directory {}: {error}",
+                    parent.display()
+                );
+                std::process::exit(2);
+            }
+        }
+        if let Err(error) =
+            write_json_report(&path, &roots, files.len(), &tally, &areas, &group_areas)
+        {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        println!("\nJSON report: {}", path.display());
+        if let Some(baseline) = compare_path {
+            match compare_reports(&baseline, &path) {
+                Ok(regressions) if regressions.is_empty() => {
+                    println!("baseline comparison: no regressions");
+                }
+                Ok(regressions) => {
+                    eprintln!(
+                        "baseline comparison found {} regression(s):",
+                        regressions.len()
+                    );
+                    for regression in regressions {
+                        eprintln!("  {regression}");
+                    }
+                    std::process::exit(1);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    } else if compare_path.is_some() {
+        eprintln!("--compare requires --json so there is a current report to compare");
+        std::process::exit(2);
     }
 }
