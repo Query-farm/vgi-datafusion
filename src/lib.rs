@@ -47,17 +47,21 @@ use async_trait::async_trait;
 use datafusion::arrow::array::{Array, BooleanArray, Int64Array, StringArray, UnionArray};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::pruning::PrunableStatistics;
 use datafusion::common::stats::Precision;
 use datafusion::common::{
-    ColumnStatistics, Constraint, Constraints, DataFusionError, Result as DFResult, ScalarValue,
-    Statistics,
+    ColumnStatistics, Constraint, Constraints, DFSchema, DataFusionError, Result as DFResult,
+    ScalarValue, Statistics,
 };
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_expr::{
     expressions::{Column, DynamicFilterPhysicalExpr},
     EquivalenceProperties, PhysicalExpr, PhysicalSortExpr,
 };
+use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
+use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::filter_pushdown::{
     ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
 };
@@ -699,6 +703,10 @@ pub struct VgiTableProvider {
     /// Worker-supplied argument bytes, for a catalog table. Takes precedence
     /// over `arguments` and is forwarded verbatim.
     raw_arguments: Option<vgi_client::Bytes>,
+    /// The original bind is retained because function-level statistics are a
+    /// per-bind RPC and depend on its exact arguments and opaque response.
+    statistics_bind: vgi_client::BoundFunction,
+    function_statistics: tokio::sync::OnceCell<Option<Arc<Statistics>>>,
     output_schema: SchemaRef,
     /// The worker opted into receiving projection IDs. Functions that do not
     /// opt in return their full schema and are narrowed locally instead.
@@ -827,7 +835,7 @@ impl VgiTableProvider {
         let primary_keys = info.primary_key_constraints.clone();
         let unique_keys = info.unique_constraints.clone();
 
-        let (function, function_schema, arguments, output_schema, capabilities, catalog_version) =
+        let (function, function_schema, arguments, statistics_bind, capabilities, catalog_version) =
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat2)?;
@@ -871,7 +879,7 @@ impl VgiTableProvider {
                                 scan.function_name,
                                 schema.clone(),
                                 arguments,
-                                bound.output_schema().clone(),
+                                bound,
                                 capabilities,
                                 attached.info().catalog_version,
                             ));
@@ -883,6 +891,7 @@ impl VgiTableProvider {
             })
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))??;
+        let output_schema = statistics_bind.output_schema().clone();
         let constraints = Some(datafusion_constraints(
             primary_keys,
             unique_keys,
@@ -898,6 +907,8 @@ impl VgiTableProvider {
             function,
             arguments,
             raw_arguments: None,
+            statistics_bind,
+            function_statistics: tokio::sync::OnceCell::new(),
             output_schema,
             projection_pushdown: capabilities.projection_pushdown,
             supports_splits: capabilities.supports_splits,
@@ -945,6 +956,8 @@ impl VgiTableProvider {
             function: function.to_string(),
             arguments,
             raw_arguments: None,
+            statistics_bind: bound,
+            function_statistics: tokio::sync::OnceCell::new(),
             output_schema,
             projection_pushdown: capabilities.projection_pushdown,
             supports_splits: capabilities.supports_splits,
@@ -972,13 +985,12 @@ impl VgiTableProvider {
         let (cat2, sch2, fn2) = (catalog.clone(), schema_name.clone(), function.clone());
         let args2 = arguments.clone();
 
-        let (output_schema, capabilities, max_workers, catalog_version) =
+        let (statistics_bind, capabilities, max_workers, catalog_version) =
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat2)?;
                 let spec = BindSpec::table(&fn2).in_schema(&sch2).with_arguments(args2);
                 let bound = bind_with_secrets(&c, &mut client, &attached, &spec)?;
-                let schema = bound.output_schema().clone();
                 let capabilities = function_capabilities(&mut client, &attached, &sch2, &fn2)?;
                 // One partition at BIND time, deliberately. The real count is
                 // decided at `scan`, where splits are planned.
@@ -995,7 +1007,7 @@ impl VgiTableProvider {
                 // execution needs its id shared across partitions, and that
                 // rendezvous is exactly what splits remove.
                 Ok::<_, DataFusionError>((
-                    schema,
+                    bound,
                     capabilities,
                     1usize,
                     attached.info().catalog_version,
@@ -1003,6 +1015,7 @@ impl VgiTableProvider {
             })
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))??;
+        let output_schema = statistics_bind.output_schema().clone();
 
         Ok(Arc::new(Self {
             conn,
@@ -1011,6 +1024,8 @@ impl VgiTableProvider {
             function,
             arguments,
             raw_arguments: None,
+            statistics_bind,
+            function_statistics: tokio::sync::OnceCell::new(),
             output_schema,
             projection_pushdown: capabilities.projection_pushdown,
             supports_splits: capabilities.supports_splits,
@@ -1021,6 +1036,52 @@ impl VgiTableProvider {
             column_mapping: None,
             max_workers,
         }))
+    }
+
+    async fn bound_function_statistics(&self) -> Option<Arc<Statistics>> {
+        self.function_statistics
+            .get_or_init(|| async {
+                let connection = self.conn.clone();
+                let catalog = self.catalog.clone();
+                let bound = self.statistics_bind.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let mut client = connection.connect()?;
+                    let _attached = connection.attach(&mut client, &catalog)?;
+                    client.table_function_statistics(&bound).map_err(to_df)
+                })
+                .await;
+                let raw = match result {
+                    Ok(Ok(raw)) => raw,
+                    Ok(Err(error)) => {
+                        let mut event = VgiEvent::new("table_function.statistics_error");
+                        event.catalog = Some(self.catalog.clone());
+                        event.function = Some(format!("{}.{}", self.schema_name, self.function));
+                        event.message = Some(error.to_string());
+                        self.conn.runtime.emit(event);
+                        return None;
+                    }
+                    Err(error) => {
+                        let mut event = VgiEvent::new("table_function.statistics_error");
+                        event.catalog = Some(self.catalog.clone());
+                        event.function = Some(format!("{}.{}", self.schema_name, self.function));
+                        event.message = Some(error.to_string());
+                        self.conn.runtime.emit(event);
+                        return None;
+                    }
+                };
+                if raw.num_columns() == 0 {
+                    return None;
+                }
+                Some(Arc::new(statistics_for_catalog_table(
+                    &self.output_schema,
+                    &raw,
+                    None,
+                    None,
+                    self.column_mapping.as_deref(),
+                )))
+            })
+            .await
+            .clone()
     }
 }
 
@@ -1470,6 +1531,13 @@ impl TableProvider for VgiTableProvider {
             None => self.output_schema.clone(),
             Some(p) => Arc::new(self.output_schema.project(p)?),
         };
+        if !filters.is_empty() {
+            if let Some(statistics) = self.bound_function_statistics().await {
+                if filters_prune_statistics(state, &self.output_schema, statistics, filters) {
+                    return Ok(Arc::new(EmptyExec::new(projected)));
+                }
+            }
+        }
         let projection_ids: Option<Vec<i64>> =
             projection.map(|p| p.iter().map(|i| *i as i64).collect());
         let pushed_projection = if self.projection_pushdown {
@@ -2098,6 +2166,7 @@ pub(crate) fn statistics_for_catalog_table(
     batch: &datafusion::arrow::record_batch::RecordBatch,
     estimate: Option<i64>,
     maximum: Option<i64>,
+    column_mapping: Option<&HashMap<String, String>>,
 ) -> Statistics {
     let num_rows = match (
         estimate.and_then(|value| usize::try_from(value).ok()),
@@ -2117,7 +2186,14 @@ pub(crate) fn statistics_for_catalog_table(
             if names.is_null(row) {
                 continue;
             }
-            let name = names.value(row);
+            let worker_name = names.value(row);
+            let name = column_mapping
+                .and_then(|mapping| {
+                    mapping.iter().find_map(|(catalog, worker)| {
+                        (worker == worker_name).then_some(catalog.as_str())
+                    })
+                })
+                .unwrap_or(worker_name);
             let Ok(field) = schema.field_with_name(name) else {
                 continue;
             };
@@ -2162,6 +2238,34 @@ pub(crate) fn statistics_for_catalog_table(
         })
         .collect();
     statistics
+}
+
+pub(crate) fn filters_prune_statistics(
+    state: &dyn Session,
+    schema: &SchemaRef,
+    statistics: Arc<Statistics>,
+    filters: &[Expr],
+) -> bool {
+    let Some(filter) = conjunction(filters.iter().cloned()) else {
+        return false;
+    };
+    let Ok(df_schema) = DFSchema::try_from(schema.as_ref().clone()) else {
+        return false;
+    };
+    let Ok(predicate) = state.create_physical_expr(filter, &df_schema) else {
+        return false;
+    };
+    let Some(predicate) = PruningPredicateBuilder::new()
+        .with_file_schema(Arc::clone(schema))
+        .build(predicate)
+    else {
+        return false;
+    };
+    let statistics = PrunableStatistics::new(vec![statistics], Arc::clone(schema));
+    predicate
+        .prune(&statistics)
+        .ok()
+        .is_some_and(|keep| keep == [false])
 }
 
 fn statistics_for_splits(

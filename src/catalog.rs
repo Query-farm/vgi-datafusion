@@ -33,11 +33,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider, Session, TableProvider};
-use datafusion::common::pruning::PrunableStatistics;
-use datafusion::common::{Constraints, DFSchema, DataFusionError, Result as DFResult, Statistics};
-use datafusion::logical_expr::utils::conjunction;
+use datafusion::common::{Constraints, DataFusionError, Result as DFResult, Statistics};
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType, Volatility};
-use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::ExecutionPlan;
 
@@ -156,6 +153,7 @@ impl VgiCatalogTableProvider {
                     &raw,
                     self.info.cardinality_estimate.0,
                     self.info.cardinality_max.0,
+                    None,
                 ))))
             })
             .await
@@ -163,29 +161,15 @@ impl VgiCatalogTableProvider {
     }
 
     async fn filters_prune_table(&self, state: &dyn Session, filters: &[Expr]) -> DFResult<bool> {
-        let Some(filter) = conjunction(filters.iter().cloned()) else {
-            return Ok(false);
-        };
         let Some(statistics) = self.column_statistics().await? else {
             return Ok(false);
         };
-        let Ok(df_schema) = DFSchema::try_from(self.output_schema.as_ref().clone()) else {
-            return Ok(false);
-        };
-        let Ok(predicate) = state.create_physical_expr(filter, &df_schema) else {
-            return Ok(false);
-        };
-        let Some(predicate) = PruningPredicateBuilder::new()
-            .with_file_schema(Arc::clone(&self.output_schema))
-            .build(predicate)
-        else {
-            return Ok(false);
-        };
-        let statistics = PrunableStatistics::new(vec![statistics], Arc::clone(&self.output_schema));
-        Ok(predicate
-            .prune(&statistics)
-            .ok()
-            .is_some_and(|keep| keep == [false]))
+        Ok(crate::filters_prune_statistics(
+            state,
+            &self.output_schema,
+            statistics,
+            filters,
+        ))
     }
 }
 

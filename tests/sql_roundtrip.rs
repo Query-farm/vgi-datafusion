@@ -169,6 +169,16 @@ async fn worker_function_metadata_is_queryable_and_detaches() -> datafusion::err
         "unexpected plan: {explain}"
     );
 
+    let explain = vgi_datafusion::sql(
+        &ctx,
+        "EXPLAIN SELECT * FROM ex.main.sequence(10) WHERE n = 10",
+    )
+    .await?
+    .collect()
+    .await?;
+    let explain = datafusion::arrow::util::pretty::pretty_format_batches(&explain)?.to_string();
+    assert!(explain.contains("EmptyExec"), "unexpected plan: {explain}");
+
     let batches = vgi_datafusion::sql(
         &ctx,
         "SELECT count(*), min(value), max(value) FROM ex.data.numbers",
