@@ -2067,6 +2067,83 @@ fn statistics_for_split(schema: &SchemaRef, split: &ScanSplitInfo) -> Statistics
     statistics
 }
 
+/// Convert catalog-level VGI column statistics into DataFusion statistics.
+///
+/// These bounds are the worker's declared optimizer contract (the same values
+/// DuckDB installs on its catalog table), so min/max are exact and may safely
+/// drive DataFusion's existing pruning predicate. Cardinality remains inexact
+/// unless the worker's estimate and maximum agree.
+pub(crate) fn statistics_for_catalog_table(
+    schema: &SchemaRef,
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    estimate: Option<i64>,
+    maximum: Option<i64>,
+) -> Statistics {
+    let num_rows = match (
+        estimate.and_then(|value| usize::try_from(value).ok()),
+        maximum.and_then(|value| usize::try_from(value).ok()),
+    ) {
+        (Some(estimate), Some(maximum)) if estimate == maximum => Precision::Exact(estimate),
+        (Some(estimate), _) => Precision::Inexact(estimate),
+        _ => Precision::Absent,
+    };
+    let mut statistics = statistics_with_estimates(schema, num_rows, Precision::Absent);
+    let mut columns = HashMap::new();
+    if let Some(names) = batch
+        .column_by_name("column_name")
+        .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+    {
+        for row in 0..batch.num_rows() {
+            if names.is_null(row) {
+                continue;
+            }
+            let name = names.value(row);
+            let Ok(field) = schema.field_with_name(name) else {
+                continue;
+            };
+            let null_count = match (
+                bool_at(batch, "has_null", row),
+                bool_at(batch, "has_not_null", row),
+            ) {
+                (Some(false), _) => Precision::Exact(0),
+                (_, Some(false)) => statistics.num_rows,
+                _ => Precision::Absent,
+            };
+            let distinct_count = i64_at(batch, "distinct_count", row)
+                .and_then(|value| usize::try_from(value).ok())
+                .map(Precision::Inexact)
+                .unwrap_or(Precision::Absent);
+            let mut min = statistic_value(batch, "min", row, field.data_type());
+            let mut max = statistic_value(batch, "max", row, field.data_type());
+            // A dictionary/ENUM can be exposed as Utf8 while retaining ordinal
+            // bounds. Those are not lexicographic bounds, so they are unsafe for
+            // DataFusion string pruning and must be ignored.
+            if matches!((&min, &max), (Some(min), Some(max)) if min > max) {
+                min = None;
+                max = None;
+            }
+            columns.insert(
+                name.to_string(),
+                ColumnStatistics::new_unknown()
+                    .with_null_count(null_count)
+                    .with_distinct_count(distinct_count)
+                    .with_min_value(min.map(Precision::Exact).unwrap_or(Precision::Absent))
+                    .with_max_value(max.map(Precision::Exact).unwrap_or(Precision::Absent)),
+            );
+        }
+    }
+    statistics.column_statistics = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            columns
+                .remove(field.name())
+                .unwrap_or_else(ColumnStatistics::new_unknown)
+        })
+        .collect();
+    statistics
+}
+
 fn statistics_for_splits(
     schema: &SchemaRef,
     plan: &ScanPlan,

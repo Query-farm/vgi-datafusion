@@ -146,6 +146,29 @@ async fn worker_function_metadata_is_queryable_and_detaches() -> datafusion::err
         );
     }
 
+    let explain = vgi_datafusion::sql(
+        &ctx,
+        "EXPLAIN SELECT * FROM ex.data.departments WHERE id > 100",
+    )
+    .await?
+    .collect()
+    .await?;
+    let explain = datafusion::arrow::util::pretty::pretty_format_batches(&explain)?.to_string();
+    assert!(explain.contains("EmptyExec"), "unexpected plan: {explain}");
+
+    let explain = vgi_datafusion::sql(
+        &ctx,
+        "EXPLAIN SELECT * FROM ex.data.departments WHERE id >= 1",
+    )
+    .await?
+    .collect()
+    .await?;
+    let explain = datafusion::arrow::util::pretty::pretty_format_batches(&explain)?.to_string();
+    assert!(
+        explain.contains("VgiScanExec"),
+        "unexpected plan: {explain}"
+    );
+
     let batches = vgi_datafusion::sql(
         &ctx,
         "SELECT count(*) FROM vgi_table_statistics('ex', 'data', 'versioned_data')",

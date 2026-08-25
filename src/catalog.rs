@@ -33,8 +33,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider, Session, TableProvider};
-use datafusion::common::{Constraints, DataFusionError, Result as DFResult};
+use datafusion::common::pruning::PrunableStatistics;
+use datafusion::common::{Constraints, DFSchema, DataFusionError, Result as DFResult, Statistics};
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType, Volatility};
+use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::ExecutionPlan;
 
 use crate::{datafusion_constraints, to_df, VgiConnection, VgiTableProvider};
@@ -58,6 +62,7 @@ struct VgiCatalogTableProvider {
     output_schema: datafusion::arrow::datatypes::SchemaRef,
     constraints: Constraints,
     bound: tokio::sync::OnceCell<Arc<VgiTableProvider>>,
+    statistics: tokio::sync::OnceCell<Option<Arc<Statistics>>>,
 }
 
 impl VgiCatalogTableProvider {
@@ -83,6 +88,7 @@ impl VgiCatalogTableProvider {
             output_schema,
             constraints,
             bound: tokio::sync::OnceCell::new(),
+            statistics: tokio::sync::OnceCell::new(),
         }))
     }
 
@@ -116,6 +122,69 @@ impl VgiCatalogTableProvider {
             .await?;
         Ok(provider)
     }
+
+    async fn column_statistics(&self) -> DFResult<Option<Arc<Statistics>>> {
+        self.statistics
+            .get_or_try_init(|| async {
+                if !self.info.supports_column_statistics || self.at.is_some() {
+                    return Ok(None);
+                }
+                let raw = if let Some(inline) = self
+                    .info
+                    .column_statistics
+                    .as_ref()
+                    .filter(|value| !value.0.is_empty())
+                {
+                    vgi_protocol::ipc::read_batch(&inline.0).map_err(to_df)?
+                } else {
+                    let connection = self.conn.clone();
+                    let catalog = self.catalog.clone();
+                    let schema = self.info.schema_name.clone();
+                    let table = self.info.name.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let mut client = connection.connect()?;
+                        let attached = connection.attach(&mut client, &catalog)?;
+                        client
+                            .table_column_statistics(&attached, &schema, &table)
+                            .map_err(to_df)
+                    })
+                    .await
+                    .map_err(|error| DataFusionError::External(Box::new(error)))??
+                };
+                Ok(Some(Arc::new(crate::statistics_for_catalog_table(
+                    &self.output_schema,
+                    &raw,
+                    self.info.cardinality_estimate.0,
+                    self.info.cardinality_max.0,
+                ))))
+            })
+            .await
+            .cloned()
+    }
+
+    async fn filters_prune_table(&self, state: &dyn Session, filters: &[Expr]) -> DFResult<bool> {
+        let Some(filter) = conjunction(filters.iter().cloned()) else {
+            return Ok(false);
+        };
+        let Some(statistics) = self.column_statistics().await? else {
+            return Ok(false);
+        };
+        let Ok(df_schema) = DFSchema::try_from(self.output_schema.as_ref().clone()) else {
+            return Ok(false);
+        };
+        let Ok(predicate) = state.create_physical_expr(&filter, &df_schema) else {
+            return Ok(false);
+        };
+        let Ok(predicate) = PruningPredicate::try_new(predicate, Arc::clone(&self.output_schema))
+        else {
+            return Ok(false);
+        };
+        let statistics = PrunableStatistics::new(vec![statistics], Arc::clone(&self.output_schema));
+        Ok(predicate
+            .prune(&statistics)
+            .ok()
+            .is_some_and(|keep| keep == [false]))
+    }
 }
 
 #[async_trait]
@@ -148,6 +217,13 @@ impl TableProvider for VgiCatalogTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        if self.filters_prune_table(state, filters).await? {
+            let schema = match projection {
+                Some(indices) => Arc::new(self.output_schema.project(indices)?),
+                None => Arc::clone(&self.output_schema),
+            };
+            return Ok(Arc::new(EmptyExec::new(schema)));
+        }
         self.bound()
             .await?
             .scan(state, projection, filters, limit)
