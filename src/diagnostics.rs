@@ -806,11 +806,6 @@ fn vgi_function_arguments(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             } else {
                 vgi_protocol::ipc::read_schema(&info.arguments.0).map_err(crate::to_df)?
             };
-            let macro_type = if info.macro_type.0.to_ascii_lowercase().contains("table") {
-                "table_macro"
-            } else {
-                "scalar_macro"
-            };
             append_argument_rows(
                 &mut rows,
                 &alias,
@@ -821,6 +816,11 @@ fn vgi_function_arguments(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             );
         }
         for info in &metadata.macros {
+            let macro_type = if info.macro_type.0.to_ascii_lowercase().contains("table") {
+                "table_macro"
+            } else {
+                "scalar_macro"
+            };
             let schema = match &info.arguments_schema {
                 Some(arguments) if !arguments.0.is_empty() => {
                     vgi_protocol::ipc::read_schema(&arguments.0).map_err(crate::to_df)?
