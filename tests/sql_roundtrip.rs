@@ -85,6 +85,46 @@ macro_rules! skip_without_worker {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn worker_function_metadata_is_queryable_and_detaches() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    let location = worker.to_string_lossy();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={location}' AS ex")).await?;
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT function_name, parameter_types, return_type, description \
+         FROM duckdb_functions() \
+         WHERE database_name = 'ex' AND schema_name = 'main' \
+         AND function_name = 'double'",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+
+    vgi_datafusion::sql(&ctx, "DETACH ex").await?;
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT count(*) FROM duckdb_functions() WHERE database_name = 'ex'",
+    )
+    .await?
+    .collect()
+    .await?;
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn selects_from_a_remote_table_function() -> datafusion::error::Result<()> {
     let worker = skip_without_worker!();
     let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);

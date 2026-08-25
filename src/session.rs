@@ -1235,6 +1235,15 @@ async fn attach_one(
     let options = build_attach_options(ctx, &conn, spec).await?;
     conn = conn.with_catalog_attach_options(&spec.catalog, options);
     let provider = VgiCatalogProvider::discover(conn.clone(), &spec.catalog).await?;
+    conn.runtime().set_catalog_metadata(
+        &spec.alias,
+        crate::runtime::VgiCatalogMetadata {
+            functions: provider.functions().cloned().collect(),
+            macros: provider.metadata_macros().cloned().collect(),
+            global_function_prefix: provider.global_function_prefix().to_string(),
+            global_functions: provider.global_functions().to_vec(),
+        },
+    );
     // Re-attaching an alias refreshes its flat function registrations as well
     // as its catalog provider.
     deregister_alias_functions(ctx, &spec.alias);
@@ -1869,6 +1878,7 @@ fn detach(ctx: &SessionContext, alias: &str) -> DFResult<()> {
         return plan_err!("no catalog attached as {alias:?}");
     }
     deregister_alias_functions(ctx, alias);
+    session_runtime(ctx).remove_catalog_metadata(alias);
     if let Ok(mut sessions) = macro_registry().lock() {
         if let Some(macros) = sessions.get_mut(&ctx.session_id()) {
             let prefix = format!("{}.", alias.to_ascii_lowercase());

@@ -11,6 +11,17 @@ use async_trait::async_trait;
 use datafusion::common::ScalarValue;
 use vgi_client::{CacheLimits, ResultCache};
 
+/// Discovery metadata retained for SQL inspection after a VGI catalog is
+/// attached. Execution registration and diagnostics consume the same worker
+/// declarations, so the metadata view cannot drift from what was published.
+#[derive(Debug, Clone)]
+pub(crate) struct VgiCatalogMetadata {
+    pub functions: Vec<vgi_client::dtos::FunctionInfo>,
+    pub macros: Vec<vgi_client::dtos::MacroInfo>,
+    pub global_function_prefix: String,
+    pub global_functions: Vec<vgi_client::dtos::FunctionInfo>,
+}
+
 /// Configuration for one DataFusion session's VGI runtime.
 #[derive(Debug, Clone)]
 pub struct VgiSessionOptions {
@@ -120,6 +131,7 @@ pub struct VgiRuntime {
     events: Mutex<VecDeque<VgiEvent>>,
     plan_cache: Mutex<HashMap<PlanCacheKey, CachedPlan>>,
     plan_cache_stats: Mutex<PlanCacheStats>,
+    catalog_metadata: Mutex<HashMap<String, VgiCatalogMetadata>>,
     event_sink: Option<Arc<dyn VgiEventSink>>,
     secret_resolver: Option<Arc<dyn VgiSecretResolver>>,
     locality_hook: Option<Arc<dyn VgiLocalityHook>>,
@@ -152,6 +164,7 @@ impl VgiRuntime {
             events: Mutex::new(VecDeque::new()),
             plan_cache: Mutex::new(HashMap::new()),
             plan_cache_stats: Mutex::new(PlanCacheStats::default()),
+            catalog_metadata: Mutex::new(HashMap::new()),
             event_sink: None,
             secret_resolver: None,
             locality_hook: None,
@@ -200,6 +213,29 @@ impl VgiRuntime {
         let count = events.len();
         events.clear();
         count
+    }
+
+    pub(crate) fn set_catalog_metadata(&self, alias: &str, metadata: VgiCatalogMetadata) {
+        self.catalog_metadata
+            .lock()
+            .unwrap()
+            .insert(alias.to_ascii_lowercase(), metadata);
+    }
+
+    pub(crate) fn remove_catalog_metadata(&self, alias: &str) {
+        self.catalog_metadata
+            .lock()
+            .unwrap()
+            .remove(&alias.to_ascii_lowercase());
+    }
+
+    pub(crate) fn catalog_metadata(&self) -> Vec<(String, VgiCatalogMetadata)> {
+        self.catalog_metadata
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(alias, metadata)| (alias.clone(), metadata.clone()))
+            .collect()
     }
 
     pub(crate) fn emit(&self, event: VgiEvent) {

@@ -4,7 +4,10 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray, UInt64Array};
+use datafusion::arrow::array::{
+    new_null_array, ArrayRef, BooleanArray, Int64Array, ListBuilder, StringArray, StringBuilder,
+    UInt64Array,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::{MemTable, TableFunctionArgs, TableFunctionImpl, TableProvider};
@@ -31,6 +34,7 @@ enum DiagnosticsKind {
     DuckDbCacheEntries,
     Logs,
     DuckDbLogs,
+    DuckDbFunctions,
     LogStats,
     CacheFlush,
     CacheReap,
@@ -48,6 +52,7 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::DuckDbCacheEntries => duckdb_cache_entries(&self.runtime)?,
             DiagnosticsKind::Logs => logs(&self.runtime)?,
             DiagnosticsKind::DuckDbLogs => duckdb_logs(&self.runtime)?,
+            DiagnosticsKind::DuckDbFunctions => duckdb_functions(&self.runtime)?,
             DiagnosticsKind::LogStats => log_stats(&self.runtime)?,
             DiagnosticsKind::CacheFlush => operation_result(
                 "flushed",
@@ -111,7 +116,7 @@ impl ScalarUDFImpl for DuckDbTypeOf {
     }
 }
 
-fn duckdb_type_name(data_type: &DataType) -> String {
+pub(crate) fn duckdb_type_name(data_type: &DataType) -> String {
     match data_type {
         DataType::Null => "NULL".to_string(),
         DataType::Boolean => "BOOLEAN".to_string(),
@@ -457,6 +462,240 @@ fn duckdb_log_message(event: &crate::VgiEvent) -> String {
     fields.join(" ")
 }
 
+#[derive(Debug)]
+struct DuckDbFunctionRow {
+    database_name: String,
+    schema_name: String,
+    function_name: String,
+    function_type: String,
+    parameters: Vec<String>,
+    parameter_types: Vec<String>,
+    return_type: Option<String>,
+    stability: Option<String>,
+    description: String,
+    varargs: Option<String>,
+    categories: Vec<String>,
+}
+
+fn function_row(
+    database_name: String,
+    function_name: String,
+    info: &vgi_client::dtos::FunctionInfo,
+) -> DFResult<DuckDbFunctionRow> {
+    let arguments = if info.arguments.0.is_empty() {
+        Arc::new(Schema::empty())
+    } else {
+        vgi_protocol::ipc::read_schema(&info.arguments.0).map_err(crate::to_df)?
+    };
+    let parameter_type = |field: &Field| match field.metadata().get("vgi_type") {
+        Some(value) if value.eq_ignore_ascii_case("any") => "ANY".to_string(),
+        Some(value) if value.eq_ignore_ascii_case("table") => "TABLE".to_string(),
+        _ => duckdb_type_name(field.data_type()),
+    };
+    let parameters = arguments
+        .fields()
+        .iter()
+        .map(|field| {
+            field
+                .name()
+                .strip_prefix("named_")
+                .unwrap_or(field.name())
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let parameter_types = arguments
+        .fields()
+        .iter()
+        .map(|field| parameter_type(field))
+        .collect::<Vec<_>>();
+    let varargs = arguments
+        .fields()
+        .iter()
+        .find(|field| {
+            field
+                .metadata()
+                .get("vgi_varargs")
+                .is_some_and(|value| value == "true")
+        })
+        .map(|field| parameter_type(field));
+    let kind = info.function_type.0.to_ascii_lowercase();
+    let function_type = if kind == "scalar" {
+        "scalar"
+    } else if kind == "aggregate" {
+        "aggregate"
+    } else {
+        "table"
+    }
+    .to_string();
+    let return_type = if function_type == "table" || info.output_schema.0.is_empty() {
+        None
+    } else {
+        let output = vgi_protocol::ipc::read_schema(&info.output_schema.0).map_err(crate::to_df)?;
+        output.fields().first().map(|field| {
+            if field
+                .metadata()
+                .get("vgi:any")
+                .is_some_and(|value| value == "true")
+            {
+                "ANY".to_string()
+            } else {
+                duckdb_type_name(field.data_type())
+            }
+        })
+    };
+    Ok(DuckDbFunctionRow {
+        database_name,
+        schema_name: info.schema_name.clone(),
+        function_name,
+        function_type,
+        parameters,
+        parameter_types,
+        return_type,
+        stability: info.stability.as_ref().map(|value| value.0.clone()),
+        description: info.description.clone(),
+        varargs,
+        categories: info.categories.clone(),
+    })
+}
+
+fn string_list_array(rows: &[Vec<String>]) -> ArrayRef {
+    let mut builder = ListBuilder::new(StringBuilder::new());
+    for row in rows {
+        for value in row {
+            builder.values().append_value(value);
+        }
+        builder.append(true);
+    }
+    Arc::new(builder.finish())
+}
+
+/// Compatibility projection of attached VGI routine declarations through the
+/// columns the shared corpus reads from DuckDB's `duckdb_functions()`.
+fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let mut rows = Vec::new();
+    for (alias, metadata) in runtime.catalog_metadata() {
+        for info in &metadata.functions {
+            rows.push(function_row(alias.clone(), info.name.clone(), info)?);
+        }
+        for info in &metadata.macros {
+            let is_table = info.macro_type.0.eq_ignore_ascii_case("table_macro")
+                || info.macro_type.0.eq_ignore_ascii_case("table");
+            rows.push(DuckDbFunctionRow {
+                database_name: alias.clone(),
+                schema_name: info.schema_name.clone(),
+                function_name: info.name.clone(),
+                function_type: if is_table { "table_macro" } else { "macro" }.to_string(),
+                parameters: info.parameters.clone(),
+                parameter_types: Vec::new(),
+                return_type: None,
+                stability: None,
+                description: info.comment.clone().unwrap_or_default(),
+                varargs: None,
+                categories: Vec::new(),
+            });
+        }
+        for info in &metadata.global_functions {
+            let name = if metadata.global_function_prefix.is_empty() {
+                info.name.to_ascii_lowercase()
+            } else {
+                format!("{}_{}", metadata.global_function_prefix, info.name).to_ascii_lowercase()
+            };
+            rows.push(function_row("system".to_string(), name, info)?);
+        }
+    }
+
+    let parameters = string_list_array(
+        &rows
+            .iter()
+            .map(|row| row.parameters.clone())
+            .collect::<Vec<_>>(),
+    );
+    let parameter_types = string_list_array(
+        &rows
+            .iter()
+            .map(|row| row.parameter_types.clone())
+            .collect::<Vec<_>>(),
+    );
+    let categories = string_list_array(
+        &rows
+            .iter()
+            .map(|row| row.categories.clone())
+            .collect::<Vec<_>>(),
+    );
+    let tags_type = DataType::Map(
+        Arc::new(Field::new(
+            "entries",
+            DataType::Struct(
+                vec![
+                    Field::new("key", DataType::Utf8, false),
+                    Field::new("value", DataType::Utf8, true),
+                ]
+                .into(),
+            ),
+            false,
+        )),
+        false,
+    );
+    let arrays: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.database_name.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.schema_name.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.function_name.as_str()),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.function_type.as_str()),
+        )),
+        parameters,
+        parameter_types,
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.return_type.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.stability.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|row| row.description.as_str()),
+        )),
+        Arc::new(StringArray::from(
+            rows.iter()
+                .map(|row| row.varargs.as_deref())
+                .collect::<Vec<_>>(),
+        )),
+        categories,
+        new_null_array(&tags_type, rows.len()),
+    ];
+    let names = [
+        "database_name",
+        "schema_name",
+        "function_name",
+        "function_type",
+        "parameters",
+        "parameter_types",
+        "return_type",
+        "stability",
+        "description",
+        "varargs",
+        "categories",
+        "tags",
+    ];
+    let schema = Arc::new(Schema::new(
+        names
+            .into_iter()
+            .zip(&arrays)
+            .map(|(name, array)| Field::new(name, array.data_type().clone(), true))
+            .collect::<Vec<_>>(),
+    ));
+    Ok(RecordBatch::try_new(schema, arrays)?)
+}
+
 fn log_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let mut grouped = std::collections::BTreeMap::<String, (u64, i64)>::new();
     for event in runtime.events() {
@@ -519,6 +758,7 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ("vgi_result_cache_flush", DiagnosticsKind::CacheFlush),
         ("vgi_result_cache_reap", DiagnosticsKind::CacheReap),
         ("duckdb_logs", DiagnosticsKind::DuckDbLogs),
+        ("duckdb_functions", DiagnosticsKind::DuckDbFunctions),
     ] {
         if !state.table_functions().contains_key(name) {
             ctx.register_udtf(
