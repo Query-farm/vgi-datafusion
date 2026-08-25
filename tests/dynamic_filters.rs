@@ -2,7 +2,9 @@
 
 //! DataFusion runtime join filters crossing the VGI scan boundary.
 
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 
 use datafusion::arrow::array::{Array, StringArray};
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -21,6 +23,47 @@ fn example_worker() -> Option<PathBuf> {
         });
         path.exists().then_some(path)
     })
+}
+
+struct HttpWorker {
+    child: Child,
+    port: u16,
+}
+
+impl HttpWorker {
+    fn start(exe: &PathBuf) -> Self {
+        let mut child = Command::new(exe)
+            .arg("--http")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn HTTP worker");
+        let stdout = child.stdout.take().expect("worker stdout");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let port = loop {
+            line.clear();
+            assert!(
+                reader.read_line(&mut line).expect("read worker port") > 0,
+                "HTTP worker exited before announcing its port"
+            );
+            if let Some(port) = line.trim().strip_prefix("PORT:") {
+                break port.parse().expect("valid worker port");
+            }
+        };
+        Self { child, port }
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+}
+
+impl Drop for HttpWorker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 async fn filter_echo_schema(connection: &VgiConnection) -> Option<String> {
@@ -108,18 +151,7 @@ async fn hash_join_keys_reach_vgi_init_and_results_stay_exact() -> datafusion::e
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn topk_refinements_reach_vgi_continuation_ticks() -> datafusion::error::Result<()> {
-    let location = match std::env::var("VGI_DYNAMIC_FILTER_LOCATION") {
-        Ok(location) if !location.trim().is_empty() => location,
-        _ => {
-            let Some(worker) = example_worker() else {
-                eprintln!("skipping: vgi-example-worker not built");
-                return Ok(());
-            };
-            worker.to_string_lossy().to_string()
-        }
-    };
+async fn assert_topk_refinements(location: &str) -> datafusion::error::Result<()> {
     let mut config = SessionConfig::new().with_target_partitions(1);
     config
         .options_mut()
@@ -167,4 +199,29 @@ async fn topk_refinements_reach_vgi_continuation_ticks() -> datafusion::error::R
         "worker observed only these filter generations; continuation metadata did not tighten: {generations:?}"
     );
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn topk_refinements_reach_vgi_continuation_ticks() -> datafusion::error::Result<()> {
+    let location = match std::env::var("VGI_DYNAMIC_FILTER_LOCATION") {
+        Ok(location) if !location.trim().is_empty() => location,
+        _ => {
+            let Some(worker) = example_worker() else {
+                eprintln!("skipping: vgi-example-worker not built");
+                return Ok(());
+            };
+            worker.to_string_lossy().to_string()
+        }
+    };
+    assert_topk_refinements(&location).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn topk_refinements_reach_http_continuation_ticks() -> datafusion::error::Result<()> {
+    let Some(worker) = example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    let worker = HttpWorker::start(&worker);
+    assert_topk_refinements(&worker.url()).await
 }
