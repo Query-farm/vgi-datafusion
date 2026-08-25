@@ -278,43 +278,17 @@ fn to_arg_value(function: &str, i: usize, expr: &Expr) -> DFResult<ArgValue> {
 }
 
 pub(crate) fn scalar_to_arg(function: &str, i: usize, v: &ScalarValue) -> DFResult<ArgValue> {
-    use ScalarValue as S;
-    Ok(match v {
-        S::Int8(Some(n)) => ArgValue::Int(*n as i64),
-        S::Int16(Some(n)) => ArgValue::Int(*n as i64),
-        S::Int32(Some(n)) => ArgValue::Int(*n as i64),
-        S::Int64(Some(n)) => ArgValue::Int(*n),
-        S::UInt8(Some(n)) => ArgValue::Int(*n as i64),
-        S::UInt16(Some(n)) => ArgValue::Int(*n as i64),
-        S::UInt32(Some(n)) => ArgValue::Int(*n as i64),
-        // A u64 above i64::MAX would wrap silently, which is worse than a
-        // refusal — the worker would bind a negative count.
-        S::UInt64(Some(n)) => match i64::try_from(*n) {
-            Ok(n) => ArgValue::Int(n),
-            Err(_) => {
-                return plan_err!(
-                    "VGI function `{function}` argument {i} ({n}) exceeds the \
-                     signed 64-bit range the protocol carries"
-                )
-            }
-        },
-        S::Float32(Some(f)) => ArgValue::Float(*f as f64),
-        S::Float64(Some(f)) => ArgValue::Float(*f),
-        S::Utf8(Some(s)) | S::LargeUtf8(Some(s)) | S::Utf8View(Some(s)) => {
-            ArgValue::Text(s.clone())
-        }
-        S::Boolean(Some(b)) => ArgValue::Bool(*b),
-        // A NULL argument is meaningful — the protocol carries a *typed* null,
-        // so keep the type the planner inferred rather than flattening it.
-        null if null.is_null() => ArgValue::Null(null.data_type()),
-        other => {
-            return plan_err!(
-                "VGI function `{function}` argument {i} has type {} which this \
-                 adapter does not carry as a bind argument",
-                other.data_type()
-            )
-        }
-    })
+    // A NULL argument is meaningful — the protocol carries a typed null, so
+    // keep the type the planner inferred rather than flattening it.
+    if v.is_null() {
+        return Ok(ArgValue::Null(v.data_type()));
+    }
+    // VGI argument values are one-row Arrow struct fields. Preserve that exact
+    // representation instead of narrowing integers to i64, floats to f64, or
+    // rejecting nested/decimal/temporal values the wire already supports.
+    let array = v.to_array_of_size(1)?;
+    ArgValue::from_array_row0(array.as_ref(), &format!("{function} argument {i}"))
+        .map_err(crate::to_df)
 }
 
 #[cfg(test)]
@@ -330,42 +304,49 @@ mod tests {
         to_arg_value("f", 0, &lit(v))
     }
 
-    #[test]
-    fn integer_widths_all_narrow_to_the_protocols_i64() {
-        for v in [
-            ScalarValue::Int8(Some(1)),
-            ScalarValue::Int16(Some(1)),
-            ScalarValue::Int32(Some(1)),
-            ScalarValue::Int64(Some(1)),
-            ScalarValue::UInt8(Some(1)),
-            ScalarValue::UInt32(Some(1)),
-        ] {
-            assert!(matches!(one(v).unwrap(), ArgValue::Int(1)));
+    fn arrow_type(value: ArgValue) -> DataType {
+        match value {
+            ArgValue::Arrow(array) => array.data_type().clone(),
+            other => panic!("expected an Arrow-preserving argument, got {other:?}"),
         }
     }
 
     #[test]
-    fn a_u64_beyond_i64_is_refused_rather_than_wrapped() {
-        let err = one(ScalarValue::UInt64(Some(u64::MAX)))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("64-bit range"), "{err}");
+    fn integer_widths_are_preserved_on_the_arrow_wire() {
+        for (value, expected) in [
+            (ScalarValue::Int8(Some(1)), DataType::Int8),
+            (ScalarValue::Int16(Some(1)), DataType::Int16),
+            (ScalarValue::Int32(Some(1)), DataType::Int32),
+            (ScalarValue::Int64(Some(1)), DataType::Int64),
+            (ScalarValue::UInt8(Some(1)), DataType::UInt8),
+            (ScalarValue::UInt32(Some(1)), DataType::UInt32),
+        ] {
+            assert_eq!(arrow_type(one(value).unwrap()), expected);
+        }
     }
 
     #[test]
-    fn strings_floats_and_bools_map_across() {
-        assert!(matches!(
-            one(ScalarValue::Utf8(Some("x".into()))).unwrap(),
-            ArgValue::Text(s) if s == "x"
-        ));
-        assert!(matches!(
-            one(ScalarValue::Float64(Some(1.5))).unwrap(),
-            ArgValue::Float(f) if f == 1.5
-        ));
-        assert!(matches!(
-            one(ScalarValue::Boolean(Some(true))).unwrap(),
-            ArgValue::Bool(true)
-        ));
+    fn the_full_u64_range_is_preserved() {
+        assert_eq!(
+            arrow_type(one(ScalarValue::UInt64(Some(u64::MAX))).unwrap()),
+            DataType::UInt64
+        );
+    }
+
+    #[test]
+    fn strings_floats_and_bools_keep_their_arrow_types() {
+        assert_eq!(
+            arrow_type(one(ScalarValue::Utf8(Some("x".into()))).unwrap()),
+            DataType::Utf8
+        );
+        assert_eq!(
+            arrow_type(one(ScalarValue::Float64(Some(1.5))).unwrap()),
+            DataType::Float64
+        );
+        assert_eq!(
+            arrow_type(one(ScalarValue::Boolean(Some(true))).unwrap()),
+            DataType::Boolean
+        );
     }
 
     #[test]
