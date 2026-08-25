@@ -30,6 +30,7 @@ enum DiagnosticsKind {
     CacheEntries,
     DuckDbCacheEntries,
     Logs,
+    DuckDbLogs,
     LogStats,
     CacheFlush,
     CacheReap,
@@ -46,6 +47,7 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::CacheEntries => cache_entries(&self.runtime)?,
             DiagnosticsKind::DuckDbCacheEntries => duckdb_cache_entries(&self.runtime)?,
             DiagnosticsKind::Logs => logs(&self.runtime)?,
+            DiagnosticsKind::DuckDbLogs => duckdb_logs(&self.runtime)?,
             DiagnosticsKind::LogStats => log_stats(&self.runtime)?,
             DiagnosticsKind::CacheFlush => operation_result(
                 "flushed",
@@ -394,6 +396,67 @@ fn logs(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     )?)
 }
 
+/// Compatibility shape for DuckDB's `duckdb_logs()` table function.
+///
+/// These rows are backed by the adapter's real structured event history. The
+/// message serializer keeps the event name and its useful dimensions in the
+/// text column used by the shared SQL corpus. It does not synthesize worker
+/// log records or cache tiers that this integration did not observe.
+fn duckdb_logs(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let events = runtime.events();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("type", DataType::Utf8, false),
+        Field::new("message", DataType::Utf8, false),
+    ]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(events.iter().map(|_| "VGI"))),
+            Arc::new(StringArray::from_iter_values(
+                events.iter().map(duckdb_log_message),
+            )),
+        ],
+    )?)
+}
+
+fn duckdb_log_message(event: &crate::VgiEvent) -> String {
+    let kind = match event.kind.as_str() {
+        "cache.hit" => "result_cache.hit",
+        "cache.miss" => "result_cache.miss",
+        "cache.store" => "result_cache.store",
+        "cache.refused" | "cache.capture_aborted" => "result_cache.abort",
+        "cache.revalidated" => "result_cache.revalidate",
+        other => other,
+    };
+    let mut fields = vec![kind.to_string()];
+    if event.kind == "cache.hit" || event.kind == "cache.store" {
+        fields.push("tier=memory".to_string());
+    }
+    if event.kind == "cache.revalidated" {
+        fields.push("outcome=not_modified".to_string());
+    }
+    if let Some(catalog) = &event.catalog {
+        fields.push(format!("catalog={catalog}"));
+    }
+    if let Some(function) = &event.function {
+        fields.push(format!("function={function}"));
+    }
+    if let Some(split) = &event.split {
+        fields.push(format!("split={split}"));
+    }
+    if let Some(duration) = event.duration {
+        fields.push(format!("duration_ms={}", duration.as_millis()));
+    }
+    if let Some(message) = &event.message {
+        if event.kind == "cache.refused" || event.kind == "cache.capture_aborted" {
+            fields.push(format!("reason={message}"));
+        } else {
+            fields.push(message.clone());
+        }
+    }
+    fields.join(" ")
+}
+
 fn log_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let mut grouped = std::collections::BTreeMap::<String, (u64, i64)>::new();
     for event in runtime.events() {
@@ -455,6 +518,7 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ("vgi_result_cache", DiagnosticsKind::DuckDbCacheEntries),
         ("vgi_result_cache_flush", DiagnosticsKind::CacheFlush),
         ("vgi_result_cache_reap", DiagnosticsKind::CacheReap),
+        ("duckdb_logs", DiagnosticsKind::DuckDbLogs),
     ] {
         if !state.table_functions().contains_key(name) {
             ctx.register_udtf(
@@ -552,6 +616,30 @@ mod tests {
             .collect()
             .await?;
         assert_eq!(entries.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duckdb_logs_serializes_real_adapter_events() -> DFResult<()> {
+        let ctx = SessionContext::new();
+        let runtime = Arc::new(VgiRuntime::default());
+        register(&ctx, Arc::clone(&runtime));
+
+        let mut event = crate::VgiEvent::new("cache.hit");
+        event.catalog = Some("weather".to_string());
+        event.function = Some("main.forecast".to_string());
+        runtime.emit(event);
+
+        let batches = ctx
+            .sql(
+                "SELECT type, message FROM duckdb_logs() \
+                 WHERE type = 'VGI' AND message LIKE '%result_cache.hit%' \
+                 AND message LIKE '%tier=memory%'",
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
         Ok(())
     }
 }
