@@ -919,7 +919,11 @@ fn write_json_report(
         .map_err(|e| format!("could not write corpus report {}: {e}", path.display()))
 }
 
-fn compare_reports(baseline_path: &Path, current_path: &Path) -> Result<Vec<String>, String> {
+fn compare_reports(
+    baseline_path: &Path,
+    current_path: &Path,
+    selected_files_only: bool,
+) -> Result<Vec<String>, String> {
     let read = |path: &Path| -> Result<serde_json::Value, String> {
         let bytes = std::fs::read(path)
             .map_err(|e| format!("could not read corpus report {}: {e}", path.display()))?;
@@ -945,7 +949,17 @@ fn compare_reports(baseline_path: &Path, current_path: &Path) -> Result<Vec<Stri
             .unwrap_or(0)
     };
     let mut regressions = Vec::new();
-    for (path, before) in baseline_files {
+    let paths = if selected_files_only {
+        current_files
+            .keys()
+            .filter(|path| baseline_files.contains_key(*path))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        baseline_files.keys().cloned().collect::<Vec<_>>()
+    };
+    for path in paths {
+        let before = &baseline_files[&path];
         let Some(after) = current_files.get(&path) else {
             regressions.push(format!("{path}: missing from current report"));
             continue;
@@ -992,6 +1006,7 @@ async fn main() {
     let mut roots = Vec::new();
     let mut json_path = std::env::var_os("CORPUS_JSON").map(PathBuf::from);
     let mut compare_path: Option<PathBuf> = None;
+    let mut compare_selected = false;
     let mut jobs = std::env::var("CORPUS_JOBS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -1016,12 +1031,13 @@ async fn main() {
                 };
                 manifest_path = PathBuf::from(path);
             }
-            "--compare" => {
+            "--compare" | "--compare-selected" => {
                 let Some(path) = args.next() else {
-                    eprintln!("--compare requires a baseline report path");
+                    eprintln!("{arg} requires a baseline report path");
                     std::process::exit(2);
                 };
                 compare_path = Some(PathBuf::from(path));
+                compare_selected = arg == "--compare-selected";
             }
             "--jobs" | "-j" => {
                 let Some(value) = args.next() else {
@@ -1038,7 +1054,8 @@ async fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: corpus [--jobs N] [--json REPORT.json] [--compare BASELINE.json] \
+                    "Usage: corpus [--jobs N] [--json REPORT.json] \
+                     [--compare BASELINE.json | --compare-selected BASELINE.json] \
                      [--manifest compatibility.json] [PATH ...]"
                 );
                 return;
@@ -1247,9 +1264,14 @@ async fn main() {
         }
         println!("\nJSON report: {}", path.display());
         if let Some(baseline) = compare_path {
-            match compare_reports(&baseline, &path) {
+            match compare_reports(&baseline, &path, compare_selected) {
                 Ok(regressions) if regressions.is_empty() => {
-                    println!("baseline comparison: no regressions");
+                    let scope = if compare_selected {
+                        "selected-file baseline comparison"
+                    } else {
+                        "baseline comparison"
+                    };
+                    println!("{scope}: no regressions");
                 }
                 Ok(regressions) => {
                     eprintln!(

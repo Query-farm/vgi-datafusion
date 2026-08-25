@@ -45,10 +45,17 @@ example, the complete function-metadata slice runs in a few seconds:
 
 ```bash
 target/release/corpus --jobs 4 \
+  --json target/corpus-focused.json \
+  --compare-selected corpus/baselines/subprocess.json \
   ../vgi/test/sql/integration/catalog/function_arguments.test \
   ../vgi/test/sql/integration/scalar/function_registration.test \
   ../vgi/test/sql/integration/table/function_registration.test
 ```
+
+`--compare-selected` checks only the files included in the current invocation
+against their entries in the full committed baseline. Use ordinary `--compare`
+for promotion runs: it additionally rejects any baseline file missing from the
+new full report.
 
 Files use independent DataFusion sessions, so `--jobs N` runs them concurrently
 while merging results back in source order. Keep `N` bounded on shared hosts;
