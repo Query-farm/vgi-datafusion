@@ -217,10 +217,78 @@ struct Area {
 /// answer in the same bucket, and only one of them is worth anyone's time. So
 /// they are compared separately and reported separately.
 fn agrees_modulo_rendering(expected: &[String], got: &[String]) -> bool {
+    if explain_rows_agree(expected, got) {
+        return true;
+    }
     if expected.len() != got.len() {
         return false;
     }
     rows_agree(expected, got)
+}
+
+/// Match DuckDB EXPLAIN assertions to the equivalent DataFusion node names.
+///
+/// DuckDB emits only its physical row and calls the nodes `EMPTY_RESULT` and
+/// `VGI_TABLE_SCAN`; DataFusion emits logical plus physical rows and calls them
+/// `EmptyExec` and `VgiScanExec`. This intentionally recognizes only the exact
+/// corpus assertions below, so a scan where an empty result was expected still
+/// remains a genuine mismatch.
+fn explain_rows_agree(expected: &[String], got: &[String]) -> bool {
+    let [expected] = expected else {
+        return false;
+    };
+    let physical = got
+        .iter()
+        .filter_map(|row| row.strip_prefix("physical_plan\t"))
+        .collect::<Vec<_>>();
+    if physical.is_empty() {
+        return false;
+    }
+    match expected.as_str() {
+        "physical_plan\t<REGEX>:.*EMPTY_RESULT.*" => {
+            physical.iter().any(|plan| plan.contains("EmptyExec"))
+        }
+        "physical_plan\t<!REGEX>:.*EMPTY_RESULT.*" => {
+            physical.iter().all(|plan| !plan.contains("EmptyExec"))
+        }
+        "physical_plan\t<REGEX>:.*VGI_TABLE_SCAN.*" => {
+            physical.iter().any(|plan| plan.contains("VgiScanExec"))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod explain_rendering_tests {
+    use super::agrees_modulo_rendering;
+
+    #[test]
+    fn matches_equivalent_datafusion_plan_nodes_without_masking_missing_pruning() {
+        let empty = vec![
+            "logical_plan\tFilter".into(),
+            "physical_plan\tFilterExec\n  EmptyExec".into(),
+        ];
+        let scan = vec![
+            "logical_plan\tFilter".into(),
+            "physical_plan\tFilterExec\n  VgiScanExec".into(),
+        ];
+        assert!(agrees_modulo_rendering(
+            &["physical_plan\t<REGEX>:.*EMPTY_RESULT.*".into()],
+            &empty,
+        ));
+        assert!(agrees_modulo_rendering(
+            &["physical_plan\t<REGEX>:.*VGI_TABLE_SCAN.*".into()],
+            &scan,
+        ));
+        assert!(agrees_modulo_rendering(
+            &["physical_plan\t<!REGEX>:.*EMPTY_RESULT.*".into()],
+            &scan,
+        ));
+        assert!(!agrees_modulo_rendering(
+            &["physical_plan\t<REGEX>:.*EMPTY_RESULT.*".into()],
+            &scan,
+        ));
+    }
 }
 
 /// Compare rows pairwise, allowing for rendering conventions.
