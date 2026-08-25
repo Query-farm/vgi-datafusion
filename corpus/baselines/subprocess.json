@@ -1,0 +1,6793 @@
+{
+  "schema_version": 1,
+  "source_roots": [
+    "/home/ec2-user/Development/vgi/test/sql/integration"
+  ],
+  "source_files": 327,
+  "totals": {
+    "files_run": 278,
+    "files_skipped": 49,
+    "measured_records": 4114,
+    "executed": 2473,
+    "failed": 1641,
+    "not_applicable": 607,
+    "timed_out": 0,
+    "expected_errors_ignored": 179,
+    "values": {
+      "exact": 1567,
+      "rendering_equivalent": 37,
+      "different": 149,
+      "unordered_subset": 40
+    }
+  },
+  "failure_buckets": {
+    "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 678,
+    "worker refused the bind": 99,
+    "parse error (dialect)": 118,
+    "type / signature mismatch": 62,
+    "other": 684
+  },
+  "areas": [
+    {
+      "id": "table_scans",
+      "title": "Table functions and scans",
+      "declared_status": "partial",
+      "groups": [
+        "table"
+      ],
+      "files": 59,
+      "files_skipped": 1,
+      "executed": 856,
+      "failed": 406,
+      "not_applicable": 76,
+      "timed_out": 0
+    },
+    {
+      "id": "scalar_functions",
+      "title": "Scalar functions and overloads",
+      "declared_status": "partial",
+      "groups": [
+        "scalar",
+        "overload"
+      ],
+      "files": 24,
+      "files_skipped": 0,
+      "executed": 406,
+      "failed": 157,
+      "not_applicable": 22,
+      "timed_out": 0
+    },
+    {
+      "id": "aggregates",
+      "title": "Aggregates, windows, and accumulation",
+      "declared_status": "partial",
+      "groups": [
+        "aggregate",
+        "accumulate"
+      ],
+      "files": 25,
+      "files_skipped": 3,
+      "executed": 168,
+      "failed": 44,
+      "not_applicable": 14,
+      "timed_out": 0
+    },
+    {
+      "id": "table_input",
+      "title": "Table-in/out and buffering functions",
+      "declared_status": "partial",
+      "groups": [
+        "table_in_out"
+      ],
+      "files": 43,
+      "files_skipped": 3,
+      "executed": 289,
+      "failed": 257,
+      "not_applicable": 59,
+      "timed_out": 0
+    },
+    {
+      "id": "filter_pushdown",
+      "title": "Static and dynamic filter pushdown",
+      "declared_status": "partial",
+      "groups": [
+        "filter_pushdown"
+      ],
+      "files": 13,
+      "files_skipped": 0,
+      "executed": 154,
+      "failed": 80,
+      "not_applicable": 0,
+      "timed_out": 0
+    },
+    {
+      "id": "splits",
+      "title": "Split planning and redemption",
+      "declared_status": "partial",
+      "groups": [
+        "splits"
+      ],
+      "files": 21,
+      "files_skipped": 0,
+      "executed": 134,
+      "failed": 26,
+      "not_applicable": 30,
+      "timed_out": 0
+    },
+    {
+      "id": "result_cache",
+      "title": "VGI result cache",
+      "declared_status": "partial",
+      "groups": [
+        "cache"
+      ],
+      "files": 52,
+      "files_skipped": 2,
+      "executed": 297,
+      "failed": 413,
+      "not_applicable": 356,
+      "timed_out": 0
+    },
+    {
+      "id": "catalog_metadata",
+      "title": "Catalogs, views, macros, and global functions",
+      "declared_status": "partial",
+      "groups": [
+        "catalog",
+        "view",
+        "macro",
+        "global_functions",
+        "schema_reconcile.test"
+      ],
+      "files": 26,
+      "files_skipped": 10,
+      "executed": 47,
+      "failed": 105,
+      "not_applicable": 23,
+      "timed_out": 0
+    },
+    {
+      "id": "attach_settings",
+      "title": "Attach, versions, settings, and validation",
+      "declared_status": "partial",
+      "groups": [
+        "attach",
+        "settings",
+        "connection_string.test",
+        "bad_enum.test"
+      ],
+      "files": 20,
+      "files_skipped": 13,
+      "executed": 27,
+      "failed": 7,
+      "not_applicable": 18,
+      "timed_out": 0
+    },
+    {
+      "id": "authentication_secrets",
+      "title": "Authentication and secrets",
+      "declared_status": "partial",
+      "groups": [
+        "bearer_auth",
+        "secret"
+      ],
+      "files": 11,
+      "files_skipped": 1,
+      "executed": 19,
+      "failed": 63,
+      "not_applicable": 0,
+      "timed_out": 0
+    },
+    {
+      "id": "copy",
+      "title": "COPY FROM and COPY TO functions",
+      "declared_status": "partial",
+      "groups": [
+        "copy_from",
+        "copy_to"
+      ],
+      "files": 11,
+      "files_skipped": 0,
+      "executed": 53,
+      "failed": 83,
+      "not_applicable": 9,
+      "timed_out": 0
+    },
+    {
+      "id": "writes",
+      "title": "Writable tables and mutations",
+      "declared_status": "not_started",
+      "groups": [
+        "simple_writable"
+      ],
+      "files": 5,
+      "files_skipped": 5,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0
+    },
+    {
+      "id": "transport_external",
+      "title": "Transport, launcher, protocol, and external fixtures",
+      "declared_status": "blocked",
+      "groups": [
+        "http",
+        "launcher",
+        "protocol_version",
+        "container",
+        "github"
+      ],
+      "files": 14,
+      "files_skipped": 11,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0
+    },
+    {
+      "id": "regression_contracts",
+      "title": "Focused adapter regression contracts",
+      "declared_status": "complete",
+      "groups": [
+        "projection_pushdown_repro.test",
+        "narrow_bind_mismatch.test",
+        "unary_error_propagation.test"
+      ],
+      "files": 3,
+      "files_skipped": 0,
+      "executed": 23,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0
+    }
+  ],
+  "groups": [
+    {
+      "group": "accumulate",
+      "area": "aggregates",
+      "executed": 58,
+      "failed": 6
+    },
+    {
+      "group": "aggregate",
+      "area": "aggregates",
+      "executed": 110,
+      "failed": 38
+    },
+    {
+      "group": "attach",
+      "area": "attach_settings",
+      "executed": 2,
+      "failed": 0
+    },
+    {
+      "group": "cache",
+      "area": "result_cache",
+      "executed": 297,
+      "failed": 413
+    },
+    {
+      "group": "catalog",
+      "area": "catalog_metadata",
+      "executed": 26,
+      "failed": 64
+    },
+    {
+      "group": "connection_string.test",
+      "area": "attach_settings",
+      "executed": 4,
+      "failed": 4
+    },
+    {
+      "group": "copy_from",
+      "area": "copy",
+      "executed": 23,
+      "failed": 24
+    },
+    {
+      "group": "copy_to",
+      "area": "copy",
+      "executed": 30,
+      "failed": 59
+    },
+    {
+      "group": "filter_pushdown",
+      "area": "filter_pushdown",
+      "executed": 154,
+      "failed": 80
+    },
+    {
+      "group": "global_functions",
+      "area": "catalog_metadata",
+      "executed": 17,
+      "failed": 12
+    },
+    {
+      "group": "macro",
+      "area": "catalog_metadata",
+      "executed": 2,
+      "failed": 17
+    },
+    {
+      "group": "narrow_bind_mismatch.test",
+      "area": "regression_contracts",
+      "executed": 4,
+      "failed": 0
+    },
+    {
+      "group": "overload",
+      "area": "scalar_functions",
+      "executed": 82,
+      "failed": 6
+    },
+    {
+      "group": "projection_pushdown_repro.test",
+      "area": "regression_contracts",
+      "executed": 14,
+      "failed": 0
+    },
+    {
+      "group": "scalar",
+      "area": "scalar_functions",
+      "executed": 324,
+      "failed": 151
+    },
+    {
+      "group": "secret",
+      "area": "authentication_secrets",
+      "executed": 19,
+      "failed": 63
+    },
+    {
+      "group": "settings",
+      "area": "attach_settings",
+      "executed": 21,
+      "failed": 3
+    },
+    {
+      "group": "splits",
+      "area": "splits",
+      "executed": 134,
+      "failed": 26
+    },
+    {
+      "group": "table",
+      "area": "table_scans",
+      "executed": 856,
+      "failed": 406
+    },
+    {
+      "group": "table_in_out",
+      "area": "table_input",
+      "executed": 289,
+      "failed": 257
+    },
+    {
+      "group": "unary_error_propagation.test",
+      "area": "regression_contracts",
+      "executed": 5,
+      "failed": 0
+    },
+    {
+      "group": "view",
+      "area": "catalog_metadata",
+      "executed": 2,
+      "failed": 12
+    }
+  ],
+  "files": [
+    {
+      "path": "accumulate/attach_scope.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 11,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "accumulate/basic.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 21,
+      "expected_errors_ignored": 0,
+      "executed": 19,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 11,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "accumulate/catalog.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "accumulate/errors.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 4,
+      "executed": 9,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "accumulate/eviction.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "worker refused the bind": 2
+      }
+    },
+    {
+      "path": "accumulate/result_modes.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/advanced.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "type / signature mismatch": 2
+      }
+    },
+    {
+      "path": "aggregate/any_type.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 3,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3
+      }
+    },
+    {
+      "path": "aggregate/basic.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 0,
+      "executed": 12,
+      "failed": 3,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 10,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "type / signature mismatch": 3
+      }
+    },
+    {
+      "path": "aggregate/const_param.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 5,
+      "executed": 11,
+      "failed": 0,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 9,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/dynamic.test",
+      "area": "aggregates",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/function_registration.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 4,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "aggregate/function_registration_dynamic.test",
+      "area": "aggregates",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/grouped.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 1,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "type / signature mismatch": 1
+      }
+    },
+    {
+      "path": "aggregate/high_cardinality_10k.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 4,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/high_cardinality_1k.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/large_ungrouped.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 3,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/listagg.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/nest_tensor.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 29,
+      "expected_errors_ignored": 5,
+      "executed": 1,
+      "failed": 21,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 1,
+        "other": 20
+      }
+    },
+    {
+      "path": "aggregate/parallel.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 0,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/same_name_schemas.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "aggregate/streaming.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 12,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 11,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/varargs.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 1,
+      "executed": 7,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "aggregate/window.test",
+      "area": "aggregates",
+      "skipped": false,
+      "records": 19,
+      "expected_errors_ignored": 0,
+      "executed": 15,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 13,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 3,
+        "other": 1
+      }
+    },
+    {
+      "path": "aggregate/window_dynamic.test",
+      "area": "aggregates",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/attach_options_echo.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/attach_options_required.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/ddl_wire_contract.test",
+      "area": "attach_settings",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 7,
+      "executed": 2,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioned_tables.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioned_tables_http.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioned_tables_impl.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioned_tables_impl_http.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioned_tables_resolved.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioned_tables_resolved_http.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioned_tables_spec.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioned_tables_spec_http.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioning.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "attach/versioning_http.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "bad_enum.test",
+      "area": "attach_settings",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "bearer_auth/bearer_token.test",
+      "area": "authentication_secrets",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "cache/at_isolation.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 3,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3
+      }
+    },
+    {
+      "path": "cache/basic.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 22,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 8,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 7,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 8
+      }
+    },
+    {
+      "path": "cache/cap_matrix.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 29,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 10,
+      "not_applicable": 15,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 9,
+        "other": 1
+      }
+    },
+    {
+      "path": "cache/cleanup.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 25,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 14,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 12,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/compression.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 50,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 11,
+      "not_applicable": 30,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 9,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/coverage.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 4,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4
+      }
+    },
+    {
+      "path": "cache/diagnostics.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 9,
+      "not_applicable": 9,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 9
+      }
+    },
+    {
+      "path": "cache/disk.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 19,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 8,
+      "not_applicable": 7,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 4
+      }
+    },
+    {
+      "path": "cache/disk_streaming.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 24,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 7,
+      "not_applicable": 12,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 6,
+        "other": 1
+      }
+    },
+    {
+      "path": "cache/entry_cap.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 12,
+      "failed": 5,
+      "not_applicable": 6,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 5
+      }
+    },
+    {
+      "path": "cache/exchange_buffered.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 36,
+      "expected_errors_ignored": 0,
+      "executed": 12,
+      "failed": 12,
+      "not_applicable": 12,
+      "timed_out": 0,
+      "values": {
+        "exact": 7,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 12
+      }
+    },
+    {
+      "path": "cache/exchange_lateral.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 34,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 17,
+      "not_applicable": 11,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 9,
+        "other": 8
+      }
+    },
+    {
+      "path": "cache/exchange_lateral_disk.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 12,
+      "not_applicable": 8,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "other": 9
+      }
+    },
+    {
+      "path": "cache/exchange_revalidate.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 19,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 6,
+      "not_applicable": 8,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/exchange_streaming.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 29,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 12,
+      "not_applicable": 9,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 10,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/explain.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 18,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 4,
+      "not_applicable": 6,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 3,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4
+      }
+    },
+    {
+      "path": "cache/explain_stats.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 5,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 5,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/filter_pushdown_keys.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 5,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 5
+      }
+    },
+    {
+      "path": "cache/http_symmetry.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "cache/identity_isolation.test",
+      "area": "result_cache",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "cache/ineligible_reasons.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 9,
+      "not_applicable": 6,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 8,
+        "type / signature mismatch": 1
+      }
+    },
+    {
+      "path": "cache/multi_batch_threads.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 4,
+      "not_applicable": 7,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4
+      }
+    },
+    {
+      "path": "cache/opt_out.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 7,
+      "not_applicable": 5,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 7
+      }
+    },
+    {
+      "path": "cache/ordered_serve.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 4,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4
+      }
+    },
+    {
+      "path": "cache/pack.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 54,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 38,
+      "not_applicable": 14,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 8,
+        "other": 30
+      }
+    },
+    {
+      "path": "cache/parallel_capture.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 18,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 6,
+      "not_applicable": 7,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 6
+      }
+    },
+    {
+      "path": "cache/partition_scope.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 49,
+      "expected_errors_ignored": 0,
+      "executed": 15,
+      "failed": 19,
+      "not_applicable": 15,
+      "timed_out": 0,
+      "values": {
+        "exact": 14,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 19
+      }
+    },
+    {
+      "path": "cache/partition_scope_identity.test",
+      "area": "result_cache",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "cache/partition_scope_ops.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 30,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 14,
+      "not_applicable": 10,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 12,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/partition_scope_shapes.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 40,
+      "expected_errors_ignored": 0,
+      "executed": 12,
+      "failed": 15,
+      "not_applicable": 13,
+      "timed_out": 0,
+      "values": {
+        "exact": 11,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 15
+      }
+    },
+    {
+      "path": "cache/per_value_concurrent.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 18,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 8,
+      "not_applicable": 6,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 4
+      }
+    },
+    {
+      "path": "cache/per_value_lateral.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 11,
+      "not_applicable": 10,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 7,
+        "other": 4
+      }
+    },
+    {
+      "path": "cache/per_value_multi_batch.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 19,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 10,
+      "not_applicable": 7,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 6
+      }
+    },
+    {
+      "path": "cache/per_value_negative_memo.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 18,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 10,
+      "not_applicable": 6,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 6
+      }
+    },
+    {
+      "path": "cache/per_value_partial.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 24,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 10,
+      "not_applicable": 9,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 6,
+        "other": 4
+      }
+    },
+    {
+      "path": "cache/poison.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 1,
+      "executed": 2,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "cache/poison_external.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 1,
+      "executed": 2,
+      "failed": 2,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "cache/prepared_reset.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 12,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 8,
+        "type / signature mismatch": 1,
+        "other": 3
+      }
+    },
+    {
+      "path": "cache/projection_pushdown.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "cache/pushdown.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 4,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4
+      }
+    },
+    {
+      "path": "cache/query_shapes.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 4,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "type / signature mismatch": 1
+      }
+    },
+    {
+      "path": "cache/replay_shapes.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 6,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "type / signature mismatch": 1,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/revalidate.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 7,
+      "not_applicable": 7,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 7
+      }
+    },
+    {
+      "path": "cache/same_name_schemas.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "cache/spill.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 25,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 9,
+      "not_applicable": 10,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 8,
+        "other": 1
+      }
+    },
+    {
+      "path": "cache/spill_correctness.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 3,
+      "not_applicable": 7,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3
+      }
+    },
+    {
+      "path": "cache/spill_disk_cap.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 5,
+      "not_applicable": 10,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/spill_lifecycle.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 30,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 10,
+      "not_applicable": 13,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 1
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 6,
+        "other": 4
+      }
+    },
+    {
+      "path": "cache/spill_partition_values.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 5,
+      "not_applicable": 9,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 1
+      }
+    },
+    {
+      "path": "cache/spill_poison.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 1,
+      "executed": 3,
+      "failed": 6,
+      "not_applicable": 6,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "other": 3
+      }
+    },
+    {
+      "path": "cache/spill_types.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 7,
+      "not_applicable": 9,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "type / signature mismatch": 1,
+        "other": 2
+      }
+    },
+    {
+      "path": "cache/transaction_scope.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 19,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 9,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 5
+      }
+    },
+    {
+      "path": "catalog/companion_catalogs.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/companion_hidden.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/companion_partial_failure.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/eager_load_threshold.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 6,
+      "not_applicable": 8,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 6
+      }
+    },
+    {
+      "path": "catalog/function_arguments.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 5,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 5
+      }
+    },
+    {
+      "path": "catalog/function_arguments_constraints.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 1,
+      "executed": 2,
+      "failed": 5,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 5
+      }
+    },
+    {
+      "path": "catalog/function_arguments_macros.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4
+      }
+    },
+    {
+      "path": "catalog/multi_branch_capability_cache.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 7,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "worker refused the bind": 2,
+        "other": 2
+      }
+    },
+    {
+      "path": "catalog/multi_branch_empty_branches.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 2,
+      "expected_errors_ignored": 1,
+      "executed": 1,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/multi_branch_format.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/multi_branch_heterogeneous.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/multi_branch_iceberg.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/multi_branch_join_optimizer.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/multi_branch_lateral.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 6,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 6
+      }
+    },
+    {
+      "path": "catalog/multi_branch_pushdown_incapable.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/multi_branch_reconciliation.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/multi_branch_scan.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 21,
+      "expected_errors_ignored": 6,
+      "executed": 1,
+      "failed": 12,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "other": 9
+      }
+    },
+    {
+      "path": "catalog/multi_branch_two_writable.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 2,
+      "expected_errors_ignored": 1,
+      "executed": 1,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "catalog/multi_branch_writes_refused.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 4,
+      "executed": 1,
+      "failed": 6,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "worker refused the bind": 1,
+        "parse error (dialect)": 1,
+        "other": 1
+      }
+    },
+    {
+      "path": "catalog/window_self_join.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 5,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "worker refused the bind": 4
+      }
+    },
+    {
+      "path": "catalog/zero_count_bypass.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 8,
+      "not_applicable": 10,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 8
+      }
+    },
+    {
+      "path": "connection_string.test",
+      "area": "attach_settings",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 2,
+      "executed": 4,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 4
+      }
+    },
+    {
+      "path": "container/errors.test",
+      "area": "transport_external",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 7,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "container/shared_http.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "container/shared_tcp.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "container/sklearn_smoke.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "copy_from/basic.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 7,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "parse error (dialect)": 3,
+        "other": 2
+      }
+    },
+    {
+      "path": "copy_from/options.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 2,
+      "executed": 11,
+      "failed": 10,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 4,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "parse error (dialect)": 8
+      }
+    },
+    {
+      "path": "copy_from/secrets.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 7,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "parse error (dialect)": 5,
+        "other": 1
+      }
+    },
+    {
+      "path": "copy_to/basic.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 9,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "parse error (dialect)": 5,
+        "other": 3
+      }
+    },
+    {
+      "path": "copy_to/failure.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 2,
+      "executed": 5,
+      "failed": 3,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "other": 1
+      }
+    },
+    {
+      "path": "copy_to/options.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 7,
+      "executed": 2,
+      "failed": 11,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "parse error (dialect)": 5,
+        "other": 4
+      }
+    },
+    {
+      "path": "copy_to/ordered.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 5,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "parse error (dialect)": 2,
+        "other": 2
+      }
+    },
+    {
+      "path": "copy_to/parallel.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 1,
+      "executed": 5,
+      "failed": 9,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 6,
+        "other": 3
+      }
+    },
+    {
+      "path": "copy_to/secrets.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 11,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "parse error (dialect)": 5,
+        "other": 5
+      }
+    },
+    {
+      "path": "copy_to/tmp_file.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 9,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 4,
+        "other": 5
+      }
+    },
+    {
+      "path": "copy_to/types.test",
+      "area": "copy",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2
+      }
+    },
+    {
+      "path": "filter_pushdown/blob.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 4
+      }
+    },
+    {
+      "path": "filter_pushdown/booleans.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 19,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 9,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 9
+      }
+    },
+    {
+      "path": "filter_pushdown/decimals.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 24,
+      "expected_errors_ignored": 0,
+      "executed": 20,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 18,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "type / signature mismatch": 4
+      }
+    },
+    {
+      "path": "filter_pushdown/dictionary_varchar.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "filter_pushdown/enums.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 8,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 8
+      }
+    },
+    {
+      "path": "filter_pushdown/floats.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 5,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 5
+      }
+    },
+    {
+      "path": "filter_pushdown/hugeint.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 10,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 10
+      }
+    },
+    {
+      "path": "filter_pushdown/integers.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 54,
+      "expected_errors_ignored": 0,
+      "executed": 41,
+      "failed": 13,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 39,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 13
+      }
+    },
+    {
+      "path": "filter_pushdown/null_logic.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 17,
+      "failed": 3,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 15,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 3
+      }
+    },
+    {
+      "path": "filter_pushdown/strings.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 40,
+      "expected_errors_ignored": 0,
+      "executed": 39,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 29,
+        "rendering_equivalent": 6,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 1
+      }
+    },
+    {
+      "path": "filter_pushdown/temporal.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 10,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 3,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 10
+      }
+    },
+    {
+      "path": "filter_pushdown/time_tz.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 4
+      }
+    },
+    {
+      "path": "filter_pushdown/uuid.test",
+      "area": "filter_pushdown",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 8,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 8
+      }
+    },
+    {
+      "path": "github/download.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "github/errors.test",
+      "area": "transport_external",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 6,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "global_functions/basic.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 3,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3
+      }
+    },
+    {
+      "path": "global_functions/lifecycle.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 4,
+      "executed": 7,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 5,
+        "other": 4
+      }
+    },
+    {
+      "path": "http/capability_probe.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "http/gzip_fallback.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "http/no_compression.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "http/producer_turns.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "http/small_body_encoding.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "launcher/options_smoke.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "launcher/options_validation.test",
+      "area": "transport_external",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 5,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "macro/macros.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 19,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 17,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "type / signature mismatch": 12,
+        "other": 3
+      }
+    },
+    {
+      "path": "narrow_bind_mismatch.test",
+      "area": "regression_contracts",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 4,
+      "executed": 4,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "overload/scalar_overload.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 46,
+      "expected_errors_ignored": 0,
+      "executed": 40,
+      "failed": 6,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 38,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 2
+      }
+    },
+    {
+      "path": "overload/scalar_varargs_overload.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "overload/table_overload.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 31,
+      "expected_errors_ignored": 0,
+      "executed": 31,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 29,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "overload/table_varargs_overload.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "projection_pushdown_repro.test",
+      "area": "regression_contracts",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 14,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 13,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "protocol_version/version_mismatch.test",
+      "area": "transport_external",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "scalar/add_values.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 50,
+      "expected_errors_ignored": 0,
+      "executed": 41,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 38,
+        "rendering_equivalent": 1,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 9
+      }
+    },
+    {
+      "path": "scalar/binary_packet.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 15,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "type / signature mismatch": 9,
+        "other": 5
+      }
+    },
+    {
+      "path": "scalar/conditional_message.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 24,
+      "expected_errors_ignored": 1,
+      "executed": 22,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 13,
+        "rendering_equivalent": 7,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "scalar/dedup.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 3,
+      "not_applicable": 8,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3
+      }
+    },
+    {
+      "path": "scalar/double.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 51,
+      "expected_errors_ignored": 4,
+      "executed": 11,
+      "failed": 36,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 9,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 35,
+        "other": 1
+      }
+    },
+    {
+      "path": "scalar/function_registration.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 32,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 30,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 30
+      }
+    },
+    {
+      "path": "scalar/geo_centroid.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 8,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 4
+      }
+    },
+    {
+      "path": "scalar/geo_distance.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 3,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 3
+      }
+    },
+    {
+      "path": "scalar/hash_seed.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 18,
+      "expected_errors_ignored": 1,
+      "executed": 15,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 13,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "other": 1
+      }
+    },
+    {
+      "path": "scalar/null_handling.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 19,
+      "expected_errors_ignored": 0,
+      "executed": 18,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 16,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "scalar/numeric_promotion.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 8,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 6,
+        "other": 2
+      }
+    },
+    {
+      "path": "scalar/per_value.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 7,
+      "not_applicable": 10,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 7
+      }
+    },
+    {
+      "path": "scalar/per_value_edge.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 3,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3
+      }
+    },
+    {
+      "path": "scalar/random_int.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 22,
+      "expected_errors_ignored": 0,
+      "executed": 21,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 19,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "scalar/same_name_catalogs.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 11,
+      "failed": 5,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "other": 3
+      }
+    },
+    {
+      "path": "scalar/same_name_schemas.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 5,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "other": 3
+      }
+    },
+    {
+      "path": "scalar/sum_values.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 81,
+      "expected_errors_ignored": 1,
+      "executed": 70,
+      "failed": 10,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 62,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 9,
+        "other": 1
+      }
+    },
+    {
+      "path": "scalar/unnest_tensor.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 3,
+      "executed": 5,
+      "failed": 5,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 1,
+        "type / signature mismatch": 1,
+        "other": 3
+      }
+    },
+    {
+      "path": "scalar/upper_case.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 48,
+      "expected_errors_ignored": 0,
+      "executed": 46,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 41,
+        "rendering_equivalent": 1,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "other": 1
+      }
+    },
+    {
+      "path": "scalar/whoami.test",
+      "area": "scalar_functions",
+      "skipped": false,
+      "records": 4,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "schema_reconcile.test",
+      "area": "catalog_metadata",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "secret/secret_aggregate.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "parse error (dialect)": 2,
+        "other": 5
+      }
+    },
+    {
+      "path": "secret/secret_fields.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 6,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "type / signature mismatch": 2,
+        "other": 2
+      }
+    },
+    {
+      "path": "secret/secret_function_backed_table.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 5,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "other": 3
+      }
+    },
+    {
+      "path": "secret/secret_multi_scope.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 7,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "other": 5
+      }
+    },
+    {
+      "path": "secret/secret_no_secret.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 3,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 1
+      }
+    },
+    {
+      "path": "secret/secret_registration.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 5,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "parse error (dialect)": 1,
+        "other": 1
+      }
+    },
+    {
+      "path": "secret/secret_scalar.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "type / signature mismatch": 5,
+        "other": 2
+      }
+    },
+    {
+      "path": "secret/secret_scoped.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 7,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "other": 5
+      }
+    },
+    {
+      "path": "secret/secret_table_function.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 8,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 1,
+        "other": 7
+      }
+    },
+    {
+      "path": "secret/secret_table_in_out.test",
+      "area": "authentication_secrets",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 6,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "other": 4
+      }
+    },
+    {
+      "path": "settings/filter_by_setting.test",
+      "area": "attach_settings",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 0,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "settings/multiply_by_setting.test",
+      "area": "attach_settings",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 0,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "settings/settings.test",
+      "area": "attach_settings",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 2,
+      "not_applicable": 7,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "other": 1
+      }
+    },
+    {
+      "path": "settings/settings_types.test",
+      "area": "attach_settings",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 1,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 3,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "settings/struct_settings.test",
+      "area": "attach_settings",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 0,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "simple_writable/delete.test",
+      "area": "writes",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "simple_writable/insert.test",
+      "area": "writes",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "simple_writable/insert_returning.test",
+      "area": "writes",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "simple_writable/returning_validation.test",
+      "area": "writes",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "simple_writable/update.test",
+      "area": "writes",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/batch_index.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/cache_interaction.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 5,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "other": 1
+      }
+    },
+    {
+      "path": "splits/cancel_midsplit.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 5,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 4
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 5
+      }
+    },
+    {
+      "path": "splits/cursor_pagination.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/dynamic_filters.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 14,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 10,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/errors.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 3,
+      "executed": 5,
+      "failed": 2,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "splits/expired_token.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 3,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/more_splits_than_threads.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/multi_branch.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 8,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "other": 6
+      }
+    },
+    {
+      "path": "splits/one_split.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/parity.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 7,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/partition_values.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 7,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/plan_bounds.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 2,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/poisoned_conn.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 3,
+      "executed": 7,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/pushdown.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/rollback.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 1,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/skew.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 4,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/transaction_scope.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 6,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 6
+      }
+    },
+    {
+      "path": "splits/ttl_floor.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 4,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/zero_row_split.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "splits/zero_splits.test",
+      "area": "splits",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/arg_validation.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 8,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/batch_index.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 44,
+      "expected_errors_ignored": 0,
+      "executed": 31,
+      "failed": 8,
+      "not_applicable": 5,
+      "timed_out": 0,
+      "values": {
+        "exact": 18,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 7
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "parse error (dialect)": 1,
+        "other": 6
+      }
+    },
+    {
+      "path": "table/batch_index_contract.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 3,
+      "executed": 2,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/batch_index_pushdown.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "executed": 14,
+      "failed": 2,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 1
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 1,
+        "type / signature mismatch": 1
+      }
+    },
+    {
+      "path": "table/column_statistics.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 74,
+      "expected_errors_ignored": 0,
+      "executed": 22,
+      "failed": 52,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 7,
+        "rendering_equivalent": 0,
+        "different": 14,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 50,
+        "worker refused the bind": 2
+      }
+    },
+    {
+      "path": "table/comments.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 10,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 10
+      }
+    },
+    {
+      "path": "table/constant_columns.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 129,
+      "expected_errors_ignored": 0,
+      "executed": 71,
+      "failed": 58,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 62,
+        "rendering_equivalent": 2,
+        "different": 0,
+        "unordered_subset": 5
+      },
+      "failure_buckets": {
+        "worker refused the bind": 57,
+        "other": 1
+      }
+    },
+    {
+      "path": "table/constant_columns_types.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 69,
+      "expected_errors_ignored": 0,
+      "executed": 13,
+      "failed": 55,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 9,
+        "rendering_equivalent": 1,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 9,
+        "worker refused the bind": 22,
+        "other": 24
+      }
+    },
+    {
+      "path": "table/constraints.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 12,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 12
+      }
+    },
+    {
+      "path": "table/constraints_time_travel.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 5,
+      "executed": 7,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "table/database_tags.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 3,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3
+      }
+    },
+    {
+      "path": "table/defaults.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4
+      }
+    },
+    {
+      "path": "table/double_sequence.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 85,
+      "expected_errors_ignored": 0,
+      "executed": 62,
+      "failed": 23,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 60,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 23
+      }
+    },
+    {
+      "path": "table/dynamic_filter.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 23,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 13,
+        "rendering_equivalent": 0,
+        "different": 4,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/dynamic_to_string.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 21,
+      "expected_errors_ignored": 0,
+      "executed": 16,
+      "failed": 1,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 13,
+        "unordered_subset": 1
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "table/expression_filter.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 21,
+      "expected_errors_ignored": 0,
+      "executed": 13,
+      "failed": 8,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 9,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "type / signature mismatch": 8
+      }
+    },
+    {
+      "path": "table/filter_echo.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 33,
+      "expected_errors_ignored": 0,
+      "executed": 32,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 24,
+        "rendering_equivalent": 0,
+        "different": 6,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 1
+      }
+    },
+    {
+      "path": "table/filter_echo_partitioned.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 17,
+      "failed": 2,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 14,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "other": 1
+      }
+    },
+    {
+      "path": "table/filter_pushdown.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 60,
+      "expected_errors_ignored": 0,
+      "executed": 51,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 46,
+        "rendering_equivalent": 1,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "type / signature mismatch": 3,
+        "other": 6
+      }
+    },
+    {
+      "path": "table/filter_pushdown_through_view.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 34,
+      "expected_errors_ignored": 0,
+      "executed": 34,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 17,
+        "rendering_equivalent": 0,
+        "different": 9,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/filtered_columns_pushdown.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 1,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/function_registration.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 22,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 20,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 20
+      }
+    },
+    {
+      "path": "table/generated_columns.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 6,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "worker refused the bind": 5
+      }
+    },
+    {
+      "path": "table/generator_exception.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 3,
+      "executed": 2,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/inlined_cardinality.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 1,
+      "failed": 5,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3,
+        "other": 2
+      }
+    },
+    {
+      "path": "table/inlined_scan_function.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 5,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 4,
+        "worker refused the bind": 1
+      }
+    },
+    {
+      "path": "table/join_keys_pushdown.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 18,
+      "failed": 1,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 1
+      },
+      "failure_buckets": {
+        "type / signature mismatch": 1
+      }
+    },
+    {
+      "path": "table/joins.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 24,
+      "expected_errors_ignored": 1,
+      "executed": 4,
+      "failed": 10,
+      "not_applicable": 9,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 7,
+        "other": 3
+      }
+    },
+    {
+      "path": "table/late_materialization.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 53,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 33,
+      "not_applicable": 18,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 5,
+        "type / signature mismatch": 3,
+        "other": 25
+      }
+    },
+    {
+      "path": "table/logging_generator.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 7,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 7
+      }
+    },
+    {
+      "path": "table/named_params.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 0,
+      "executed": 20,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 17,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/order_preservation_modes.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 3,
+      "not_applicable": 5,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 3
+      }
+    },
+    {
+      "path": "table/order_pushdown.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 18,
+      "expected_errors_ignored": 0,
+      "executed": 18,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 11,
+        "unordered_subset": 1
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/partition_columns.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 22,
+      "expected_errors_ignored": 0,
+      "executed": 18,
+      "failed": 0,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 9,
+        "rendering_equivalent": 1,
+        "different": 5,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/partition_columns_contract.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 4,
+      "executed": 2,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/partitioned_sequence.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 54,
+      "expected_errors_ignored": 0,
+      "executed": 35,
+      "failed": 9,
+      "not_applicable": 10,
+      "timed_out": 0,
+      "values": {
+        "exact": 26,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 7
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "other": 7
+      }
+    },
+    {
+      "path": "table/positional_args.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 4,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/projected_data.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 35,
+      "expected_errors_ignored": 0,
+      "executed": 35,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 32,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/projection_info.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 11,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 9,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/required_filters_above_get.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/required_filters_basic.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 5,
+      "executed": 6,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 1
+      }
+    },
+    {
+      "path": "table/required_filters_complex.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 5,
+      "executed": 10,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/required_filters_disjunction_null.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 2,
+      "executed": 5,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/required_filters_native.test",
+      "area": "table_scans",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/required_filters_or_group.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 1,
+      "executed": 4,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "table/required_filters_prefix.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 3,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 3
+      }
+    },
+    {
+      "path": "table/required_filters_rowid.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 2,
+      "executed": 3,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 1
+      }
+    },
+    {
+      "path": "table/required_filters_struct.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 5,
+      "executed": 5,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/rowid.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 2,
+      "executed": 5,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 1
+      },
+      "failure_buckets": {
+        "other": 9
+      }
+    },
+    {
+      "path": "table/sequence.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 103,
+      "expected_errors_ignored": 0,
+      "executed": 91,
+      "failed": 12,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 80,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 9
+      },
+      "failure_buckets": {
+        "other": 12
+      }
+    },
+    {
+      "path": "table/set_operations_and_subqueries.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 16,
+      "failed": 6,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 15,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "type / signature mismatch": 1,
+        "other": 5
+      }
+    },
+    {
+      "path": "table/table_function_statistics.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "executed": 16,
+      "failed": 1,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 12,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1
+      }
+    },
+    {
+      "path": "table/tablesample.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 7,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 7
+      }
+    },
+    {
+      "path": "table/time_travel.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 20,
+      "expected_errors_ignored": 9,
+      "executed": 11,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 10,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/time_travel_pushdown.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 21,
+      "expected_errors_ignored": 0,
+      "executed": 19,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 17,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table/transaction_storage.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 15,
+      "failed": 8,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 5,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 8
+      }
+    },
+    {
+      "path": "table/typed_probe.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "other": 1
+      }
+    },
+    {
+      "path": "table/union_varargs.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 6,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 6
+      }
+    },
+    {
+      "path": "table/value_prune.test",
+      "area": "table_scans",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 16,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 13,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/blended.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 22,
+      "expected_errors_ignored": 3,
+      "executed": 11,
+      "failed": 8,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "other": 7
+      }
+    },
+    {
+      "path": "table_in_out/buffer_input/basic.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 7,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 4
+      }
+    },
+    {
+      "path": "table_in_out/buffer_input/sizes.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 11,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 9,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 2
+      }
+    },
+    {
+      "path": "table_in_out/distributed_sum.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 7,
+      "failed": 4,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 4
+      }
+    },
+    {
+      "path": "table_in_out/echo/all_types.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 12,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "other": 10
+      }
+    },
+    {
+      "path": "table_in_out/echo/basic.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 22,
+      "expected_errors_ignored": 0,
+      "executed": 15,
+      "failed": 7,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 11,
+        "rendering_equivalent": 1,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 7
+      }
+    },
+    {
+      "path": "table_in_out/echo/bool_in_union.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 10,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 5,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 5
+      }
+    },
+    {
+      "path": "table_in_out/echo/lateral_projection.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 9
+      }
+    },
+    {
+      "path": "table_in_out/echo/nested_type_combinations.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 75,
+      "expected_errors_ignored": 0,
+      "executed": 31,
+      "failed": 43,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 15,
+        "rendering_equivalent": 4,
+        "different": 10,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 14,
+        "other": 29
+      }
+    },
+    {
+      "path": "table_in_out/echo/projection_filters.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 42,
+      "expected_errors_ignored": 0,
+      "executed": 16,
+      "failed": 26,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 13,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 26
+      }
+    },
+    {
+      "path": "table_in_out/echo/pushdown_witness.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 13,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 13
+      }
+    },
+    {
+      "path": "table_in_out/echo/union_tags.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 8,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 5,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 5
+      }
+    },
+    {
+      "path": "table_in_out/exceptions.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 4,
+      "executed": 2,
+      "failed": 1,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 1
+      }
+    },
+    {
+      "path": "table_in_out/function_registration.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 14,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 14
+      }
+    },
+    {
+      "path": "table_in_out/lateral_batch.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 30,
+      "expected_errors_ignored": 3,
+      "executed": 2,
+      "failed": 16,
+      "not_applicable": 9,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "other": 15
+      }
+    },
+    {
+      "path": "table_in_out/lateral_dedup.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 10,
+      "not_applicable": 11,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "other": 8
+      }
+    },
+    {
+      "path": "table_in_out/logging.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "executed": 5,
+      "failed": 9,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 5,
+        "other": 4
+      }
+    },
+    {
+      "path": "table_in_out/multi_batch_finalize.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 1,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 6,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 1
+      }
+    },
+    {
+      "path": "table_in_out/parallel_fanout.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 3,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 2
+      },
+      "failure_buckets": {
+        "other": 3
+      }
+    },
+    {
+      "path": "table_in_out/parallel_finalize.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 0,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 4,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/repeat_inputs/basic.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 16,
+      "expected_errors_ignored": 0,
+      "executed": 13,
+      "failed": 3,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 11,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 3
+      }
+    },
+    {
+      "path": "table_in_out/repeat_inputs/types.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 8,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2,
+        "other": 6
+      }
+    },
+    {
+      "path": "table_in_out/same_name_schemas.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 2,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "table_in_out/sum_all_columns.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 23,
+      "expected_errors_ignored": 2,
+      "executed": 12,
+      "failed": 9,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 10,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 9
+      }
+    },
+    {
+      "path": "table_in_out/table_buffering_combine_crash.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 2,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_concurrent.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_finalize_crash.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 5,
+      "expected_errors_ignored": 2,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_input_batch_index.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "executed": 11,
+      "failed": 2,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "type / signature mismatch": 1
+      }
+    },
+    {
+      "path": "table_in_out/table_buffering_large_batch.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_large_state.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 7,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 0,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 2,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_lateral.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 3,
+      "expected_errors_ignored": 0,
+      "executed": 3,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 1,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_parallel.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 21,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 6,
+      "not_applicable": 6,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 6
+      }
+    },
+    {
+      "path": "table_in_out/table_buffering_pool_recovery.test",
+      "area": "table_input",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_pool_rotation.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 13,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 2,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "table_in_out/table_buffering_projection_filters.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 31,
+      "expected_errors_ignored": 0,
+      "executed": 9,
+      "failed": 22,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 6,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "other": 22
+      }
+    },
+    {
+      "path": "table_in_out/table_buffering_recursive_cte.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 4,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_sink_order.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 2,
+      "not_applicable": 4,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 2
+      }
+    },
+    {
+      "path": "table_in_out/table_buffering_source_order.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 11,
+      "expected_errors_ignored": 0,
+      "executed": 8,
+      "failed": 0,
+      "not_applicable": 3,
+      "timed_out": 0,
+      "values": {
+        "exact": 5,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_union.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 6,
+      "expected_errors_ignored": 0,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 4,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/table_buffering_worker_crash.test",
+      "area": "table_input",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/tableinout_multibatch_repro.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 12,
+      "expected_errors_ignored": 0,
+      "executed": 10,
+      "failed": 0,
+      "not_applicable": 2,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/tableinout_multibatch_repro_rust.test",
+      "area": "table_input",
+      "skipped": true,
+      "records": 0,
+      "expected_errors_ignored": 0,
+      "executed": 0,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "table_in_out/unnest_tensor_rows.test",
+      "area": "table_input",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 4,
+      "failed": 9,
+      "not_applicable": 1,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 1,
+        "other": 8
+      }
+    },
+    {
+      "path": "unary_error_propagation.test",
+      "area": "regression_contracts",
+      "skipped": false,
+      "records": 9,
+      "expected_errors_ignored": 4,
+      "executed": 5,
+      "failed": 0,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 3,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {}
+    },
+    {
+      "path": "view/views.test",
+      "area": "catalog_metadata",
+      "skipped": false,
+      "records": 14,
+      "expected_errors_ignored": 0,
+      "executed": 2,
+      "failed": 12,
+      "not_applicable": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 0,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 1,
+        "worker refused the bind": 3,
+        "other": 8
+      }
+    }
+  ]
+}
