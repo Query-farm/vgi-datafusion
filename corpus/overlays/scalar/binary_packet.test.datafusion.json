@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 16,
+      "original_sql": "SELECT octet_length(example.binary_packet('\\xAA\\xBB'::BLOB, '\\xCC'::BLOB, {label: 'x', version: 1}));",
+      "replacement_sql": "SELECT octet_length(encode(example.binary_packet('\\xAA\\xBB'::BLOB, '\\xCC'::BLOB, {label: 'x', version: 1}), 'hex')) / 2;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's built-in octet_length accepts strings; encode the Binary result as two hex characters per byte and divide by two."
+    }
+  ]
+}

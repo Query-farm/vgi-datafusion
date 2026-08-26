@@ -25,6 +25,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::stream::{self, StreamExt};
@@ -36,6 +37,14 @@ enum Record {
     Statement { sql: String, expect_ok: bool },
     /// `query <types>` with its expected rows
     Query { sql: String, expected: Vec<String> },
+}
+
+impl Record {
+    fn sql(&self) -> &str {
+        match self {
+            Self::Statement { sql, .. } | Self::Query { sql, .. } => sql,
+        }
+    }
 }
 
 /// Why a record failed, coarse enough to act on.
@@ -144,6 +153,8 @@ struct Tally {
     /// Expected-error statements are syntax/error-contract tests, not positive
     /// capability evidence, so they are recorded but excluded from rates.
     expected_errors_ignored: usize,
+    adapted_records: usize,
+    blocked: usize,
 }
 
 impl Tally {
@@ -159,6 +170,8 @@ impl Tally {
         self.values_unordered_subset += other.values_unordered_subset;
         self.values_differed += other.values_differed;
         self.expected_errors_ignored += other.expected_errors_ignored;
+        self.adapted_records += other.adapted_records;
+        self.blocked += other.blocked;
         for (bucket, count) in other.buckets {
             *self.buckets.entry(bucket).or_default() += count;
         }
@@ -183,6 +196,8 @@ struct FileTally {
     skipped: bool,
     records: usize,
     expected_errors_ignored: usize,
+    adapted_records: usize,
+    blocked: usize,
     executed: usize,
     failed: usize,
     not_applicable: usize,
@@ -192,6 +207,7 @@ struct FileTally {
     values_unordered_subset: usize,
     values_differed: usize,
     buckets: BTreeMap<Bucket, usize>,
+    adaptations: Vec<AppliedAdaptation>,
 }
 
 #[derive(Clone)]
@@ -202,6 +218,58 @@ struct Area {
     groups: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayKind {
+    EquivalentSql,
+    OutOfScope,
+    Blocked,
+}
+
+impl OverlayKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "equivalent_sql" => Ok(Self::EquivalentSql),
+            "out_of_scope" => Ok(Self::OutOfScope),
+            "blocked" => Ok(Self::Blocked),
+            other => Err(format!(
+                "overlay kind must be equivalent_sql, out_of_scope, or blocked; found {other:?}"
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::EquivalentSql => "equivalent_sql",
+            Self::OutOfScope => "out_of_scope",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecordOverlay {
+    record: usize,
+    original_sql: String,
+    replacement_sql: Option<String>,
+    kind: OverlayKind,
+    reason: String,
+    issue: Option<String>,
+    overlay_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct AppliedAdaptation {
+    record: usize,
+    mechanism: String,
+    kind: String,
+    reason: String,
+    issue: Option<String>,
+    original_sql: String,
+    replacement_sql: Option<String>,
+}
+
+type OverlayMap = BTreeMap<String, Vec<RecordOverlay>>;
+
 /// Do two result sets agree once DuckDB's *rendering* conventions are allowed
 /// for?
 ///
@@ -211,6 +279,7 @@ struct Area {
 /// * an empty string prints as `(empty)`;
 /// * struct keys are quoted — `{'lat': 3.0}` against `{lat: 3.0}`;
 /// * map entries use `=` — `{a=1}` against Arrow's `{a: 1}`;
+/// * BLOB bytes use mixed `\\xHH`/printable text against Arrow's hexadecimal;
 /// * floats print at shortest-round-trip — `0.0003` against Arrow's
 ///   `0.00030000000000000003`, which are the same double.
 ///
@@ -261,7 +330,7 @@ fn explain_rows_agree(expected: &[String], got: &[String]) -> bool {
 
 #[cfg(test)]
 mod rendering_tests {
-    use super::{agrees_modulo_rendering, cells_agree};
+    use super::{adapt_duckdb_binary_sql, agrees_modulo_rendering, cells_agree};
 
     #[test]
     fn matches_equivalent_datafusion_plan_nodes_without_masking_missing_pruning() {
@@ -305,6 +374,40 @@ mod rendering_tests {
         assert!(cells_agree("nan", "NaN"));
         assert!(!cells_agree("{a=1}", "{a: 2}"));
         assert!(!cells_agree("nan", "1"));
+    }
+
+    #[test]
+    fn matches_blob_bytes_without_masking_different_bytes() {
+        assert!(cells_agree(r"\xFF\xEE\xDD", "ffeedd"));
+        // DuckDB escapes the non-printable DE byte and prints the remaining
+        // ASCII bytes literally; Arrow prints every byte as hexadecimal.
+        assert!(cells_agree(r"\xDEADBEEF", "de414442454546"));
+        assert!(cells_agree(r"{\xDE\xAD=x}", "{dead: x}"));
+        assert!(!cells_agree(r"\xDE\xAD", "deaf"));
+        assert!(!cells_agree(r"{\xDE\xAD=x}", "{beef: x}"));
+    }
+
+    #[test]
+    fn adapts_duckdb_binary_syntax_only_in_the_corpus_harness() {
+        let adapted = adapt_duckdb_binary_sql(r"SELECT hex('\xCA\xFE'::BLOB)")
+            .expect("valid adaptation")
+            .expect("binary syntax changed");
+        assert!(
+            adapted.contains("upper(encode(X'cafe', 'hex'))"),
+            "{adapted}"
+        );
+
+        let dynamic = adapt_duckdb_binary_sql("SELECT payload::BLOB FROM packets")
+            .expect("valid adaptation")
+            .expect("binary type changed");
+        assert!(dynamic.contains("payload::BYTEA"), "{dynamic}");
+
+        assert!(
+            adapt_duckdb_binary_sql("SELECT custom.hex(payload) FROM packets")
+                .expect("valid SQL")
+                .is_none(),
+            "qualified application function must not be rewritten"
+        );
     }
 }
 
@@ -387,11 +490,76 @@ fn normalize_timestamp(s: &str) -> String {
 
 /// Put DuckDB and Arrow composite-value renderings on common ground.
 fn normalize_composite(s: &str) -> String {
-    let normalized = normalize_map_separators(s)
+    let normalized = normalize_blob_tokens(&normalize_map_separators(s))
         .replace("{'", "{")
         .replace(", '", ", ")
         .replace("': ", ": ");
     normalize_embedded_timestamps(&normalized)
+}
+
+/// Normalize DuckDB's BLOB display to Arrow's lowercase hexadecimal display.
+///
+/// DuckDB escapes non-printable bytes as `\\xHH` but leaves printable bytes
+/// alone, so `DE 41 44` appears as `\\xDEAD`. Arrow displays the same bytes as
+/// `de4144`. Only tokens whose first non-space characters are a valid escape
+/// are treated as binary; ordinary words and hexadecimal-looking strings are
+/// left untouched.
+fn normalize_blob_tokens(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0usize;
+    let mut token_start = true;
+    while i < bytes.len() {
+        if token_start && bytes[i].is_ascii_whitespace() {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        if token_start
+            && i + 3 < bytes.len()
+            && bytes[i] == b'\\'
+            && bytes[i + 1] == b'x'
+            && bytes[i + 2].is_ascii_hexdigit()
+            && bytes[i + 3].is_ascii_hexdigit()
+        {
+            let start = i;
+            while i < bytes.len() && !matches!(bytes[i], b',' | b':' | b'=' | b'}' | b']') {
+                i += 1;
+            }
+            let token = &bytes[start..i];
+            let mut decoded = Vec::with_capacity(token.len());
+            let mut j = 0usize;
+            while j < token.len() {
+                if j + 3 < token.len()
+                    && token[j] == b'\\'
+                    && token[j + 1] == b'x'
+                    && token[j + 2].is_ascii_hexdigit()
+                    && token[j + 3].is_ascii_hexdigit()
+                {
+                    let pair =
+                        std::str::from_utf8(&token[j + 2..j + 4]).expect("ASCII hex pair checked");
+                    decoded.push(u8::from_str_radix(pair, 16).expect("ASCII hex pair checked"));
+                    j += 4;
+                } else {
+                    decoded.push(token[j]);
+                    j += 1;
+                }
+            }
+            for byte in decoded {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                out.push(HEX[(byte >> 4) as usize]);
+                out.push(HEX[(byte & 0x0f) as usize]);
+            }
+            token_start = false;
+            continue;
+        }
+
+        let byte = bytes[i];
+        out.push(byte);
+        token_start = matches!(byte, b'{' | b'[' | b',' | b':' | b'=');
+        i += 1;
+    }
+    String::from_utf8(out).expect("normalization preserves UTF-8 outside ASCII BLOB tokens")
 }
 
 fn normalize_embedded_timestamps(s: &str) -> String {
@@ -493,6 +661,10 @@ struct Mismatch {
 /// not DuckDB, and a file requiring `httpfs` may still exercise VGI surfaces.
 fn parse(path: &Path) -> Option<Vec<Record>> {
     let text = std::fs::read_to_string(path).ok()?;
+    parse_text(&text, true)
+}
+
+fn parse_text(text: &str, honor_require_env: bool) -> Option<Vec<Record>> {
     let mut records = Vec::new();
     let mut lines = text.lines().peekable();
 
@@ -502,7 +674,7 @@ fn parse(path: &Path) -> Option<Vec<Record>> {
             continue;
         }
         if let Some(var) = line.strip_prefix("require-env ") {
-            if std::env::var(var.trim()).is_err() {
+            if honor_require_env && std::env::var(var.trim()).is_err() {
                 return None;
             }
             continue;
@@ -565,6 +737,149 @@ fn expand(sql: &str) -> String {
     out
 }
 
+/// Apply a generic, harness-only DuckDB binary dialect adaptation.
+///
+/// This deliberately does not live in `vgi_datafusion::sql`: DataFusion users
+/// can write Arrow Binary as `BYTEA`/hex literals and format it with
+/// `encode(value, 'hex')`. The shared protocol corpus uses DuckDB's BLOB and
+/// unary `hex()` spellings, so translate those only while measuring the corpus.
+fn adapt_duckdb_binary_sql(sql: &str) -> Result<Option<String>, String> {
+    use datafusion::sql::parser::{DFParser, Statement as DFStatement};
+    use datafusion::sql::sqlparser::ast::{
+        DataType as SQLDataType, Expr as SQLExpr, Function as SQLFunction, FunctionArg,
+        FunctionArgExpr, FunctionArgumentList, FunctionArguments, Ident, ObjectName,
+        ObjectNamePart, Value, VisitMut, VisitorMut,
+    };
+    use std::ops::ControlFlow;
+
+    struct Rewrite {
+        changed: bool,
+    }
+
+    impl VisitorMut for Rewrite {
+        type Break = String;
+
+        fn post_visit_expr(&mut self, expr: &mut SQLExpr) -> ControlFlow<Self::Break> {
+            if let SQLExpr::Cast {
+                expr: value,
+                data_type: data_type @ SQLDataType::Blob(_),
+                ..
+            } = expr
+            {
+                if let SQLExpr::Value(value) = value.as_ref() {
+                    if let Value::SingleQuotedString(text) = &value.value {
+                        let bytes = match decode_duckdb_blob_text(text) {
+                            Ok(bytes) => bytes,
+                            Err(error) => return ControlFlow::Break(error),
+                        };
+                        let hex = bytes
+                            .into_iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>();
+                        *expr = SQLExpr::value(Value::HexStringLiteral(hex));
+                        self.changed = true;
+                        return ControlFlow::Continue(());
+                    }
+                }
+                *data_type = SQLDataType::Bytea;
+                self.changed = true;
+                return ControlFlow::Continue(());
+            }
+
+            let SQLExpr::Function(function) = expr else {
+                return ControlFlow::Continue(());
+            };
+            let [name] = function.name.0.as_slice() else {
+                return ControlFlow::Continue(());
+            };
+            if !name
+                .as_ident()
+                .is_some_and(|name| name.value.eq_ignore_ascii_case("hex"))
+                || !matches!(function.parameters, FunctionArguments::None)
+                || function.filter.is_some()
+                || function.null_treatment.is_some()
+                || function.over.is_some()
+                || !function.within_group.is_empty()
+            {
+                return ControlFlow::Continue(());
+            }
+            let FunctionArguments::List(arguments) = &mut function.args else {
+                return ControlFlow::Continue(());
+            };
+            if arguments.args.len() != 1
+                || arguments.duplicate_treatment.is_some()
+                || !arguments.clauses.is_empty()
+            {
+                return ControlFlow::Continue(());
+            }
+
+            function.name = ObjectName(vec![ObjectNamePart::Identifier(Ident::new("encode"))]);
+            arguments
+                .args
+                .push(FunctionArg::Unnamed(FunctionArgExpr::Expr(SQLExpr::value(
+                    Value::SingleQuotedString("hex".to_string()),
+                ))));
+            let encode = expr.clone();
+            *expr = SQLExpr::Function(SQLFunction {
+                name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("upper"))]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(encode))],
+                    clauses: vec![],
+                }),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            });
+            self.changed = true;
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut statements = match DFParser::parse_sql(sql) {
+        Ok(statements) => statements,
+        // ATTACH's extended option list and deliberately unsupported DuckDB
+        // syntax still belong to the normal adapter/parser path.
+        Err(_) => return Ok(None),
+    };
+    if statements.len() != 1 {
+        return Ok(None);
+    }
+    let mut statement = statements.pop_front().expect("length checked");
+    let DFStatement::Statement(inner) = &mut statement else {
+        return Ok(None);
+    };
+    let mut rewrite = Rewrite { changed: false };
+    if let ControlFlow::Break(error) = inner.as_mut().visit(&mut rewrite) {
+        return Err(error);
+    }
+    Ok(rewrite.changed.then(|| statement.to_string()))
+}
+
+fn decode_duckdb_blob_text(value: &str) -> Result<Vec<u8>, String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if i + 3 < bytes.len() && bytes[i] == b'\\' && bytes[i + 1] == b'x' {
+            let hex = std::str::from_utf8(&bytes[i + 2..i + 4])
+                .map_err(|_| "invalid DuckDB BLOB escape".to_string())?;
+            out.push(
+                u8::from_str_radix(hex, 16)
+                    .map_err(|_| format!("invalid DuckDB BLOB escape `\\x{hex}`"))?,
+            );
+            i += 4;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
 /// Render a result set the way the corpus writes it: tab-separated, one row per
 /// line. Only used for the secondary value comparison.
 fn render(batches: &[datafusion::arrow::array::RecordBatch]) -> Vec<String> {
@@ -589,7 +904,7 @@ fn render(batches: &[datafusion::arrow::array::RecordBatch]) -> Vec<String> {
     rows
 }
 
-async fn run_file(path: &Path, tally: &mut Tally) {
+async fn run_file(path: &Path, tally: &mut Tally, overlays: Option<&[RecordOverlay]>) {
     let file_label = corpus_relative(path);
     let group = corpus_group(&file_label).to_string();
     let Some(records) = parse(path) else {
@@ -622,12 +937,9 @@ async fn run_file(path: &Path, tally: &mut Tally) {
     // default. Leaving it off here misclassifies supported VGI metadata as an
     // adapter failure.
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
-    for record in records {
+    for (record_offset, record) in records.into_iter().enumerate() {
+        let record_number = record_offset + 1;
         file.records += 1;
-        let (sql, expected) = match &record {
-            Record::Statement { sql, .. } => (expand(sql), None),
-            Record::Query { sql, expected } => (expand(sql), Some(expected)),
-        };
 
         // A statement the corpus expects to fail is not evidence either way
         // about this adapter, so it is not counted.
@@ -642,6 +954,64 @@ async fn run_file(path: &Path, tally: &mut Tally) {
             file.expected_errors_ignored += 1;
             continue;
         }
+
+        let overlay = overlays
+            .unwrap_or_default()
+            .iter()
+            .find(|overlay| overlay.record == record_number);
+        if let Some(overlay) = overlay {
+            file.adaptations.push(AppliedAdaptation {
+                record: record_number,
+                mechanism: overlay.overlay_path.clone(),
+                kind: overlay.kind.label().to_string(),
+                reason: overlay.reason.clone(),
+                issue: overlay.issue.clone(),
+                original_sql: overlay.original_sql.clone(),
+                replacement_sql: overlay.replacement_sql.clone(),
+            });
+            match overlay.kind {
+                OverlayKind::OutOfScope => {
+                    tally.not_applicable += 1;
+                    file.not_applicable += 1;
+                    continue;
+                }
+                OverlayKind::Blocked => {
+                    tally.blocked += 1;
+                    file.blocked += 1;
+                    continue;
+                }
+                OverlayKind::EquivalentSql => {}
+            }
+        }
+
+        let original_sql = record.sql();
+        let selected_sql = overlay
+            .and_then(|overlay| overlay.replacement_sql.as_deref())
+            .unwrap_or(original_sql);
+        let mut sql = expand(selected_sql);
+        let mut adapted = overlay.is_some();
+        if let Ok(Some(binary_sql)) = adapt_duckdb_binary_sql(&sql) {
+            file.adaptations.push(AppliedAdaptation {
+                record: record_number,
+                mechanism: "builtin:duckdb_binary".to_string(),
+                kind: OverlayKind::EquivalentSql.label().to_string(),
+                reason: "DuckDB BLOB/hex syntax mapped to DataFusion Binary/encode semantics"
+                    .to_string(),
+                issue: None,
+                original_sql: sql.clone(),
+                replacement_sql: Some(binary_sql.clone()),
+            });
+            sql = binary_sql;
+            adapted = true;
+        }
+        if adapted {
+            tally.adapted_records += 1;
+            file.adapted_records += 1;
+        }
+        let expected = match &record {
+            Record::Statement { .. } => None,
+            Record::Query { expected, .. } => Some(expected),
+        };
 
         // One slow record must not dominate the report. Some fixtures move a
         // lot of data on purpose, and this is a survey of what *works*, not a
@@ -820,6 +1190,152 @@ fn collect_tests(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn overlay_path(root: &Path, source: &Path) -> Option<PathBuf> {
+    let relative = corpus_relative(source);
+    let relative = Path::new(&relative);
+    if relative.is_absolute()
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        })
+    {
+        return None;
+    }
+    Some(root.join(format!("{}.datafusion.json", relative.display())))
+}
+
+/// Load sparse DataFusion substitutions while keeping the upstream test as the
+/// sole source of record order and expected rows.
+///
+/// `original_sql` is deliberately exact: an upstream edit makes the overlay
+/// stale and aborts the selected run instead of silently applying a replacement
+/// to a different assertion.
+fn load_overlays(files: &[PathBuf], root: Option<&Path>) -> Result<OverlayMap, String> {
+    let Some(root) = root else {
+        return Ok(BTreeMap::new());
+    };
+    let mut overlays = BTreeMap::new();
+    for source in files {
+        let Some(path) = overlay_path(root, source) else {
+            continue;
+        };
+        if !path.exists() {
+            continue;
+        }
+        let source_text = std::fs::read_to_string(source)
+            .map_err(|error| format!("could not read {}: {error}", source.display()))?;
+        let records = parse_text(&source_text, false)
+            .ok_or_else(|| format!("could not parse records from {}", source.display()))?;
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("could not read overlay {}: {error}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("invalid overlay {}: {error}", path.display()))?;
+        if value.get("schema_version").and_then(|value| value.as_u64()) != Some(1) {
+            return Err(format!(
+                "overlay {} must declare schema_version 1",
+                path.display()
+            ));
+        }
+        let entries = value
+            .get("records")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("overlay {} must contain a records array", path.display()))?;
+        let mut by_record = BTreeMap::new();
+        for entry in entries {
+            let record = entry
+                .get("record")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    format!(
+                        "overlay {} has a record without a positive 1-based index",
+                        path.display()
+                    )
+                })?;
+            let string = |name: &str| {
+                entry
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        format!(
+                            "overlay {} record {record} is missing string {name:?}",
+                            path.display()
+                        )
+                    })
+            };
+            let original_sql = string("original_sql")?;
+            let kind = OverlayKind::parse(&string("kind")?)?;
+            let reason = string("reason")?;
+            if reason.trim().is_empty() {
+                return Err(format!(
+                    "overlay {} record {record} has an empty reason",
+                    path.display()
+                ));
+            }
+            let replacement_sql = entry
+                .get("replacement_sql")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            if kind == OverlayKind::EquivalentSql
+                && replacement_sql.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(format!(
+                    "overlay {} record {record} equivalent_sql requires replacement_sql",
+                    path.display()
+                ));
+            }
+            if kind != OverlayKind::EquivalentSql && replacement_sql.is_some() {
+                return Err(format!(
+                    "overlay {} record {record} {} must not replace SQL",
+                    path.display(),
+                    kind.label()
+                ));
+            }
+            let source_record = records.get(record - 1).ok_or_else(|| {
+                format!(
+                    "overlay {} targets record {record}, but {} has only {} records",
+                    path.display(),
+                    source.display(),
+                    records.len()
+                )
+            })?;
+            if source_record.sql() != original_sql {
+                return Err(format!(
+                    "stale overlay {} record {record}: original_sql no longer matches {}\n  overlay: {}\n  source:  {}",
+                    path.display(),
+                    source.display(),
+                    first_line(&original_sql),
+                    first_line(source_record.sql())
+                ));
+            }
+            let overlay = RecordOverlay {
+                record,
+                original_sql,
+                replacement_sql,
+                kind,
+                reason,
+                issue: entry
+                    .get("issue")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                overlay_path: path.display().to_string(),
+            };
+            if by_record.insert(record, overlay).is_some() {
+                return Err(format!(
+                    "overlay {} contains duplicate record {record}",
+                    path.display()
+                ));
+            }
+        }
+        overlays.insert(corpus_relative(source), by_record.into_values().collect());
+    }
+    Ok(overlays)
+}
+
 fn load_manifest(path: &Path) -> Result<Vec<Area>, String> {
     let bytes = std::fs::read(path).map_err(|e| {
         format!(
@@ -920,15 +1436,32 @@ fn write_json_report(
                 .iter()
                 .map(|(bucket, count)| (bucket.label().to_string(), json!(count)))
                 .collect::<serde_json::Map<_, _>>();
+            let adaptations = file
+                .adaptations
+                .iter()
+                .map(|adaptation| {
+                    json!({
+                        "record": adaptation.record,
+                        "mechanism": adaptation.mechanism,
+                        "kind": adaptation.kind,
+                        "reason": adaptation.reason,
+                        "issue": adaptation.issue,
+                        "original_sql": adaptation.original_sql,
+                        "replacement_sql": adaptation.replacement_sql,
+                    })
+                })
+                .collect::<Vec<_>>();
             json!({
                 "path": name,
                 "area": group_areas.get(corpus_group(name)),
                 "skipped": file.skipped,
                 "records": file.records,
                 "expected_errors_ignored": file.expected_errors_ignored,
+                "adapted_records": file.adapted_records,
                 "executed": file.executed,
                 "failed": file.failed,
                 "not_applicable": file.not_applicable,
+                "blocked": file.blocked,
                 "timed_out": file.timed_out,
                 "values": {
                     "exact": file.values_matched,
@@ -937,6 +1470,7 @@ fn write_json_report(
                     "unordered_subset": file.values_unordered_subset,
                 },
                 "failure_buckets": buckets,
+                "adaptations": adaptations,
             })
         })
         .collect::<Vec<_>>();
@@ -962,6 +1496,8 @@ fn write_json_report(
             let mut executed = 0usize;
             let mut failed = 0usize;
             let mut not_applicable = 0usize;
+            let mut adapted_records = 0usize;
+            let mut blocked = 0usize;
             let mut timed_out = 0usize;
             for (name, file) in &tally.files {
                 if group_areas.get(corpus_group(name)) == Some(&area.id) {
@@ -970,6 +1506,8 @@ fn write_json_report(
                     executed += file.executed;
                     failed += file.failed;
                     not_applicable += file.not_applicable;
+                    adapted_records += file.adapted_records;
+                    blocked += file.blocked;
                     timed_out += file.timed_out;
                 }
             }
@@ -983,6 +1521,8 @@ fn write_json_report(
                 "executed": executed,
                 "failed": failed,
                 "not_applicable": not_applicable,
+                "adapted_records": adapted_records,
+                "blocked": blocked,
                 "timed_out": timed_out,
             })
         })
@@ -995,7 +1535,7 @@ fn write_json_report(
         .collect::<serde_json::Map<_, _>>();
     let measured = tally.executed + tally.failed + tally.timed_out;
     let report = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "source_roots": roots.iter().map(|root| root.display().to_string()).collect::<Vec<_>>(),
         "source_files": source_files,
         "totals": {
@@ -1005,6 +1545,8 @@ fn write_json_report(
             "executed": tally.executed,
             "failed": tally.failed,
             "not_applicable": tally.not_applicable,
+            "adapted_records": tally.adapted_records,
+            "blocked": tally.blocked,
             "timed_out": tally.timed_out,
             "expected_errors_ignored": tally.expected_errors_ignored,
             "values": {
@@ -1120,6 +1662,11 @@ async fn main() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("corpus")
         .join("compatibility.json");
+    let mut overlay_root = Some(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("corpus")
+            .join("overlays"),
+    );
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1137,6 +1684,14 @@ async fn main() {
                 };
                 manifest_path = PathBuf::from(path);
             }
+            "--overlays" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--overlays requires a directory");
+                    std::process::exit(2);
+                };
+                overlay_root = Some(PathBuf::from(path));
+            }
+            "--no-overlays" => overlay_root = None,
             "--compare" | "--compare-selected" => {
                 let Some(path) = args.next() else {
                     eprintln!("{arg} requires a baseline report path");
@@ -1162,7 +1717,7 @@ async fn main() {
                 println!(
                     "Usage: corpus [--jobs N] [--json REPORT.json] \
                      [--compare BASELINE.json | --compare-selected BASELINE.json] \
-                     [--manifest compatibility.json] [PATH ...]"
+                     [--manifest compatibility.json] [--overlays DIR | --no-overlays] [PATH ...]"
                 );
                 return;
             }
@@ -1206,6 +1761,13 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    let overlays = match load_overlays(&files, overlay_root.as_deref()) {
+        Ok(overlays) => Arc::new(overlays),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
 
     if std::env::var("VGI_TEST_WORKER").is_err() {
         eprintln!("VGI_TEST_WORKER is not set — every file will skip.");
@@ -1213,13 +1775,17 @@ async fn main() {
 
     let file_count = files.len();
     let mut partials = stream::iter(files.into_iter().enumerate())
-        .map(|(i, file)| async move {
-            if i % 25 == 0 {
-                eprintln!("  [{i}/{file_count}] {}", file.display());
+        .map(|(i, file)| {
+            let overlays = Arc::clone(&overlays);
+            async move {
+                if i % 25 == 0 {
+                    eprintln!("  [{i}/{file_count}] {}", file.display());
+                }
+                let mut tally = Tally::default();
+                let label = corpus_relative(&file);
+                run_file(&file, &mut tally, overlays.get(&label).map(Vec::as_slice)).await;
+                (i, tally)
             }
-            let mut tally = Tally::default();
-            run_file(&file, &mut tally).await;
-            (i, tally)
         })
         .buffer_unordered(jobs)
         .collect::<Vec<_>>()
@@ -1257,6 +1823,18 @@ async fn main() {
         println!(
             "         {} not applicable (SET / PRAGMA / CALL — engine or extension config)",
             tally.not_applicable
+        );
+    }
+    if tally.blocked > 0 {
+        println!(
+            "         {} blocked by reviewed external fixtures",
+            tally.blocked
+        );
+    }
+    if tally.adapted_records > 0 {
+        println!(
+            "         {} records used reviewed DataFusion-equivalent SQL",
+            tally.adapted_records
         );
     }
     if tally.timed_out > 0 {

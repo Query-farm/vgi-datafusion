@@ -57,10 +57,59 @@ against their entries in the full committed baseline. Use ordinary `--compare`
 for promotion runs: it additionally rejects any baseline file missing from the
 new full report.
 
+## DataFusion SQL overlays
+
+The upstream `.test` file is the only copy of record order and expected rows.
+When DuckDB SQL has equivalent DataFusion semantics but cannot run unchanged,
+put a sparse sidecar at:
+
+```text
+corpus/overlays/<upstream-relative-path>.datafusion.json
+```
+
+For example, an adaptation for `scalar/example.test` lives at
+`corpus/overlays/scalar/example.test.datafusion.json`. Each entry identifies a
+1-based record, includes the exact original SQL as a drift guard, and records a
+reviewed replacement or an `out_of_scope`/`blocked` classification with its
+reason:
+
+```json
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 3,
+      "original_sql": "SELECT duckdb_specific_syntax();",
+      "replacement_sql": "SELECT datafusion_equivalent_syntax();",
+      "kind": "equivalent_sql",
+      "reason": "Both expressions have the same documented semantics."
+    }
+  ]
+}
+```
+
+The runner aborts when an entry is malformed, duplicated, targets a missing
+record, or its `original_sql` no longer matches upstream. Adaptations are listed
+per file and counted in the JSON report. Use `--no-overlays` to measure the
+generic harness adapters without reviewed per-record substitutions, or
+`--overlays DIR` to review a proposed overlay tree.
+
+Do not create full `.datafusion.test` copies for isolated syntax differences.
+They duplicate expected output and unchanged SQL, drift independently, and can
+be picked up by broad `*.test` discovery. A separate DataFusion-native fixture
+is appropriate only when nearly the entire setup or assertion contract differs.
+
 Files use independent DataFusion sessions, so `--jobs N` runs them concurrently
 while merging results back in source order. Keep `N` bounded on shared hosts;
 four workers is the EC2 default for corpus runs. A full run is reserved for
 baseline promotion rather than the inner development loop.
+
+Parallelize implementation by capability (adapter, overlays, classification,
+and verification), but serialize release linking and tests that share the same
+Cargo target directory. On the current EC2 host, increasing corpus concurrency
+from four to eight workers did not materially improve the table slice because a
+few large files dominate its wall time. Focused file lists are the fastest inner
+loop.
 
 For normal development, write a temporary report and compare it with the
 committed baseline. The command exits non-zero if an existing file executes
