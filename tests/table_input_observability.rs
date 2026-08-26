@@ -81,6 +81,39 @@ async fn writes(ctx: &SessionContext) -> datafusion::common::Result<Vec<(String,
     Ok(out)
 }
 
+async fn cache_ineligible(
+    ctx: &SessionContext,
+) -> datafusion::common::Result<Vec<(String, String)>> {
+    let batches = vgi_datafusion::sql(
+        ctx,
+        "SELECT function, message FROM vgi_logs() \
+         WHERE event = 'cache.ineligible' ORDER BY timestamp_ms",
+    )
+    .await?
+    .collect()
+    .await?;
+    let mut out = Vec::new();
+    for batch in batches {
+        let functions = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("function is Utf8");
+        let messages = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("message is Utf8");
+        for row in 0..batch.num_rows() {
+            out.push((
+                functions.value(row).to_string(),
+                messages.value(row).to_string(),
+            ));
+        }
+    }
+    Ok(out)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn table_input_writes_report_actual_batches_and_cache_hits_stay_silent(
 ) -> datafusion::common::Result<()> {
@@ -111,6 +144,20 @@ async fn table_input_writes_report_actual_batches_and_cache_hits_stay_silent(
             ("main.cached_echo".to_string(), "input_rows=5".to_string()),
             ("main.cached_echo".to_string(), "input_rows=5".to_string()),
         ]
+    );
+    assert_eq!(
+        cache_ineligible(&no_cache).await?,
+        vec![
+            (
+                "main.cached_echo".to_string(),
+                "reason=disabled_attach".to_string(),
+            ),
+            (
+                "main.cached_echo".to_string(),
+                "reason=disabled_attach".to_string(),
+            ),
+        ],
+        "each exchange execution must emit exactly one sanitized admission reason"
     );
     Ok(())
 }

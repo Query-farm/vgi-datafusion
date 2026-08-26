@@ -265,6 +265,23 @@ impl VgiConnection {
         vgi_client::auth::identity_scope(catalog, &identity, b"vgi-datafusion-result-cache:v1")
     }
 
+    fn cache_environment_ineligible_reason(
+        &self,
+        catalog: &str,
+    ) -> Option<crate::runtime::CacheIneligibleReason> {
+        use crate::runtime::CacheIneligibleReason;
+
+        if !self.runtime.options().cache_enabled {
+            Some(CacheIneligibleReason::DisabledGlobal)
+        } else if !self.cache_enabled {
+            Some(CacheIneligibleReason::DisabledAttach)
+        } else if self.cache_identity_scope(catalog).is_none() {
+            Some(CacheIneligibleReason::IdentityUnresolved)
+        } else {
+            None
+        }
+    }
+
     fn cache_attach_context(&self, catalog: &str) -> Vec<u8> {
         let Some(options) = self.attach_options.get(catalog) else {
             return Vec::new();
@@ -386,7 +403,7 @@ impl VgiConnection {
     /// when it drops, so callers keep writing `let mut client = conn.connect()?`
     /// and get reuse for free.
     pub fn connect(&self) -> DFResult<PooledClient> {
-        match &self.auth {
+        let mut client = match &self.auth {
             Some(auth) => self
                 .pool
                 .acquire_with_auth(
@@ -399,7 +416,15 @@ impl VgiConnection {
                 .pool
                 .acquire_with_options(&self.location, self.connection_options.clone())
                 .map_err(to_df),
-        }
+        }?;
+        let runtime = Arc::downgrade(&self.runtime);
+        client.set_worker_log_sink(Arc::new(move |message| {
+            let Some(runtime) = runtime.upgrade() else {
+                return;
+            };
+            runtime.emit(worker_log_event(&message));
+        }));
+        Ok(client)
     }
 
     /// The pool behind this connection, for stats or an explicit flush.
@@ -629,6 +654,31 @@ fn to_df(e: vgi_client::RpcError) -> DataFusionError {
     DataFusionError::External(Box::new(std::io::Error::other(e.to_string())))
 }
 
+fn worker_log_event_kind(level: vgi_client::WorkerLogLevel) -> &'static str {
+    use vgi_client::WorkerLogLevel;
+    match level {
+        WorkerLogLevel::Trace => "worker.log.trace",
+        WorkerLogLevel::Debug => "worker.log.debug",
+        WorkerLogLevel::Info => "worker.log.info",
+        WorkerLogLevel::Warn => "worker.log.warn",
+        WorkerLogLevel::Error | WorkerLogLevel::Exception => "worker.log.error",
+    }
+}
+
+fn format_worker_log_message(message: &vgi_client::WorkerLogMessage) -> String {
+    if message.extras.is_empty() {
+        message.message.clone()
+    } else {
+        format!("{} {}", message.message, message.extras_json())
+    }
+}
+
+fn worker_log_event(message: &vgi_client::WorkerLogMessage) -> VgiEvent {
+    let mut event = VgiEvent::new(worker_log_event_kind(message.level));
+    event.message = Some(format_worker_log_message(message));
+    event
+}
+
 pub(crate) fn resolve_secret_batch(
     runtime: &Arc<VgiRuntime>,
     requests: Vec<vgi_client::SecretLookupRequest>,
@@ -725,13 +775,19 @@ pub(crate) fn bind_with_secrets(
     attached: &AttachedCatalog,
     spec: &BindSpec,
 ) -> DFResult<vgi_client::BoundFunction> {
-    bind_with_secrets_status(conn, client, attached, spec).map(|(bound, _)| bound)
+    bind_with_secrets_dependency(conn, client, attached, spec).map(|(bound, _)| bound)
 }
 
-/// Bind a producer function and report whether resolved secrets were supplied.
-/// The bit is retained by its provider to suppress plan and result caching
-/// across resolver rotations without placing secret bytes in cache identity.
-pub(crate) fn bind_with_secrets_status(
+fn declared_secret_dependency(request_count: usize) -> bool {
+    request_count != 0
+}
+
+/// Bind a producer function and report whether it declared a secret dependency.
+/// The bit is true whenever the first bind requests secrets, even if the host
+/// resolver supplies no matching rows. Providers retain it to suppress plan and
+/// result caching across resolver rotations without placing secret bytes in
+/// cache identity.
+pub(crate) fn bind_with_secrets_dependency(
     conn: &VgiConnection,
     client: &mut VgiClient,
     attached: &AttachedCatalog,
@@ -743,7 +799,7 @@ pub(crate) fn bind_with_secrets_status(
     }
     let first = client.bind(attached, &spec).map_err(to_df)?;
     let requests = first.required_secrets();
-    if requests.is_empty() {
+    if !declared_secret_dependency(requests.len()) {
         return Ok((first, false));
     }
     let secrets = resolve_secret_batch(conn.runtime(), requests)?;
@@ -765,15 +821,16 @@ pub(crate) fn bind_with_input_secrets(
     spec: &BindSpec,
     input_schema: &datafusion::arrow::datatypes::Schema,
 ) -> DFResult<vgi_client::BoundFunction> {
-    bind_with_input_secrets_status(conn, client, attached, spec, input_schema)
+    bind_with_input_secrets_dependency(conn, client, attached, spec, input_schema)
         .map(|(bound, _)| bound)
 }
 
-/// Bind an exchange function and report whether this bind consumed resolved
-/// secret material. Result caching is disabled for those binds: resolvers may
-/// rotate a secret while the principal remains unchanged, and secret bytes
-/// must never be copied into a cache key merely to distinguish generations.
-pub(crate) fn bind_with_input_secrets_status(
+/// Bind an exchange function and report whether it declared a secret dependency.
+/// Result caching is disabled whenever the first bind requests secrets, even if
+/// the resolver supplies no matching rows: resolvers may rotate a secret while
+/// the principal remains unchanged, and secret bytes must never be copied into
+/// a cache key merely to distinguish generations.
+pub(crate) fn bind_with_input_secrets_dependency(
     conn: &VgiConnection,
     client: &mut VgiClient,
     attached: &AttachedCatalog,
@@ -788,7 +845,7 @@ pub(crate) fn bind_with_input_secrets_status(
         .bind_with_input(attached, &spec, input_schema)
         .map_err(to_df)?;
     let requests = first.required_secrets();
-    if requests.is_empty() {
+    if !declared_secret_dependency(requests.len()) {
         return Ok((first, false));
     }
     let secrets = resolve_secret_batch(conn.runtime(), requests)?;
@@ -853,10 +910,11 @@ pub struct VgiTableProvider {
     filters_exactly_applied: bool,
     /// Catalog version captured by the bind and included in cache identity.
     catalog_version: i64,
-    /// Whether the planning bind supplied resolved secrets. Secret resolvers
-    /// may rotate values without changing identity, so these calls bypass
-    /// plan and result caches rather than putting secret bytes in their keys.
-    uses_resolved_secrets: bool,
+    /// Whether the planning bind declared a secret dependency. Secret resolvers
+    /// may rotate values without changing identity (or initially resolve no
+    /// rows), so these calls bypass plan and result caches rather than putting
+    /// secret bytes in their keys.
+    secret_dependent: bool,
     /// Explicit historical coordinate for this catalog-table scan.
     at: Option<vgi_client::At>,
     /// Primary-key and unique constraints advertised for catalog tables.
@@ -987,49 +1045,44 @@ impl VgiTableProvider {
         let table_schema_for_bind = table_schema.clone();
         let function_for_bind = function.clone();
         let arguments_for_bind = arguments.clone();
-        let (
-            function_schema,
-            statistics_bind,
-            capabilities,
-            catalog_version,
-            uses_resolved_secrets,
-        ) = tokio::task::spawn_blocking(move || {
-            let mut client = c.connect()?;
-            let attached = c.attach(&mut client, &cat)?;
-            let default_schema = attached.default_schema().to_string();
-            let mut candidates = vec![table_schema_for_bind];
-            if default_schema != candidates[0] {
-                candidates.push(default_schema);
-            }
-
-            let mut last_error = None;
-            for schema in candidates {
-                let spec = BindSpec::table(&function_for_bind)
-                    .in_schema(&schema)
-                    .with_arguments(arguments_for_bind.clone());
-                match bind_with_secrets_status(&c, &mut client, &attached, &spec) {
-                    Ok((bound, uses_resolved_secrets)) => {
-                        let capabilities = function_capabilities(
-                            &mut client,
-                            &attached,
-                            &schema,
-                            &function_for_bind,
-                        )?;
-                        return Ok::<_, DataFusionError>((
-                            schema,
-                            bound,
-                            capabilities,
-                            attached.info().catalog_version,
-                            uses_resolved_secrets,
-                        ));
-                    }
-                    Err(error) => last_error = Some(error),
+        let (function_schema, statistics_bind, capabilities, catalog_version, secret_dependent) =
+            tokio::task::spawn_blocking(move || {
+                let mut client = c.connect()?;
+                let attached = c.attach(&mut client, &cat)?;
+                let default_schema = attached.default_schema().to_string();
+                let mut candidates = vec![table_schema_for_bind];
+                if default_schema != candidates[0] {
+                    candidates.push(default_schema);
                 }
-            }
-            Err(last_error.expect("at least one catalog branch schema candidate"))
-        })
-        .await
-        .map_err(|error| DataFusionError::External(Box::new(error)))??;
+
+                let mut last_error = None;
+                for schema in candidates {
+                    let spec = BindSpec::table(&function_for_bind)
+                        .in_schema(&schema)
+                        .with_arguments(arguments_for_bind.clone());
+                    match bind_with_secrets_dependency(&c, &mut client, &attached, &spec) {
+                        Ok((bound, secret_dependent)) => {
+                            let capabilities = function_capabilities(
+                                &mut client,
+                                &attached,
+                                &schema,
+                                &function_for_bind,
+                            )?;
+                            return Ok::<_, DataFusionError>((
+                                schema,
+                                bound,
+                                capabilities,
+                                attached.info().catalog_version,
+                                secret_dependent,
+                            ));
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                Err(last_error.expect("at least one catalog branch schema candidate"))
+            })
+            .await
+            .map_err(|error| DataFusionError::External(Box::new(error)))??;
         let output_schema = statistics_bind.output_schema().clone();
 
         Ok(Arc::new(Self {
@@ -1047,7 +1100,7 @@ impl VgiTableProvider {
             supports_splits: capabilities.supports_splits,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
-            uses_resolved_secrets,
+            secret_dependent,
             at: None,
             constraints: None,
             column_mapping: None,
@@ -1076,7 +1129,7 @@ impl VgiTableProvider {
             statistics_bind,
             capabilities,
             catalog_version,
-            uses_resolved_secrets,
+            secret_dependent,
         ) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
             let attached = c.attach(&mut client, &cat2)?;
@@ -1108,8 +1161,8 @@ impl VgiTableProvider {
                     .in_schema(schema)
                     .with_arguments(arguments.clone());
                 spec.at = bind_at.clone();
-                match bind_with_secrets_status(&c, &mut client, &attached, &spec) {
-                    Ok((bound, uses_resolved_secrets)) => {
+                match bind_with_secrets_dependency(&c, &mut client, &attached, &spec) {
+                    Ok((bound, secret_dependent)) => {
                         let capabilities = function_capabilities(
                             &mut client,
                             &attached,
@@ -1123,7 +1176,7 @@ impl VgiTableProvider {
                             bound,
                             capabilities,
                             attached.info().catalog_version,
-                            uses_resolved_secrets,
+                            secret_dependent,
                         ));
                     }
                     Err(e) => last_err = Some(e),
@@ -1157,7 +1210,7 @@ impl VgiTableProvider {
             supports_splits: capabilities.supports_splits,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
-            uses_resolved_secrets,
+            secret_dependent,
             at,
             constraints,
             column_mapping: None,
@@ -1188,8 +1241,8 @@ impl VgiTableProvider {
         let spec = BindSpec::table(function)
             .in_schema(schema_name)
             .with_arguments(arguments.clone());
-        let (bound, uses_resolved_secrets) =
-            bind_with_secrets_status(&conn, &mut client, &attached, &spec)?;
+        let (bound, secret_dependent) =
+            bind_with_secrets_dependency(&conn, &mut client, &attached, &spec)?;
         let output_schema = bound.output_schema().clone();
         let capabilities = function_capabilities(&mut client, &attached, schema_name, function)?;
         drop(client);
@@ -1209,7 +1262,7 @@ impl VgiTableProvider {
             supports_splits: capabilities.supports_splits,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
-            uses_resolved_secrets,
+            secret_dependent,
             at: None,
             constraints: None,
             column_mapping: None,
@@ -1232,13 +1285,13 @@ impl VgiTableProvider {
         let (cat2, sch2, fn2) = (catalog.clone(), schema_name.clone(), function.clone());
         let args2 = arguments.clone();
 
-        let (statistics_bind, capabilities, max_workers, catalog_version, uses_resolved_secrets) =
+        let (statistics_bind, capabilities, max_workers, catalog_version, secret_dependent) =
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat2)?;
                 let spec = BindSpec::table(&fn2).in_schema(&sch2).with_arguments(args2);
-                let (bound, uses_resolved_secrets) =
-                    bind_with_secrets_status(&c, &mut client, &attached, &spec)?;
+                let (bound, secret_dependent) =
+                    bind_with_secrets_dependency(&c, &mut client, &attached, &spec)?;
                 let capabilities = function_capabilities(&mut client, &attached, &sch2, &fn2)?;
                 // One partition at BIND time, deliberately. The real count is
                 // decided at `scan`, where splits are planned.
@@ -1259,7 +1312,7 @@ impl VgiTableProvider {
                     capabilities,
                     1usize,
                     attached.info().catalog_version,
-                    uses_resolved_secrets,
+                    secret_dependent,
                 ))
             })
             .await
@@ -1281,7 +1334,7 @@ impl VgiTableProvider {
             supports_splits: capabilities.supports_splits,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
-            uses_resolved_secrets,
+            secret_dependent,
             at: None,
             constraints: None,
             column_mapping: None,
@@ -1361,7 +1414,7 @@ impl VgiTableProvider {
             return Ok(None);
         }
 
-        let plan_cache_key = (!self.uses_resolved_secrets).then_some(()).and_then(|()| {
+        let plan_cache_key = (!self.secret_dependent).then_some(()).and_then(|()| {
             self.conn
                 .cache_identity_scope(&self.catalog)
                 .and_then(|identity_scope| {
@@ -1840,6 +1893,11 @@ impl TableProvider for VgiTableProvider {
         };
         let cache_result_is_bounded = !split_groups.as_ref().is_some_and(|plan| plan.unbounded);
 
+        let result_cache_ineligible = self
+            .secret_dependent
+            .then_some(crate::runtime::CacheIneligibleReason::SecretDependent)
+            .or((!cache_result_is_bounded)
+                .then_some(crate::runtime::CacheIneligibleReason::Unbounded));
         Ok(Arc::new(VgiScanExec::new(
             self.conn.clone(),
             self.catalog.clone(),
@@ -1859,7 +1917,7 @@ impl TableProvider for VgiTableProvider {
             self.catalog_version,
             self.at.clone(),
             self.column_mapping.clone(),
-            !self.uses_resolved_secrets && cache_result_is_bounded,
+            result_cache_ineligible,
         )))
     }
 }
@@ -1905,6 +1963,7 @@ pub struct VgiScanExec {
     metrics: ExecutionPlanMetricsSet,
     cache_metrics: VgiCacheMetrics,
     cache_key: Option<vgi_client::CacheKey>,
+    cache_ineligible_reason: Option<crate::runtime::CacheIneligibleReason>,
     cache_probe: OnceLock<Option<vgi_client::CachedEntry>>,
     disk_cache_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
     disk_cache_revalidation_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
@@ -2112,7 +2171,7 @@ impl VgiScanExec {
         catalog_version: i64,
         at: Option<vgi_client::At>,
         column_mapping: Option<Arc<HashMap<String, String>>>,
-        result_cache_eligible: bool,
+        result_cache_ineligible: Option<crate::runtime::CacheIneligibleReason>,
     ) -> Self {
         let split_output_ordering = split_groups
             .as_ref()
@@ -2169,43 +2228,54 @@ impl VgiScanExec {
                 (Arc::clone(&unknown), vec![unknown; partitions.max(1)])
             }
         };
-        let cache_key = if result_cache_eligible
-            && conn.cache_enabled
-            && conn.runtime.options().cache_enabled
-            && cache_preserves_ordering
-        {
-            conn.cache_identity_scope(&catalog)
-                .and_then(|identity_scope| {
-                    let arguments = raw_arguments
-                        .as_ref()
-                        .map(|value| value.0.clone())
-                        .or_else(|| arguments.to_ipc().ok().map(|value| value.0))?;
-                    Some(vgi_client::CacheKey {
-                        catalog: catalog.clone(),
-                        identity_scope,
-                        worker_label: conn.cache_worker_identity(),
-                        function: format!("{schema_name}.{function}"),
-                        arguments,
-                        // A projection changes remote bytes only when the
-                        // worker opted into receiving it. Otherwise cache the
-                        // full worker result once and conform it to each local
-                        // projection on replay.
-                        projection: if projection_pushdown {
-                            projection.clone()
-                        } else {
-                            None
-                        },
-                        filters: pushdown.cache_identity(),
-                        catalog_version,
-                        at: at.as_ref().map(|at| (at.unit.clone(), at.value.clone())),
-                        settings: conn.runtime.session_settings_identity(&catalog),
-                        attach_options: conn.cache_attach_context(&catalog),
-                        row_limit: limit.and_then(|value| i64::try_from(value).ok()),
-                        ordering: None,
-                        sample: None,
-                        plan: None,
-                    })
-                })
+        let mut cache_ineligible_reason = result_cache_ineligible
+            .or_else(|| conn.cache_environment_ineligible_reason(&catalog))
+            .or((!cache_preserves_ordering)
+                .then_some(crate::runtime::CacheIneligibleReason::OrderedSplit));
+        let cache_key = if cache_ineligible_reason.is_none() {
+            match (
+                conn.cache_identity_scope(&catalog),
+                raw_arguments
+                    .as_ref()
+                    .map(|value| value.0.clone())
+                    .or_else(|| arguments.to_ipc().ok().map(|value| value.0)),
+            ) {
+                (Some(identity_scope), Some(arguments)) => Some(vgi_client::CacheKey {
+                    catalog: catalog.clone(),
+                    identity_scope,
+                    worker_label: conn.cache_worker_identity(),
+                    function: format!("{schema_name}.{function}"),
+                    arguments,
+                    // A projection changes remote bytes only when the
+                    // worker opted into receiving it. Otherwise cache the
+                    // full worker result once and conform it to each local
+                    // projection on replay.
+                    projection: if projection_pushdown {
+                        projection.clone()
+                    } else {
+                        None
+                    },
+                    filters: pushdown.cache_identity(),
+                    catalog_version,
+                    at: at.as_ref().map(|at| (at.unit.clone(), at.value.clone())),
+                    settings: conn.runtime.session_settings_identity(&catalog),
+                    attach_options: conn.cache_attach_context(&catalog),
+                    row_limit: limit.and_then(|value| i64::try_from(value).ok()),
+                    ordering: None,
+                    sample: None,
+                    plan: None,
+                }),
+                (None, _) => {
+                    cache_ineligible_reason =
+                        Some(crate::runtime::CacheIneligibleReason::IdentityUnresolved);
+                    None
+                }
+                (_, None) => {
+                    cache_ineligible_reason =
+                        Some(crate::runtime::CacheIneligibleReason::UnsupportedShape);
+                    None
+                }
+            }
         } else {
             None
         };
@@ -2244,6 +2314,7 @@ impl VgiScanExec {
             metrics,
             cache_metrics,
             cache_key,
+            cache_ineligible_reason,
             cache_probe: OnceLock::new(),
             disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
             disk_cache_revalidation_probe: Arc::new(tokio::sync::OnceCell::new()),
@@ -2285,6 +2356,10 @@ impl VgiScanExec {
             // A runtime predicate can change after lookup. A result keyed only
             // by its planning-time filter must never enter the VGI result cache.
             cache_key: None,
+            cache_ineligible_reason: Some(
+                self.cache_ineligible_reason
+                    .unwrap_or(crate::runtime::CacheIneligibleReason::DynamicFilter),
+            ),
             cache_probe: OnceLock::new(),
             disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
             disk_cache_revalidation_probe: Arc::new(tokio::sync::OnceCell::new()),
@@ -2405,9 +2480,30 @@ fn scan_cache_storage_control(
 #[allow(clippy::items_after_test_module)] // Contract test stays beside its private helper.
 mod scan_cache_contract_tests {
     use super::{
-        completed_scan_cache_control, executed_cache_substreams, scan_cache_storage_control,
-        ScanCachePartitionOutcome, VgiConnection,
+        completed_scan_cache_control, declared_secret_dependency, executed_cache_substreams,
+        scan_cache_storage_control, worker_log_event, ScanCachePartitionOutcome, VgiConnection,
     };
+
+    #[test]
+    fn declared_secret_request_is_a_dependency_even_without_resolved_rows() {
+        assert!(!declared_secret_dependency(0));
+        assert!(declared_secret_dependency(1));
+    }
+
+    #[test]
+    fn worker_logs_become_structured_session_events() {
+        let message =
+            vgi_client::WorkerLogMessage::new(vgi_client::WorkerLogLevel::Warn, "pruned splits")
+                .with_extra("count", "3");
+        let event = worker_log_event(&message);
+        assert_eq!(event.kind, "worker.log.warn");
+        assert_eq!(
+            event.message.as_deref(),
+            Some(r#"pruned splits {"count":"3"}"#)
+        );
+        assert!(event.catalog.is_none());
+        assert!(event.function.is_none());
+    }
 
     #[test]
     fn no_work_is_ignored_but_every_scanned_partition_must_opt_in_identically() {
@@ -3522,6 +3618,15 @@ impl ExecutionPlan for VgiScanExec {
         _ctx: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let partition_metrics = VgiPartitionMetrics::new(&self.metrics, partition);
+        if let Some(reason) = self.cache_ineligible_reason {
+            if self.cache_observation.set(()).is_ok() {
+                self.conn.runtime.emit_cache_ineligible(
+                    &self.catalog,
+                    &format!("{}.{}", self.schema_name, self.function),
+                    reason,
+                );
+            }
+        }
         if let Some(key) = &self.cache_key {
             let cached = self
                 .cache_probe

@@ -15,6 +15,53 @@ use vgi_client::{CacheLimits, ResultCache};
 
 pub use vgi_client::DiskCacheCodec;
 
+/// Stable, credential-free reasons why an adapter execution cannot use the
+/// VGI result cache.
+///
+/// These strings are an observability contract shared by producer, scalar, and
+/// table-input paths. Keep them about execution shape and host policy: arguments,
+/// filter values, split tokens, identities, and secrets must never be rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheIneligibleReason {
+    DisabledGlobal,
+    DisabledAttach,
+    IdentityUnresolved,
+    DynamicFilter,
+    Unbounded,
+    OrderedSplit,
+    SecretDependent,
+    VolatileFunction,
+    PerValueDisabled,
+    StatefulExchange,
+    LiteralInput,
+    PartialExchange,
+    OrderedSink,
+    EmptyInput,
+    UnsupportedShape,
+}
+
+impl CacheIneligibleReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::DisabledGlobal => "disabled_global",
+            Self::DisabledAttach => "disabled_attach",
+            Self::IdentityUnresolved => "identity_unresolved",
+            Self::DynamicFilter => "dynamic_filter",
+            Self::Unbounded => "unbounded",
+            Self::OrderedSplit => "ordered_split",
+            Self::SecretDependent => "secret_dependent",
+            Self::VolatileFunction => "volatile_function",
+            Self::PerValueDisabled => "per_value_disabled",
+            Self::StatefulExchange => "stateful_exchange",
+            Self::LiteralInput => "literal_input",
+            Self::PartialExchange => "partial_exchange",
+            Self::OrderedSink => "ordered_sink",
+            Self::EmptyInput => "empty_input",
+            Self::UnsupportedShape => "unsupported_shape",
+        }
+    }
+}
+
 fn disk_cache_error(error: vgi_client::DiskCacheError) -> datafusion::common::DataFusionError {
     datafusion::common::DataFusionError::Execution(format!(
         "VGI durable cache operation failed: {error}"
@@ -130,7 +177,8 @@ pub struct VgiEvent {
     pub split: Option<String>,
     /// Operation duration, when the event finishes an operation.
     pub duration: Option<Duration>,
-    /// Human-readable detail that never contains credentials.
+    /// Human-readable detail. Adapter-generated details never contain
+    /// credentials; `worker.log.*` text and extras are worker-controlled.
     pub message: Option<String>,
 }
 
@@ -400,6 +448,19 @@ impl VgiRuntime {
             events.pop_front();
         }
         events.push_back(event);
+    }
+
+    pub(crate) fn emit_cache_ineligible(
+        &self,
+        catalog: &str,
+        function: &str,
+        reason: CacheIneligibleReason,
+    ) {
+        let mut event = VgiEvent::new("cache.ineligible");
+        event.catalog = Some(catalog.to_string());
+        event.function = Some(function.to_string());
+        event.message = Some(format!("reason={}", reason.as_str()));
+        self.emit(event);
     }
 
     pub(crate) fn locality_hook(&self) -> Option<&Arc<dyn VgiLocalityHook>> {
@@ -783,6 +844,56 @@ pub struct ExchangeCacheStats {
 #[cfg(test)]
 mod result_flight_tests {
     use super::*;
+
+    #[test]
+    fn cache_ineligible_events_use_stable_sanitized_reasons() {
+        let runtime = VgiRuntime::default();
+        runtime.emit_cache_ineligible(
+            "example",
+            "main.cached",
+            CacheIneligibleReason::IdentityUnresolved,
+        );
+
+        let events = runtime.events();
+        let [event] = events.as_slice() else {
+            panic!("expected exactly one event")
+        };
+        assert_eq!(event.kind, "cache.ineligible");
+        assert_eq!(event.catalog.as_deref(), Some("example"));
+        assert_eq!(event.function.as_deref(), Some("main.cached"));
+        assert_eq!(event.message.as_deref(), Some("reason=identity_unresolved"));
+        assert_eq!(event.split, None);
+    }
+
+    #[test]
+    fn cache_ineligible_reason_vocabulary_is_stable() {
+        let reasons = [
+            (CacheIneligibleReason::DisabledGlobal, "disabled_global"),
+            (CacheIneligibleReason::DisabledAttach, "disabled_attach"),
+            (
+                CacheIneligibleReason::IdentityUnresolved,
+                "identity_unresolved",
+            ),
+            (CacheIneligibleReason::DynamicFilter, "dynamic_filter"),
+            (CacheIneligibleReason::Unbounded, "unbounded"),
+            (CacheIneligibleReason::OrderedSplit, "ordered_split"),
+            (CacheIneligibleReason::SecretDependent, "secret_dependent"),
+            (CacheIneligibleReason::VolatileFunction, "volatile_function"),
+            (
+                CacheIneligibleReason::PerValueDisabled,
+                "per_value_disabled",
+            ),
+            (CacheIneligibleReason::StatefulExchange, "stateful_exchange"),
+            (CacheIneligibleReason::LiteralInput, "literal_input"),
+            (CacheIneligibleReason::PartialExchange, "partial_exchange"),
+            (CacheIneligibleReason::OrderedSink, "ordered_sink"),
+            (CacheIneligibleReason::EmptyInput, "empty_input"),
+            (CacheIneligibleReason::UnsupportedShape, "unsupported_shape"),
+        ];
+        for (reason, expected) in reasons {
+            assert_eq!(reason.as_str(), expected);
+        }
+    }
 
     #[test]
     fn durable_options_follow_client_defaults() {

@@ -27,6 +27,9 @@ DataFusion where there is no matching planning or execution seam.
   not disabled caching. Complete producer scans and complete split scans are
   captured; an error, cancellation, limit, or incomplete partition aborts the
   candidate atomically.
+- Secret dependency is fail-closed: a first bind that declares any secret
+  requirement bypasses plan and result caches even when the host resolver
+  returns no matching rows.
 - Keys isolate catalog identity and version, authenticated identity, worker and
   function, arguments, attach options, typed session settings, remotely applied
   query shape, and limit. Projection and filter identity is capability-aware:
@@ -85,6 +88,11 @@ DataFusion where there is no matching planning or execution seam.
   both configured tiers. Producer scan/cache counters also
   appear as native DataFusion execution metrics and in `EXPLAIN ANALYZE`;
   result-cache statistics distinguish exchange hits, stores, and bytes served.
+- Cache admission vetoes use one credential-free reason vocabulary across
+  producer, scalar, streaming exchange, and buffered exchange execution. One
+  `cache.ineligible` event is emitted per execution rather than per producer
+  partition; values, filter contents, split tokens, identities, and secrets are
+  never included.
 - SQL-owned `vgi_result_cache_max_entry_bytes`,
   `vgi_result_cache_max_bytes`, and `vgi_result_cache_max_entries` settings
   update the live session cache immediately. Reductions evict entries that no
@@ -171,6 +179,12 @@ replay remains physically present until release and a later reap.
   calls, scalar input writes, and streaming table-input sends report structural
   counts without arguments, row values, secrets, or synthetic events on cache
   replay.
+- DataFusion routes in-band worker logs on built-in subprocess, Unix, TCP, and
+  HTTP connections as severity-specific `worker.log.*` events to that same sink
+  and SQL history, with structured extras retained as JSON text. A standalone
+  `vgi-client` uses the Rust `log` facade when no embedding sink is installed.
+  The protocol log message does not carry request/function correlation; worker
+  access logs and subprocess stderr remain separate operator-facing channels.
 - `VgiLocalityHook` exposes planned split locations to an embedding scheduler.
   The adapter does not invent DataFusion hash partitioning from VGI transforms.
 - `VgiSessionOptions` configures cache bounds, event history, and an optional
@@ -208,7 +222,7 @@ replay remains physically present until release and a later reap.
 | Set operations and joins | Supported | VGI scans compose with UNION/INTERSECT/EXCEPT, IN/EXISTS, CTEs, and DataFusion semi/anti plans; the SQL adapter maps DuckDB's unqualified `SEMI JOIN`/`ANTI JOIN` spelling to the equivalent left-directed plans, including in nested SELECTs |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
 | Session result cache | Partial | The bounded memory tier covers producer/split scans, streaming per-batch, stable scalar per-value, and unordered buffered whole-input results with conditional revalidation, runtime-local single-flight, stale-if-error, and revocation eviction. An opt-in Arrow IPC tier (Zstandard by default) durably shares complete bounded producer/split results across local processes with leases, atomic publication, restart recovery, and combined SQL diagnostics/maintenance. Non-split producer validators survive restart with conditional refresh, stale-if-error, and exact-generation revocation; split validators remain fail-closed pending atomic all-partition agreement. Durable bounds are constructor-owned; live SQL limits govern memory. Durable exchange/scalar/correlated entries and SWR remain unwired |
-| Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink |
+| Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink; built-in transports forward in-band worker logs, without request/function correlation, access logs, or stderr |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
 | Correlated LATERAL table calls | Not wired | DataFusion binds table functions before an outer row is available |

@@ -96,7 +96,7 @@ jobs:
         working-directory: vgi-datafusion
         run: cargo test --locked --all-targets
 
-      - name: Run durable producer cache tests (Unix)
+      - name: Run persistent-worker tests (Unix)
         working-directory: vgi-datafusion
         shell: bash
         run: |
@@ -153,9 +153,12 @@ jobs:
           fi
 
           VGI_TEST_WORKER="unix://${socket}" \
-            cargo test --locked --test durable_producer_cache -- --nocapture
+            cargo test --locked \
+              --test durable_producer_cache \
+              --test worker_log_forwarding \
+              -- --nocapture
 
-      - name: Run durable producer cache tests (HTTP)
+      - name: Run persistent-worker tests (HTTP)
         working-directory: vgi-datafusion
         shell: bash
         run: |
@@ -215,7 +218,10 @@ jobs:
           fi
 
           VGI_TEST_WORKER="http://127.0.0.1:${port}" \
-            cargo test --locked --test durable_producer_cache -- --nocapture
+            cargo test --locked \
+              --test durable_producer_cache \
+              --test worker_log_forwarding \
+              -- --nocapture
 
       - name: Report compiler cache statistics
         if: always()

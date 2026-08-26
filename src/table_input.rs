@@ -130,7 +130,7 @@ pub(crate) fn run_exchange(
     arguments: vgi_client::Arguments,
     input_schema: &Schema,
     inputs: Vec<datafusion::arrow::array::RecordBatch>,
-    stream_cache_eligible: bool,
+    shape_ineligible: Option<crate::runtime::CacheIneligibleReason>,
 ) -> DFResult<Vec<datafusion::arrow::array::RecordBatch>> {
     use vgi_client::{BindSpec, ScanOptions};
 
@@ -155,10 +155,22 @@ pub(crate) fn run_exchange(
     let spec = BindSpec::table(function)
         .in_schema(schema_name)
         .with_arguments(arguments);
-    let (bound, used_resolved_secrets) =
-        crate::bind_with_input_secrets_status(conn, &mut client, &attached, &spec, input_schema)?;
-    let stream_cache_eligible = stream_cache_eligible && !used_resolved_secrets;
-    let cache_key_template = if stream_cache_eligible {
+    let (bound, secret_dependent) = crate::bind_with_input_secrets_dependency(
+        conn,
+        &mut client,
+        &attached,
+        &spec,
+        input_schema,
+    )?;
+    let cache_ineligible = conn
+        .cache_environment_ineligible_reason(catalog)
+        .or(shape_ineligible)
+        .or(secret_dependent.then_some(crate::runtime::CacheIneligibleReason::SecretDependent));
+    if let Some(reason) = cache_ineligible {
+        conn.runtime
+            .emit_cache_ineligible(catalog, &format!("{schema_name}.{function}"), reason);
+    }
+    let cache_key_template = if cache_ineligible.is_none() {
         exchange_cache_key_template(
             conn,
             catalog,
@@ -824,7 +836,7 @@ impl datafusion::catalog::TableProvider for VgiLiteralInputProvider {
                 arguments,
                 input_schema.as_ref(),
                 vec![input],
-                false,
+                Some(crate::runtime::CacheIneligibleReason::LiteralInput),
             )
         })
         .await
@@ -876,8 +888,13 @@ pub(crate) fn run_buffered(
     let spec = BindSpec::table(function)
         .in_schema(schema_name)
         .with_arguments(arguments);
-    let (bound, used_resolved_secrets) =
-        crate::bind_with_input_secrets_status(conn, &mut client, &attached, &spec, input_schema)?;
+    let (bound, secret_dependent) = crate::bind_with_input_secrets_dependency(
+        conn,
+        &mut client,
+        &attached,
+        &spec,
+        input_schema,
+    )?;
 
     let run_lifecycle = |client: &mut vgi_client::VgiClient,
                          options: &ScanOptions|
@@ -960,7 +977,15 @@ pub(crate) fn run_buffered(
     // VGI's buffered-cache contract is a reduction over the complete input
     // multiset. An ordered sink can observe row order, so it is deliberately
     // ineligible instead of being cached under a weaker identity.
-    let template = if used_resolved_secrets || sink_order_dependent {
+    let cache_ineligible = conn
+        .cache_environment_ineligible_reason(catalog)
+        .or(secret_dependent.then_some(crate::runtime::CacheIneligibleReason::SecretDependent))
+        .or(sink_order_dependent.then_some(crate::runtime::CacheIneligibleReason::OrderedSink));
+    if let Some(reason) = cache_ineligible {
+        conn.runtime
+            .emit_cache_ineligible(catalog, &format!("{schema_name}.{function}"), reason);
+    }
+    let template = if cache_ineligible.is_some() {
         None
     } else {
         exchange_cache_key_template(
@@ -1327,7 +1352,8 @@ impl datafusion::catalog::TableProvider for VgiTableInputProvider {
 
         let buffered = self.buffered;
         let sink_order_dependent = self.sink_order_dependent;
-        let stream_cache_eligible = self.stream_cache_eligible;
+        let stream_cache_ineligible = (!self.stream_cache_eligible)
+            .then_some(crate::runtime::CacheIneligibleReason::StatefulExchange);
         let mut buffered_commit = buffered.then(BufferedCommitGuard::new);
         let commit_allowed = buffered_commit.as_ref().map(BufferedCommitGuard::token);
         let out = tokio::task::spawn_blocking(move || {
@@ -1352,7 +1378,7 @@ impl datafusion::catalog::TableProvider for VgiTableInputProvider {
                     args,
                     &for_worker,
                     inputs,
-                    stream_cache_eligible,
+                    stream_cache_ineligible,
                 )
             }
         })

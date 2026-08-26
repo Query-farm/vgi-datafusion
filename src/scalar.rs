@@ -467,7 +467,7 @@ impl VgiScalarUdf {
             spec.function_type = FunctionType::Scalar;
             spec.arguments = arguments;
 
-            let (bound, used_resolved_secrets) = crate::bind_with_input_secrets_status(
+            let (bound, secret_dependent) = crate::bind_with_input_secrets_dependency(
                 &conn,
                 &mut client,
                 &attached,
@@ -484,7 +484,7 @@ impl VgiScalarUdf {
                         "VGI scalar `{function}` bound to an output schema with no columns"
                     ))
                 })?;
-            Ok((output_type, used_resolved_secrets))
+            Ok((output_type, secret_dependent))
         })?;
 
         if !out.1 {
@@ -947,8 +947,13 @@ fn run_scalar_exchange(
     let mut spec = BindSpec::table(function).in_schema(schema_name);
     spec.function_type = FunctionType::Scalar;
     spec.arguments = arguments;
-    let (bound, used_resolved_secrets) =
-        crate::bind_with_input_secrets_status(conn, &mut client, &attached, &spec, input_schema)?;
+    let (bound, secret_dependent) = crate::bind_with_input_secrets_dependency(
+        conn,
+        &mut client,
+        &attached,
+        &spec,
+        input_schema,
+    )?;
 
     let direct = |client: &mut vgi_client::VgiClient,
                   input: &RecordBatch,
@@ -964,14 +969,17 @@ fn run_scalar_exchange(
         })
     };
 
-    if !cacheable || used_resolved_secrets || input.num_rows() == 0 || !per_value_enabled {
-        return direct(&mut client, &input, &ScanOptions::default()).map(|(answer, _)| answer);
-    }
-
-    if !conn.cache_enabled
-        || !conn.runtime.options().cache_enabled
-        || conn.cache_identity_scope(catalog).is_none()
-    {
+    let cache_ineligible =
+        conn.cache_environment_ineligible_reason(catalog)
+            .or((!cacheable).then_some(crate::runtime::CacheIneligibleReason::VolatileFunction))
+            .or(secret_dependent.then_some(crate::runtime::CacheIneligibleReason::SecretDependent))
+            .or((input.num_rows() == 0)
+                .then_some(crate::runtime::CacheIneligibleReason::EmptyInput))
+            .or((!per_value_enabled)
+                .then_some(crate::runtime::CacheIneligibleReason::PerValueDisabled));
+    if let Some(reason) = cache_ineligible {
+        conn.runtime
+            .emit_cache_ineligible(catalog, &format!("{schema_name}.{function}"), reason);
         return direct(&mut client, &input, &ScanOptions::default()).map(|(answer, _)| answer);
     }
     let opt_in_identity =

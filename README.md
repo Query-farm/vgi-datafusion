@@ -36,7 +36,7 @@ ctx.sql("SELECT count(*) FROM orders").await?.show().await?;
 | Worker-opted result cache | bounded memory + opt-in durable producer tier | ◐ |
 | Typed session settings | DataFusion `ConfigExtension` + `SET` / `RESET` | ✅ |
 | Worker secrets | host `VgiSecretResolver` | ✅ |
-| Structured diagnostics | SQL functions + host event sink | ✅ |
+| Structured diagnostics and worker logs | SQL functions + host event sink | ✅ |
 | Table-in-out / buffered | table-valued subquery argument | ✅, one input column |
 
 An exchange-mode VGI function is reached with a scalar subquery as its TABLE
@@ -199,6 +199,14 @@ SELECT * FROM vgi_logs();
 SELECT vgi_cache_flush(), vgi_logs_clear();
 ```
 
+DataFusion routes in-band worker logs from built-in subprocess, Unix, TCP, and
+HTTP connections as `worker.log.*` events to the same SQL history and host event
+sink; structured extras are retained as JSON text. (`vgi-client` uses the Rust
+`log` facade when no embedding sink is installed.) The current wire message has
+no request or function identifier, so these events cannot yet be correlated to
+one call. Worker access logs and subprocess stderr are separate operator-facing
+channels and are not forwarded into DataFusion diagnostics.
+
 For an embedded application, put a configured `VgiRuntime` into the
 `SessionConfig` extensions before constructing the `SessionContext`. The same
 runtime can carry a secret resolver, non-blocking event sink, and split-locality
@@ -265,9 +273,13 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   immediate-stale conditional revalidation, coalesce identical misses, and honor
   worker-authorized stale-if-error. A worker that withdraws caching with
   `no_store` or another ineligible policy evicts the stale bytes instead of
-  replaying them. Secret-consuming calls bypass these caches, and native
+  replaying them. A call is secret-consuming as soon as its first bind declares
+  a secret requirement, even when the host resolver returns no matching rows;
+  those calls bypass these caches. Native
   DataFusion metrics expose producer cache/worker activity in `EXPLAIN ANALYZE`.
   Cache diagnostics distinguish exchange hits, stores, and bytes served.
+  Producer, scalar, and table-input executions that bypass caching emit one
+  credential-free `cache.ineligible` event with a stable `reason=...` value.
   `vgi_result_cache_max_entry_bytes`, `vgi_result_cache_max_bytes`, and
   `vgi_result_cache_max_entries` apply live bounded-memory limits through SQL;
   lowering a limit evicts entries that no longer fit and `RESET` restores the
@@ -292,8 +304,8 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   `fsync`. Constructor limits govern committed Arrow payload admission rather
   than forming a hard filesystem quota, are separate from live SQL memory
   limits, and should agree across processes sharing one root. Storage locks do
-  not coalesce worker calls across processes. Stale-while-revalidate and
-  worker-log forwarding remain unimplemented.
+  not coalesce worker calls across processes. Stale-while-revalidate remains
+  unimplemented.
 - **Dynamic filters and join keys.** DataFusion 55 hash-join filters are linked
   to VGI scans. Completed single-column `IN` sets use `join_keys` side IPC at
   init (`vgi_join_keys_version=2`), while later range/constant refinements ride

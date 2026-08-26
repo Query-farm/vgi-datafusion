@@ -81,6 +81,39 @@ async fn scalar_writes(ctx: &SessionContext) -> datafusion::common::Result<Vec<(
     Ok(writes)
 }
 
+async fn cache_ineligible(
+    ctx: &SessionContext,
+) -> datafusion::common::Result<Vec<(String, String)>> {
+    let batches = vgi_datafusion::sql(
+        ctx,
+        "SELECT function, message FROM vgi_logs() \
+         WHERE event = 'cache.ineligible' ORDER BY timestamp_ms",
+    )
+    .await?
+    .collect()
+    .await?;
+    let mut out = Vec::new();
+    for batch in batches {
+        let functions = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("function is Utf8");
+        let messages = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("message is Utf8");
+        for row in 0..batch.num_rows() {
+            out.push((
+                functions.value(row).to_string(),
+                messages.value(row).to_string(),
+            ));
+        }
+    }
+    Ok(out)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn per_value_dedup_reports_only_the_batch_sent_and_hits_stay_silent(
 ) -> datafusion::common::Result<()> {
@@ -137,6 +170,14 @@ async fn per_value_dedup_reports_only_the_batch_sent_and_hits_stay_silent(
             "input_rows=3".to_string()
         )]
     );
+    assert_eq!(
+        cache_ineligible(&ctx).await?,
+        vec![(
+            "main.cached_double_scalar".to_string(),
+            "reason=per_value_disabled".to_string(),
+        )],
+        "one scalar execution must emit one sanitized admission reason"
+    );
     Ok(())
 }
 
@@ -156,6 +197,14 @@ async fn cache_disabled_scalar_reports_every_worker_batch_without_values(
             "main.cached_double_scalar".to_string(),
             "input_rows=3".to_string()
         )]
+    );
+    assert_eq!(
+        cache_ineligible(&ctx).await?,
+        vec![(
+            "main.cached_double_scalar".to_string(),
+            "reason=disabled_attach".to_string(),
+        )],
+        "one scalar execution must emit one sanitized admission reason"
     );
     Ok(())
 }

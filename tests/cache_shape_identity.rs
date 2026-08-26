@@ -83,6 +83,45 @@ async fn flush(ctx: &SessionContext) -> datafusion::common::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn producer_cache_veto_emits_once_across_physical_partitions(
+) -> datafusion::common::Result<()> {
+    let Some(worker) = common::example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}', CACHE false)",
+            common::sql_quote(&worker.to_string_lossy())
+        ),
+    )
+    .await?;
+    vgi_datafusion::sql(&ctx, "SELECT vgi_logs_clear()")
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(
+        scalar_i64(&ctx, "SELECT COUNT(*) FROM ex.data.cacheable_numbers").await?,
+        10
+    );
+    assert_eq!(
+        scalar_i64(
+            &ctx,
+            "SELECT COUNT(*) FROM vgi_logs() \
+             WHERE event = 'cache.ineligible' \
+             AND message = 'reason=disabled_attach'",
+        )
+        .await?,
+        1,
+        "one producer execution must log one sanitized veto, not one per partition"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn local_projections_share_one_full_result_entry() -> datafusion::common::Result<()> {
     let Some(ctx) = attached().await? else {
         return Ok(());

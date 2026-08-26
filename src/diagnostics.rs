@@ -1141,6 +1141,7 @@ fn duckdb_log_message(event: &crate::VgiEvent) -> String {
         "cache.hit" => "result_cache.hit",
         "cache.miss" => "result_cache.miss",
         "cache.store" => "result_cache.store",
+        "cache.ineligible" => "result_cache.ineligible",
         "cache.refused" | "cache.capture_aborted" => "result_cache.abort",
         "cache.revalidated" => "result_cache.revalidate",
         other => other,
@@ -2862,6 +2863,11 @@ mod tests {
         disk_event.function = Some("main.forecast".to_string());
         disk_event.message = Some("tier=disk".to_string());
         runtime.emit(disk_event);
+        runtime.emit_cache_ineligible(
+            "weather",
+            "main.forecast",
+            crate::runtime::CacheIneligibleReason::DynamicFilter,
+        );
 
         let batches = ctx
             .sql(
@@ -2885,6 +2891,20 @@ mod tests {
             .collect()
             .await?;
         assert_eq!(disk.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+
+        let ineligible = ctx
+            .sql(
+                "SELECT message FROM duckdb_logs() \
+                 WHERE message LIKE '%result_cache.ineligible%' \
+                   AND message LIKE '%reason=dynamic_filter%'",
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(
+            ineligible.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            1
+        );
         Ok(())
     }
 }

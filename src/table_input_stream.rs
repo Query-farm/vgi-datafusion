@@ -167,6 +167,12 @@ impl ExecutionPlan for VgiLimitedTableInputExec {
             )));
         }
 
+        self.conn.runtime().emit_cache_ineligible(
+            &self.catalog,
+            &format!("{}.{}", self.schema_name, self.function),
+            crate::runtime::CacheIneligibleReason::PartialExchange,
+        );
+
         let output_schema = Arc::clone(&self.schema);
         if self.limit == 0 {
             return Ok(Box::pin(RecordBatchStreamAdapter::new(
