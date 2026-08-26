@@ -72,7 +72,9 @@ use datafusion::logical_expr::AggregateUDF;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
-    Expr, Statement as SQLStatement, Value, ValueWithSpan, VisitMut, Visitor,
+    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName, Query,
+    SelectItem, SetExpr, Statement as SQLStatement, TableFactor, Value, ValueWithSpan, VisitMut,
+    Visitor, VisitorMut,
 };
 use datafusion::sql::sqlparser::dialect::SnowflakeDialect;
 
@@ -86,15 +88,378 @@ pub(crate) const NAMED_ARG_PREFIX: &str = "__vgi_datafusion_named_arg__";
 
 #[derive(Debug, Clone)]
 struct SqlMacro {
+    kind: SqlMacroKind,
     parameters: Vec<String>,
-    definition: String,
+    defaults: HashMap<String, ArrayRef>,
+    body: SqlMacroBody,
 }
 
-type SessionMacros = HashMap<String, HashMap<String, SqlMacro>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlMacroKind {
+    Scalar,
+    Table,
+}
+
+fn sql_macro_kind(value: &str) -> Result<SqlMacroKind, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "scalar" | "scalar_macro" | "macro" => Ok(SqlMacroKind::Scalar),
+        "table" | "table_macro" => Ok(SqlMacroKind::Table),
+        other => Err(format!("unsupported macro type {other:?}")),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SqlMacroBody {
+    Scalar(Expr),
+    Table(Box<Query>),
+    Invalid(String),
+}
+
+type SessionMacros = HashMap<String, HashMap<String, Arc<SqlMacro>>>;
 
 fn macro_registry() -> &'static Mutex<SessionMacros> {
     static REGISTRY: OnceLock<Mutex<SessionMacros>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn parse_macro_body(kind: SqlMacroKind, definition: &str) -> SqlMacroBody {
+    let parsed = if kind == SqlMacroKind::Scalar {
+        DFParser::parse_sql(&format!("SELECT {definition}"))
+    } else {
+        DFParser::parse_sql(definition)
+    };
+    let mut statements = match parsed {
+        Ok(statements) => statements,
+        Err(error) => return SqlMacroBody::Invalid(error.to_string()),
+    };
+    if statements.len() != 1 {
+        return SqlMacroBody::Invalid("definition must contain exactly one statement".to_string());
+    }
+    let Some(DFStatement::Statement(statement)) = statements.pop_front() else {
+        return SqlMacroBody::Invalid("definition is not a SQL query".to_string());
+    };
+    let SQLStatement::Query(query) = statement.as_ref() else {
+        return SqlMacroBody::Invalid("definition is not a SQL query".to_string());
+    };
+    if kind == SqlMacroKind::Table {
+        return SqlMacroBody::Table(query.clone());
+    }
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return SqlMacroBody::Invalid("scalar definition is not a SELECT expression".to_string());
+    };
+    let [SelectItem::UnnamedExpr(expression)] = select.projection.as_slice() else {
+        return SqlMacroBody::Invalid(
+            "scalar definition must contain exactly one unnamed expression".to_string(),
+        );
+    };
+    // The temporary SELECT is only a parser wrapper. Reject any trailing query
+    // clause instead of silently throwing away part of the worker definition.
+    // Comparing sqlparser's normalized render keeps this exhaustive as new
+    // SELECT clauses are added upstream.
+    if query.to_string() != format!("SELECT {expression}") {
+        return SqlMacroBody::Invalid(
+            "scalar definition must contain only one expression".to_string(),
+        );
+    }
+    SqlMacroBody::Scalar(expression.clone())
+}
+
+fn macro_key(name: &ObjectName) -> Option<String> {
+    let path = name
+        .0
+        .iter()
+        .map(|part| part.as_ident().map(|ident| ident.value.as_str()))
+        .collect::<Option<Vec<_>>>()?;
+    if !matches!(path.len(), 2 | 3) {
+        return None;
+    }
+    Some(path.join(".").to_ascii_lowercase())
+}
+
+fn lookup_macro(ctx: &SessionContext, name: &ObjectName) -> Option<Arc<SqlMacro>> {
+    let key = macro_key(name)?;
+    macro_registry()
+        .lock()
+        .ok()
+        .and_then(|sessions| sessions.get(&ctx.session_id())?.get(&key).cloned())
+}
+
+fn macro_default_expr(value: &ArrayRef) -> DFResult<Expr> {
+    let scalar = datafusion::common::ScalarValue::try_from_array(value.as_ref(), 0)?;
+    datafusion::sql::unparser::expr_to_sql(&datafusion::logical_expr::Expr::Literal(scalar, None))
+}
+
+fn bind_macro_arguments(
+    name: &ObjectName,
+    info: &SqlMacro,
+    arguments: &[FunctionArg],
+) -> DFResult<Vec<Expr>> {
+    let mut actual = vec![None; info.parameters.len()];
+    let mut positional = 0usize;
+    let mut saw_named = false;
+
+    for argument in arguments {
+        let (named, expression) = match argument {
+            FunctionArg::Named {
+                name: argument_name,
+                arg,
+                ..
+            } => {
+                let FunctionArgExpr::Expr(expression) = arg else {
+                    return plan_err!("VGI macro `{name}` does not accept wildcard arguments");
+                };
+                (Some(argument_name.value.as_str()), expression.clone())
+            }
+            FunctionArg::ExprNamed {
+                name: Expr::Identifier(argument_name),
+                arg,
+                ..
+            } => {
+                let FunctionArgExpr::Expr(expression) = arg else {
+                    return plan_err!("VGI macro `{name}` does not accept wildcard arguments");
+                };
+                (Some(argument_name.value.as_str()), expression.clone())
+            }
+            FunctionArg::ExprNamed { .. } => {
+                return plan_err!("VGI macro `{name}` requires identifier argument names");
+            }
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::BinaryOp {
+                left,
+                op: BinaryOperator::Eq,
+                right,
+            })) => match left.as_ref() {
+                Expr::Identifier(argument_name)
+                    if info
+                        .parameters
+                        .iter()
+                        .any(|parameter| parameter.eq_ignore_ascii_case(&argument_name.value)) =>
+                {
+                    (Some(argument_name.value.as_str()), right.as_ref().clone())
+                }
+                _ => (
+                    None,
+                    Expr::BinaryOp {
+                        left: left.clone(),
+                        op: BinaryOperator::Eq,
+                        right: right.clone(),
+                    },
+                ),
+            },
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => (None, expression.clone()),
+            FunctionArg::Unnamed(_) => {
+                return plan_err!("VGI macro `{name}` does not accept wildcard arguments");
+            }
+        };
+
+        if let Some(argument_name) = named {
+            saw_named = true;
+            let Some(index) = info
+                .parameters
+                .iter()
+                .position(|parameter| parameter.eq_ignore_ascii_case(argument_name))
+            else {
+                return plan_err!("VGI macro `{name}` has no parameter named `{argument_name}`");
+            };
+            if actual[index].replace(expression).is_some() {
+                return plan_err!(
+                    "VGI macro `{name}` received parameter `{}` more than once",
+                    info.parameters[index]
+                );
+            }
+        } else {
+            if saw_named {
+                return plan_err!(
+                    "VGI macro `{name}` does not accept positional arguments after named arguments"
+                );
+            }
+            if positional >= actual.len() {
+                return plan_err!(
+                    "VGI macro `{name}` expects at most {} argument(s), received more",
+                    actual.len()
+                );
+            }
+            actual[positional] = Some(expression);
+            positional += 1;
+        }
+    }
+
+    let mut missing = Vec::new();
+    for (index, parameter) in info.parameters.iter().enumerate() {
+        if actual[index].is_none() {
+            if let Some(default) = info.defaults.get(&parameter.to_ascii_lowercase()) {
+                actual[index] = Some(macro_default_expr(default)?);
+            } else {
+                missing.push(parameter.clone());
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return plan_err!(
+            "VGI macro `{name}` is missing required argument(s): {}",
+            missing.join(", ")
+        );
+    }
+    Ok(actual.into_iter().map(Option::unwrap).collect())
+}
+
+fn substitute_macro<T: VisitMut>(template: &mut T, parameters: &[String], actual: &[Expr]) {
+    struct Substitute<'a> {
+        parameters: &'a [String],
+        actual: &'a [Expr],
+    }
+    impl VisitorMut for Substitute<'_> {
+        type Break = ();
+
+        fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+            let Expr::Identifier(identifier) = expr else {
+                return ControlFlow::Continue(());
+            };
+            if let Some(index) = self
+                .parameters
+                .iter()
+                .position(|parameter| parameter.eq_ignore_ascii_case(&identifier.value))
+            {
+                *expr = self.actual[index].clone();
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let _ = template.visit(&mut Substitute { parameters, actual });
+}
+
+fn expand_scalar_macro(
+    ctx: &SessionContext,
+    expr: &Expr,
+    active: &mut Vec<String>,
+) -> DFResult<Option<Expr>> {
+    let Expr::Function(function) = expr else {
+        return Ok(None);
+    };
+    let Some(info) = lookup_macro(ctx, &function.name) else {
+        return Ok(None);
+    };
+    if info.kind != SqlMacroKind::Scalar {
+        return plan_err!(
+            "VGI table macro `{}` cannot be used as a scalar",
+            function.name
+        );
+    }
+    let SqlMacroBody::Scalar(template) = &info.body else {
+        return match &info.body {
+            SqlMacroBody::Invalid(error) => {
+                plan_err!("invalid VGI macro `{}`: {error}", function.name)
+            }
+            _ => plan_err!("VGI macro `{}` has an invalid scalar body", function.name),
+        };
+    };
+    let FunctionArguments::List(arguments) = &function.args else {
+        return plan_err!(
+            "VGI scalar macro `{}` requires an argument list",
+            function.name
+        );
+    };
+    if !matches!(function.parameters, FunctionArguments::None)
+        || arguments.duplicate_treatment.is_some()
+        || !arguments.clauses.is_empty()
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+        || !function.within_group.is_empty()
+    {
+        return plan_err!(
+            "VGI scalar macro `{}` does not accept DISTINCT, FILTER, OVER, or argument clauses",
+            function.name
+        );
+    }
+    let actual = bind_macro_arguments(&function.name, &info, &arguments.args)?;
+    let key = macro_key(&function.name).expect("a registered macro has a qualified key");
+    if let Some(cycle_start) = active.iter().position(|candidate| candidate == &key) {
+        let mut cycle = active[cycle_start..].to_vec();
+        cycle.push(key);
+        return plan_err!(
+            "recursive VGI scalar macro expansion: {}",
+            cycle.join(" -> ")
+        );
+    }
+    active.push(key);
+    let mut expanded = template.clone();
+    substitute_macro(&mut expanded, &info.parameters, &actual);
+
+    // sqlparser does not revisit an expression installed by a post-visit hook,
+    // so explicitly expand macro calls declared inside this macro's body.
+    struct ExpandNested<'a> {
+        ctx: &'a SessionContext,
+        active: &'a mut Vec<String>,
+    }
+    impl VisitorMut for ExpandNested<'_> {
+        type Break = Box<datafusion::common::DataFusionError>;
+
+        fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+            match expand_scalar_macro(self.ctx, expr, self.active) {
+                Ok(Some(replacement)) => *expr = replacement,
+                Ok(None) => {}
+                Err(error) => return ControlFlow::Break(Box::new(error)),
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let nested = expanded.visit(&mut ExpandNested { ctx, active });
+    active.pop();
+    if let ControlFlow::Break(error) = nested {
+        return Err(*error);
+    }
+    Ok(Some(expanded))
+}
+
+fn expand_table_macro(ctx: &SessionContext, factor: &TableFactor) -> DFResult<Option<TableFactor>> {
+    let TableFactor::Table {
+        name,
+        alias,
+        args: Some(arguments),
+        with_hints,
+        version,
+        with_ordinality,
+        partitions,
+        json_path,
+        sample,
+        index_hints,
+    } = factor
+    else {
+        return Ok(None);
+    };
+    let Some(info) = lookup_macro(ctx, name) else {
+        return Ok(None);
+    };
+    if info.kind != SqlMacroKind::Table {
+        return plan_err!("VGI scalar macro `{name}` cannot be used as a relation");
+    }
+    if arguments.settings.is_some()
+        || !with_hints.is_empty()
+        || version.is_some()
+        || *with_ordinality
+        || !partitions.is_empty()
+        || json_path.is_some()
+        || !index_hints.is_empty()
+    {
+        return plan_err!(
+            "VGI table macro `{name}` does not accept SETTINGS, hints, versions, ordinality, partitions, JSON paths, or index hints"
+        );
+    }
+    let SqlMacroBody::Table(template) = &info.body else {
+        return match &info.body {
+            SqlMacroBody::Invalid(error) => plan_err!("invalid VGI macro `{name}`: {error}"),
+            _ => plan_err!("VGI macro `{name}` has an invalid table body"),
+        };
+    };
+    let actual = bind_macro_arguments(name, &info, &arguments.args)?;
+    let mut subquery = template.clone();
+    substitute_macro(subquery.as_mut(), &info.parameters, &actual);
+    Ok(Some(TableFactor::Derived {
+        lateral: false,
+        subquery,
+        alias: alias.clone(),
+        sample: sample.clone(),
+    }))
 }
 
 fn runtime_registry() -> &'static Mutex<HashMap<String, Weak<VgiRuntime>>> {
@@ -767,18 +1132,48 @@ impl StripPrefixCi for str {
 /// which is itself dormant.
 fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResult<()> {
     use datafusion::sql::sqlparser::ast::{
-        BinaryOperator, Expr as SQLExpr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
-        ObjectName, ObjectNamePart, SelectItem, SetExpr, TableFactor, VisitorMut,
+        BinaryOperator, Expr as SQLExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName,
+        ObjectNamePart, TableFactor, VisitorMut,
     };
 
     struct Rewrite<'a> {
         ctx: &'a SessionContext,
+        scalar_macros: Vec<String>,
+        table_macro_frames: Vec<Option<String>>,
+        active_table_macros: HashSet<String>,
     }
 
     impl VisitorMut for Rewrite<'_> {
         type Break = Box<datafusion::common::DataFusionError>;
 
         fn pre_visit_table_factor(&mut self, tf: &mut TableFactor) -> ControlFlow<Self::Break> {
+            let macro_key = match tf {
+                TableFactor::Table {
+                    name,
+                    args: Some(_),
+                    ..
+                } if lookup_macro(self.ctx, name).is_some() => macro_key(name),
+                _ => None,
+            };
+            if let Some(key) = &macro_key {
+                if self.active_table_macros.contains(key) {
+                    return ControlFlow::Break(Box::new(plan_datafusion_err!(
+                        "recursive VGI table macro expansion involving `{key}`"
+                    )));
+                }
+            }
+            match expand_table_macro(self.ctx, tf) {
+                Ok(Some(expanded)) => {
+                    let key = macro_key.expect("an expanded table macro has a registered key");
+                    self.active_table_macros.insert(key.clone());
+                    self.table_macro_frames.push(Some(key));
+                    *tf = expanded;
+                    return ControlFlow::Continue(());
+                }
+                Ok(None) => {}
+                Err(error) => return ControlFlow::Break(Box::new(error)),
+            }
+            self.table_macro_frames.push(None);
             if let TableFactor::Table { name, args, .. } = tf {
                 if args.is_none() {
                     if let [catalog, _table] = name.0.as_slice() {
@@ -867,8 +1262,15 @@ fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResul
             ControlFlow::Continue(())
         }
 
+        fn post_visit_table_factor(&mut self, _tf: &mut TableFactor) -> ControlFlow<Self::Break> {
+            if let Some(Some(key)) = self.table_macro_frames.pop() {
+                self.active_table_macros.remove(&key);
+            }
+            ControlFlow::Continue(())
+        }
+
         fn post_visit_expr(&mut self, expr: &mut SQLExpr) -> ControlFlow<Self::Break> {
-            match expand_scalar_macro(self.ctx, expr) {
+            match expand_scalar_macro(self.ctx, expr, &mut self.scalar_macros) {
                 Ok(Some(expanded)) => *expr = expanded,
                 Ok(None) => {}
                 Err(error) => return ControlFlow::Break(Box::new(error)),
@@ -877,113 +1279,16 @@ fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResul
         }
     }
 
-    fn expand_scalar_macro(ctx: &SessionContext, expr: &SQLExpr) -> DFResult<Option<SQLExpr>> {
-        let SQLExpr::Function(function) = expr else {
-            return Ok(None);
-        };
-        let path = function
-            .name
-            .0
-            .iter()
-            .filter_map(|part| part.as_ident().map(|ident| ident.value.as_str()))
-            .collect::<Vec<_>>();
-        let [catalog_name, schema_name, macro_name] = path.as_slice() else {
-            return Ok(None);
-        };
-
-        let key = format!("{catalog_name}.{schema_name}.{macro_name}").to_ascii_lowercase();
-        let info = macro_registry()
-            .lock()
-            .ok()
-            .and_then(|sessions| sessions.get(&ctx.session_id())?.get(&key).cloned());
-        let Some(info) = info else {
-            return Ok(None);
-        };
-
-        let FunctionArguments::List(arguments) = &function.args else {
-            return plan_err!(
-                "VGI scalar macro `{}` requires an argument list",
-                function.name
-            );
-        };
-        if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
-            return plan_err!(
-                "VGI scalar macro `{}` does not accept DISTINCT or argument clauses",
-                function.name
-            );
-        }
-        let actual = arguments
-            .args
-            .iter()
-            .map(|argument| match argument {
-                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr.clone()),
-                other => plan_err!(
-                    "VGI scalar macro `{}` only accepts positional expression arguments, found {other}",
-                    function.name
-                ),
-            })
-            .collect::<DFResult<Vec<_>>>()?;
-        if actual.len() != info.parameters.len() {
-            return plan_err!(
-                "VGI scalar macro `{}` expects {} argument(s), received {}",
-                function.name,
-                info.parameters.len(),
-                actual.len()
-            );
-        }
-
-        let mut parsed = DFParser::parse_sql(&format!("SELECT {}", info.definition))?;
-        let Some(DFStatement::Statement(statement)) = parsed.pop_front() else {
-            return plan_err!(
-                "VGI scalar macro `{}` has an empty definition",
-                function.name
-            );
-        };
-        let SQLStatement::Query(query) = statement.as_ref() else {
-            return plan_err!("VGI scalar macro `{}` is not an expression", function.name);
-        };
-        let SetExpr::Select(select) = query.body.as_ref() else {
-            return plan_err!("VGI scalar macro `{}` is not an expression", function.name);
-        };
-        let [SelectItem::UnnamedExpr(expanded)] = select.projection.as_slice() else {
-            return plan_err!("VGI scalar macro `{}` is not one expression", function.name);
-        };
-        let mut expanded = expanded.clone();
-
-        struct Substitute<'a> {
-            parameters: &'a [String],
-            actual: &'a [SQLExpr],
-        }
-        impl VisitorMut for Substitute<'_> {
-            type Break = ();
-
-            fn post_visit_expr(&mut self, expr: &mut SQLExpr) -> ControlFlow<()> {
-                let SQLExpr::Identifier(identifier) = expr else {
-                    return ControlFlow::Continue(());
-                };
-                if let Some(index) = self
-                    .parameters
-                    .iter()
-                    .position(|parameter| parameter.eq_ignore_ascii_case(&identifier.value))
-                {
-                    *expr = self.actual[index].clone();
-                }
-                ControlFlow::Continue(())
-            }
-        }
-
-        let _ = expanded.visit(&mut Substitute {
-            parameters: &info.parameters,
-            actual: &actual,
-        });
-        Ok(Some(expanded))
-    }
-
     match statement {
         DFStatement::Statement(inner) => {
             // `visit` walks the whole SQL AST — CTEs, subqueries, joins — so
             // nested calls are covered without hand-rolling the recursion.
-            if let ControlFlow::Break(error) = inner.as_mut().visit(&mut Rewrite { ctx }) {
+            if let ControlFlow::Break(error) = inner.as_mut().visit(&mut Rewrite {
+                ctx,
+                scalar_macros: Vec::new(),
+                table_macro_frames: Vec::new(),
+                active_table_macros: HashSet::new(),
+            }) {
                 return Err(*error);
             }
         }
@@ -1359,7 +1664,7 @@ async fn attach_one(
     register_scalar_functions(ctx, &conn, spec, &provider);
     register_aggregate_functions(ctx, &conn, spec, &provider);
     register_global_functions(ctx, &conn, spec, &provider)?;
-    register_scalar_macros(ctx, spec, &provider);
+    register_macros(ctx, spec, &provider);
     ctx.register_catalog(&spec.alias, provider.clone());
     register_views(ctx, spec, &provider).await;
     record_default_schema(ctx, &spec.alias, provider.default_schema());
@@ -1794,21 +2099,47 @@ fn blob_literal(raw: &str) -> DFResult<Option<Vec<u8>>> {
     Ok(Some(out))
 }
 
-fn register_scalar_macros(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalogProvider) {
+fn register_macros(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalogProvider) {
     let Ok(mut sessions) = macro_registry().lock() else {
         return;
     };
     let macros = sessions.entry(ctx.session_id()).or_default();
     let alias_prefix = format!("{}.", spec.alias.to_ascii_lowercase());
     macros.retain(|name, _| !name.starts_with(&alias_prefix));
-    for (schema, info) in provider.scalar_macros() {
+    for info in provider.metadata_macros() {
+        let (kind, mut body) = match sql_macro_kind(&info.macro_type.0) {
+            Ok(kind) => (kind, parse_macro_body(kind, &info.definition)),
+            Err(error) => (SqlMacroKind::Scalar, SqlMacroBody::Invalid(error)),
+        };
+        let defaults = match vgi_client::decode_macro_defaults(info) {
+            Ok(defaults) => defaults
+                .into_iter()
+                .map(|(name, value)| (name.to_ascii_lowercase(), value))
+                .collect(),
+            Err(error) => {
+                body = SqlMacroBody::Invalid(format!("invalid parameter defaults: {error}"));
+                HashMap::new()
+            }
+        };
+        let registered = Arc::new(SqlMacro {
+            kind,
+            parameters: info.parameters.clone(),
+            defaults,
+            body,
+        });
         macros.insert(
-            format!("{}.{}.{}", spec.alias, schema, info.name).to_ascii_lowercase(),
-            SqlMacro {
-                parameters: info.parameters.clone(),
-                definition: info.definition.clone(),
-            },
+            format!("{}.{}.{}", spec.alias, info.schema_name, info.name).to_ascii_lowercase(),
+            Arc::clone(&registered),
         );
+        if info
+            .schema_name
+            .eq_ignore_ascii_case(provider.default_schema())
+        {
+            macros.insert(
+                format!("{}.{}", spec.alias, info.name).to_ascii_lowercase(),
+                registered,
+            );
+        }
     }
 }
 
@@ -2040,6 +2371,52 @@ fn detach(ctx: &SessionContext, alias: &str) -> DFResult<()> {
 mod tests {
     use super::*;
 
+    fn install_test_macro(
+        ctx: &SessionContext,
+        names: &[&str],
+        kind: SqlMacroKind,
+        parameters: &[&str],
+        defaults: &[(&str, i64)],
+        definition: &str,
+    ) {
+        let registered = Arc::new(SqlMacro {
+            kind,
+            parameters: parameters.iter().map(|value| value.to_string()).collect(),
+            defaults: defaults
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.to_ascii_lowercase(),
+                        Arc::new(datafusion::arrow::array::Int64Array::from(vec![*value]))
+                            as ArrayRef,
+                    )
+                })
+                .collect(),
+            body: parse_macro_body(kind, definition),
+        });
+        let mut sessions = macro_registry().lock().unwrap();
+        let macros = sessions.entry(ctx.session_id()).or_default();
+        for name in names {
+            macros.insert(name.to_ascii_lowercase(), Arc::clone(&registered));
+        }
+    }
+
+    async fn query_i64(ctx: &SessionContext, query: &str) -> i64 {
+        let batches = sql(ctx, query)
+            .await
+            .unwrap_or_else(|error| panic!("{query} failed: {error}"))
+            .collect()
+            .await
+            .unwrap_or_else(|error| panic!("{query} did not collect: {error}"));
+        let value =
+            datafusion::common::ScalarValue::try_from_array(batches[0].column(0).as_ref(), 0)
+                .unwrap();
+        match value {
+            datafusion::common::ScalarValue::Int64(Some(value)) => value,
+            other => panic!("{query} returned {other:?}, expected one Int64"),
+        }
+    }
+
     fn spec(target: &str) -> AttachSpec {
         AttachSpec::parse(target, "ex").expect("parses")
     }
@@ -2208,5 +2585,193 @@ mod tests {
             rewritten.contains("local.items"),
             "unattached two-part name was changed: {rewritten}"
         );
+    }
+
+    #[tokio::test]
+    async fn scalar_macros_expand_expressions_named_arguments_and_defaults() {
+        let ctx = SessionContext::new();
+        install_test_macro(
+            &ctx,
+            &["example.vgi_multiply", "example.main.vgi_multiply"],
+            SqlMacroKind::Scalar,
+            &["x", "y"],
+            &[],
+            "x * y",
+        );
+        install_test_macro(
+            &ctx,
+            &["example.vgi_clamp", "example.main.vgi_clamp"],
+            SqlMacroKind::Scalar,
+            &["val", "lo", "hi"],
+            &[("lo", 0), ("hi", 100)],
+            "GREATEST(lo, LEAST(hi, val))",
+        );
+
+        assert_eq!(
+            query_i64(&ctx, "SELECT example.vgi_multiply(3, 4)").await,
+            12
+        );
+        assert_eq!(
+            query_i64(&ctx, "SELECT example.main.vgi_multiply(2 + 3, 4)").await,
+            20
+        );
+        assert_eq!(query_i64(&ctx, "SELECT example.vgi_clamp(50)").await, 50);
+        assert_eq!(
+            query_i64(&ctx, "SELECT example.vgi_clamp(5, lo := 10)").await,
+            10
+        );
+        assert_eq!(
+            query_i64(&ctx, "SELECT example.vgi_clamp(50, hi := 25)").await,
+            25
+        );
+    }
+
+    #[tokio::test]
+    async fn table_macros_expand_to_existing_datafusion_relations() {
+        let ctx = SessionContext::new();
+        install_test_macro(
+            &ctx,
+            &["example.vgi_range_table", "example.main.vgi_range_table"],
+            SqlMacroKind::Table,
+            &["n"],
+            &[],
+            "SELECT * FROM range(n)",
+        );
+
+        assert_eq!(
+            query_i64(&ctx, "SELECT COUNT(*) FROM example.vgi_range_table(10)").await,
+            10
+        );
+        assert_eq!(
+            query_i64(
+                &ctx,
+                "SELECT MIN(value) FROM example.main.vgi_range_table(n := 5)",
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            query_i64(
+                &ctx,
+                "SELECT MAX(r.value) FROM example.vgi_range_table(5) AS r",
+            )
+            .await,
+            4
+        );
+    }
+
+    #[tokio::test]
+    async fn macro_binding_rejects_ambiguous_or_incomplete_calls() {
+        let ctx = SessionContext::new();
+        install_test_macro(
+            &ctx,
+            &["example.pair"],
+            SqlMacroKind::Scalar,
+            &["left", "right"],
+            &[],
+            "left + right",
+        );
+
+        for (query, expected) in [
+            (
+                "SELECT example.pair(1)",
+                "missing required argument(s): right",
+            ),
+            (
+                "SELECT example.pair(1, other := 2)",
+                "has no parameter named `other`",
+            ),
+            (
+                "SELECT example.pair(1, right := 2, right := 3)",
+                "received parameter `right` more than once",
+            ),
+            (
+                "SELECT example.pair(right := 2, 1)",
+                "does not accept positional arguments after named arguments",
+            ),
+        ] {
+            let error = sql(&ctx, query).await.unwrap_err().to_string();
+            assert!(
+                error.contains(expected),
+                "unexpected error for {query}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scalar_macros_compose_and_recursive_macros_fail_cleanly() {
+        let ctx = SessionContext::new();
+        install_test_macro(
+            &ctx,
+            &["example.inc"],
+            SqlMacroKind::Scalar,
+            &["x"],
+            &[],
+            "x + 1",
+        );
+        install_test_macro(
+            &ctx,
+            &["example.twice"],
+            SqlMacroKind::Scalar,
+            &["x"],
+            &[],
+            "example.inc(x) * 2",
+        );
+        install_test_macro(
+            &ctx,
+            &["example.loop_scalar"],
+            SqlMacroKind::Scalar,
+            &["x"],
+            &[],
+            "example.loop_scalar(x)",
+        );
+        install_test_macro(
+            &ctx,
+            &["example.loop_table"],
+            SqlMacroKind::Table,
+            &["n"],
+            &[],
+            "SELECT * FROM example.loop_table(n)",
+        );
+
+        assert_eq!(query_i64(&ctx, "SELECT example.twice(4)").await, 10);
+        let scalar_error = sql(&ctx, "SELECT example.loop_scalar(1)")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            scalar_error.contains("recursive VGI scalar macro"),
+            "{scalar_error}"
+        );
+        let table_error = sql(&ctx, "SELECT * FROM example.loop_table(1)")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            table_error.contains("recursive VGI table macro"),
+            "{table_error}"
+        );
+    }
+
+    #[test]
+    fn scalar_macro_parser_rejects_query_clauses_it_cannot_preserve() {
+        for definition in ["x FROM secret_table", "x WHERE false", "x LIMIT 1"] {
+            let SqlMacroBody::Invalid(error) = parse_macro_body(SqlMacroKind::Scalar, definition)
+            else {
+                panic!("accepted lossy scalar macro definition: {definition}");
+            };
+            assert!(error.contains("only one expression"), "{error}");
+        }
+        assert!(matches!(
+            parse_macro_body(
+                SqlMacroKind::Scalar,
+                "x + (SELECT MAX(y) FROM values_table)"
+            ),
+            SqlMacroBody::Scalar(_)
+        ));
+
+        assert_eq!(sql_macro_kind("SCALAR"), Ok(SqlMacroKind::Scalar));
+        assert_eq!(sql_macro_kind("table_macro"), Ok(SqlMacroKind::Table));
+        assert!(sql_macro_kind("not_a_table").is_err());
     }
 }

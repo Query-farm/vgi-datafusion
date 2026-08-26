@@ -373,8 +373,6 @@ pub struct VgiSchemaProvider {
         bool,
         Vec<vgi_client::SecretLookupRequest>,
     )>,
-    /// Scalar SQL macros expanded locally before DataFusion planning.
-    macros: HashMap<String, vgi_client::dtos::MacroInfo>,
     /// Scalar and table macro declarations retained for metadata inspection.
     metadata_macros: Vec<vgi_client::dtos::MacroInfo>,
     /// SQL views declared by the worker. Their definitions are planned after
@@ -400,130 +398,115 @@ impl VgiSchemaProvider {
         schema_name: &str,
     ) -> DFResult<Arc<Self>> {
         let (c, cat, sch) = (conn.clone(), catalog.to_string(), schema_name.to_string());
-        let (
-            tables,
-            table_functions,
-            scalars,
-            aggregates,
-            macros,
-            metadata_macros,
-            views,
-            functions,
-        ) = tokio::task::spawn_blocking(move || {
-            let mut client = c.connect()?;
-            let attached = c.attach(&mut client, &cat)?;
-            let tables = client.tables(&attached, &sch).map_err(to_df)?;
-            let table_infos = client
-                .functions(&attached, &sch, vgi_client::FunctionKind::Table)
-                .map_err(to_df)?;
-            // `function_type` distinguishes the three table shapes that share
-            // one listing filter; the buffered one needs the Sink+Source
-            // protocol rather than a streaming exchange.
-            //
-            // The wire carries the enum's *member name* — `TABLE_BUFFERING`,
-            // not the lowercase `table_buffering` value — the same convention
-            // that governs `FunctionKind`. Matched case-insensitively so a
-            // worker that sends either spelling is understood.
-            let table_functions = table_infos
-                .iter()
-                .map(|f| {
+        let (tables, table_functions, scalars, aggregates, metadata_macros, views, functions) =
+            tokio::task::spawn_blocking(move || {
+                let mut client = c.connect()?;
+                let attached = c.attach(&mut client, &cat)?;
+                let tables = client.tables(&attached, &sch).map_err(to_df)?;
+                let table_infos = client
+                    .functions(&attached, &sch, vgi_client::FunctionKind::Table)
+                    .map_err(to_df)?;
+                // `function_type` distinguishes the three table shapes that share
+                // one listing filter; the buffered one needs the Sink+Source
+                // protocol rather than a streaming exchange.
+                //
+                // The wire carries the enum's *member name* — `TABLE_BUFFERING`,
+                // not the lowercase `table_buffering` value — the same convention
+                // that governs `FunctionKind`. Matched case-insensitively so a
+                // worker that sends either spelling is understood.
+                let table_functions = table_infos
+                    .iter()
+                    .map(|f| {
+                        let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
+                        let metadata = TableFunctionMetadata {
+                            buffered: f.function_type.0.eq_ignore_ascii_case("table_buffering"),
+                            input_from_args: f.input_from_args,
+                            specs,
+                        };
+                        Ok::<_, DataFusionError>((f.name.clone(), metadata))
+                    })
+                    .collect::<Result<HashMap<_, _>, _>>()?;
+                let scalar_infos = client
+                    .functions(&attached, &sch, vgi_client::FunctionKind::Scalar)
+                    .map_err(to_df)?;
+                let aggregate_infos = client
+                    .functions(&attached, &sch, vgi_client::FunctionKind::Aggregate)
+                    .map_err(to_df)?;
+                let aggregates = aggregate_infos
+                    .iter()
+                    .map(|f| {
+                        let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
+                        let secrets = f
+                            .required_secrets
+                            .iter()
+                            .map(|secret| vgi_client::SecretLookupRequest {
+                                secret_type: secret.secret_type.clone(),
+                                scope: secret.scope.clone(),
+                                name: secret.secret_name.clone(),
+                            })
+                            .collect();
+                        Ok::<_, DataFusionError>((
+                            f.name.clone(),
+                            specs,
+                            volatility(f.stability.as_ref().map(|v| v.0.as_str())),
+                            f.supports_window,
+                            secrets,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let scalar_macro_infos = client
+                    .macros(&attached, &sch, vgi_client::MacroKind::Scalar)
+                    .map_err(to_df)?;
+                let table_macro_infos = client
+                    .macros(&attached, &sch, vgi_client::MacroKind::Table)
+                    .map_err(to_df)?;
+                let metadata_macros = scalar_macro_infos
+                    .into_iter()
+                    .chain(table_macro_infos)
+                    .collect::<Vec<_>>();
+                let views = client
+                    .views(&attached, &sch)
+                    .map_err(to_df)?
+                    .into_iter()
+                    .map(|info| (info.name.clone(), info))
+                    .collect::<HashMap<_, _>>();
+                // DataFusion registers one scalar UDF per SQL name, whereas
+                // VGI advertises one FunctionInfo per overload. Preserve the
+                // complete overload set so the UDF can choose the right const
+                // layout for each call instead of whichever overload happened
+                // to be registered first.
+                let mut scalar_overloads: HashMap<String, (Vec<vgi_client::ArgSpecs>, Volatility)> =
+                    HashMap::new();
+                for f in &scalar_infos {
                     let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
-                    let metadata = TableFunctionMetadata {
-                        buffered: f.function_type.0.eq_ignore_ascii_case("table_buffering"),
-                        input_from_args: f.input_from_args,
-                        specs,
-                    };
-                    Ok::<_, DataFusionError>((f.name.clone(), metadata))
-                })
-                .collect::<Result<HashMap<_, _>, _>>()?;
-            let scalar_infos = client
-                .functions(&attached, &sch, vgi_client::FunctionKind::Scalar)
-                .map_err(to_df)?;
-            let aggregate_infos = client
-                .functions(&attached, &sch, vgi_client::FunctionKind::Aggregate)
-                .map_err(to_df)?;
-            let aggregates = aggregate_infos
-                .iter()
-                .map(|f| {
-                    let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
-                    let secrets = f
-                        .required_secrets
-                        .iter()
-                        .map(|secret| vgi_client::SecretLookupRequest {
-                            secret_type: secret.secret_type.clone(),
-                            scope: secret.scope.clone(),
-                            name: secret.secret_name.clone(),
-                        })
-                        .collect();
-                    Ok::<_, DataFusionError>((
-                        f.name.clone(),
-                        specs,
-                        volatility(f.stability.as_ref().map(|v| v.0.as_str())),
-                        f.supports_window,
-                        secrets,
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let scalar_macro_infos = client
-                .macros(&attached, &sch, vgi_client::MacroKind::Scalar)
-                .map_err(to_df)?;
-            let table_macro_infos = client
-                .macros(&attached, &sch, vgi_client::MacroKind::Table)
-                .map_err(to_df)?;
-            let macros = scalar_macro_infos
-                .iter()
-                .cloned()
-                .into_iter()
-                .map(|info| (info.name.clone(), info))
-                .collect::<HashMap<_, _>>();
-            let metadata_macros = scalar_macro_infos
-                .into_iter()
-                .chain(table_macro_infos)
-                .collect::<Vec<_>>();
-            let views = client
-                .views(&attached, &sch)
-                .map_err(to_df)?
-                .into_iter()
-                .map(|info| (info.name.clone(), info))
-                .collect::<HashMap<_, _>>();
-            // DataFusion registers one scalar UDF per SQL name, whereas
-            // VGI advertises one FunctionInfo per overload. Preserve the
-            // complete overload set so the UDF can choose the right const
-            // layout for each call instead of whichever overload happened
-            // to be registered first.
-            let mut scalar_overloads: HashMap<String, (Vec<vgi_client::ArgSpecs>, Volatility)> =
-                HashMap::new();
-            for f in &scalar_infos {
-                let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
-                let declared = volatility(f.stability.as_ref().map(|v| v.0.as_str()));
-                let entry = scalar_overloads
-                    .entry(f.name.clone())
-                    .or_insert_with(|| (Vec::new(), declared));
-                entry.0.push(specs);
-                entry.1 = most_volatile(entry.1, declared);
-            }
-            let scalars = scalar_overloads
-                .into_iter()
-                .map(|(name, (overloads, volatility))| (name, overloads, volatility))
-                .collect::<Vec<_>>();
-            let functions = table_infos
-                .into_iter()
-                .chain(scalar_infos)
-                .chain(aggregate_infos)
-                .collect::<Vec<_>>();
-            Ok::<_, DataFusionError>((
-                tables,
-                table_functions,
-                scalars,
-                aggregates,
-                macros,
-                metadata_macros,
-                views,
-                functions,
-            ))
-        })
-        .await
-        .map_err(|e| DataFusionError::External(Box::new(e)))??;
+                    let declared = volatility(f.stability.as_ref().map(|v| v.0.as_str()));
+                    let entry = scalar_overloads
+                        .entry(f.name.clone())
+                        .or_insert_with(|| (Vec::new(), declared));
+                    entry.0.push(specs);
+                    entry.1 = most_volatile(entry.1, declared);
+                }
+                let scalars = scalar_overloads
+                    .into_iter()
+                    .map(|(name, (overloads, volatility))| (name, overloads, volatility))
+                    .collect::<Vec<_>>();
+                let functions = table_infos
+                    .into_iter()
+                    .chain(scalar_infos)
+                    .chain(aggregate_infos)
+                    .collect::<Vec<_>>();
+                Ok::<_, DataFusionError>((
+                    tables,
+                    table_functions,
+                    scalars,
+                    aggregates,
+                    metadata_macros,
+                    views,
+                    functions,
+                ))
+            })
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
         let tables: HashMap<String, vgi_client::TableInfo> =
             tables.into_iter().map(|t| (t.name.clone(), t)).collect();
@@ -551,7 +534,6 @@ impl VgiSchemaProvider {
             tables,
             scalars,
             aggregates,
-            macros,
             metadata_macros,
             views,
             functions,
@@ -953,15 +935,6 @@ impl VgiCatalogProvider {
             DataFusionError::Plan(format!("VGI schema `{schema}` does not exist"))
         })?;
         provider.table_at(table, at).await
-    }
-
-    /// Scalar SQL macros, paired with their owning schema.
-    pub(crate) fn scalar_macros(
-        &self,
-    ) -> impl Iterator<Item = (&String, &vgi_client::dtos::MacroInfo)> {
-        self.schemas
-            .iter()
-            .flat_map(|(schema, provider)| provider.macros.values().map(move |info| (schema, info)))
     }
 }
 

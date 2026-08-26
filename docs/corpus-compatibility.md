@@ -164,6 +164,15 @@ as a future input, not mixed into this baseline. Six `.test_slow` files are also
 excluded from the normal 327-file count and should be separate soak/performance
 gates.
 
+Post-baseline focused verification now completes the macro slice. Scalar and
+table macro definitions are parsed once, typed defaults and positional/named
+arguments are bound locally, nested scalar macros compose, and recursive macro
+definitions fail deterministically. Without overlays, 22/24 records execute and
+all 19 comparable results are exact. Two reviewed overlays account only for
+DataFusion's `range.value` versus DuckDB's `range.range` column spelling; with
+them, `macro/macros.test` and `catalog/function_arguments_macros.test` execute
+24/24 records with all 21 query results exact.
+
 ## What remains
 
 The following order maximizes useful coverage while keeping new DataFusion
@@ -188,11 +197,13 @@ engine work to a minimum:
    The adapter accepts the single-column expression shape DataFusion exposes
    naturally, plus literal one-row exchange. These two gaps are tracked but are
    not candidates for new DataFusion engine work in this project.
-5. **Catalog objects.** Macros, broader views, and multi-branch catalogs need
-   publication or a documented SQL adaptation. Function inventory, overloads,
-   argument docs/constraints, tags, categories, and global nominations now use
-   retained worker metadata. Current execution is 64/90 for catalog, 4/19 for
-   macros, and 5/14 for views.
+5. **Catalog objects.** The focused scalar/table macro slice is now complete at
+   19/19 records. Multi-branch catalogs, broader views, database metadata
+   adaptations, and same-schema qualification for unqualified objects inside
+   macro definitions remain. Function inventory, overloads, argument
+   docs/constraints, tags, categories, and global nominations use retained
+   worker metadata. The committed full baseline still records 64/90 for
+   catalog, 4/19 for macros, and 5/14 for views until the next promotion run.
 6. **Secrets and authenticated fixtures.** Twenty-four failures explicitly lack
    a `VgiSecretResolver`. Add deterministic corpus resolvers before judging the
    worker behavior; keep real OAuth and external-service tests in the blocked

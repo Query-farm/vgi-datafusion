@@ -70,7 +70,7 @@ cross-query single-flight remain deferred.
 |---|:---:|---|
 | ATTACH / DETACH | Supported | DuckDB-style syntax, typed worker options, OAuth, cache veto, and companion discovery |
 | Catalogs, schemas, tables, views | Supported | Views are registered after dependencies and qualified to their alias |
-| Scalar and SQL macro functions | Supported | Async scalar UDFs and scalar macro expansion |
+| Scalar and SQL macro functions | Supported | Async scalar UDFs plus scalar/table macro expansion with typed defaults and named arguments |
 | Aggregate/window-frame use | Partial | ConstParams and retract work; dedicated VGI window RPC deferred |
 | Table and buffered functions | Supported | Table input is currently constrained to one column by scalar-subquery planning |
 | Global functions | Supported | Prefix/collision rules and DETACH cleanup included |

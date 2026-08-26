@@ -25,6 +25,7 @@ ctx.sql("SELECT count(*) FROM orders").await?.show().await?;
 | SQL metadata | `SHOW` + `information_schema` | ✅ tables, views, columns, schemata, routines |
 | Table time travel | version-specific `TableProvider` + VGI `At` | ✅ |
 | Views and prefixed global functions | `ViewTable` + UDF/UDTF registries | ✅ |
+| Scalar and table SQL macros | sqlparser AST expansion into existing expressions/relations | ✅ |
 | Scalar function | `AsyncScalarUDFImpl` | ✅ |
 | Aggregate and sliding window-frame use | `AggregateUDFImpl` with retract | ◐ |
 | Projection & LIMIT pushdown | `scan(projection, limit)` | ✅ |

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 17,
+      "original_sql": "SELECT MIN(range) FROM example.vgi_range_table(5);",
+      "replacement_sql": "SELECT MIN(value) FROM example.vgi_range_table(5);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's built-in range table function names its output column `value`; DuckDB names the equivalent column `range`."
+    },
+    {
+      "record": 18,
+      "original_sql": "SELECT MAX(range) FROM example.vgi_range_table(5);",
+      "replacement_sql": "SELECT MAX(value) FROM example.vgi_range_table(5);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's built-in range table function names its output column `value`; DuckDB names the equivalent column `range`."
+    }
+  ]
+}
