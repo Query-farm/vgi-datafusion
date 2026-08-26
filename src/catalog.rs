@@ -32,18 +32,26 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::arrow::array::{
+    Array, FixedSizeListArray, LargeListArray, LargeStringArray, ListArray, StringArray,
+};
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
+use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 use datafusion::catalog::{CatalogProvider, SchemaProvider, Session, TableProvider};
 use datafusion::common::{
     Constraints, DFSchema, DataFusionError, Result as DFResult, ScalarValue, Statistics,
 };
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use datafusion::execution::SessionState;
 use datafusion::logical_expr::utils::expr_to_columns;
 use datafusion::logical_expr::{
-    Expr, ExprSchemable, TableProviderFilterPushDown, TableType, Volatility,
+    Expr, ExprSchemable, Operator, TableProviderFilterPushDown, TableType, Volatility,
 };
 use datafusion::physical_expr::expressions::{
-    cast as physical_cast, Column as PhysicalColumn, Literal as PhysicalLiteral,
+    binary as physical_binary, case as physical_case, cast as physical_cast,
+    Column as PhysicalColumn, Literal as PhysicalLiteral,
 };
 use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::filter::FilterExec;
@@ -59,7 +67,281 @@ type CachedTable = Result<Arc<dyn TableProvider>, String>;
 #[derive(Debug)]
 struct BoundCatalogBranch {
     info: vgi_client::ScanBranch,
-    provider: Arc<VgiTableProvider>,
+    provider: Arc<dyn TableProvider>,
+    /// DuckDB's exact CSV null marker. DataFusion 55 applies `null_regex`
+    /// during inference but not execution, so string columns need a local
+    /// projection until that existing option is honored by CsvSource.
+    null_string: Option<String>,
+}
+
+#[derive(Debug)]
+struct NativeFormatSpec {
+    format: String,
+    locations: Vec<String>,
+    options: Vec<(String, vgi_client::ArgValue)>,
+}
+
+fn native_reader_format(function: &str) -> Option<&'static str> {
+    match function.to_ascii_lowercase().as_str() {
+        "read_csv" | "read_csv_auto" => Some("csv"),
+        "read_parquet" | "parquet_scan" => Some("parquet"),
+        "read_json" | "read_json_auto" | "read_ndjson" => Some("json"),
+        "read_arrow" => Some("arrow"),
+        _ => None,
+    }
+}
+
+fn strings_from_arrow(array: &dyn Array, label: &str) -> DFResult<Vec<String>> {
+    if array.is_empty() || array.is_null(0) {
+        return Err(DataFusionError::Plan(format!(
+            "VGI native format {label} must not be NULL"
+        )));
+    }
+    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
+        return Ok(vec![values.value(0).to_string()]);
+    }
+    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(vec![values.value(0).to_string()]);
+    }
+    let nested = if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
+        Some(values.value(0))
+    } else if let Some(values) = array.as_any().downcast_ref::<LargeListArray>() {
+        Some(values.value(0))
+    } else {
+        array
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .map(|values| values.value(0))
+    };
+    if let Some(values) = nested {
+        if let Some(strings) = values.as_any().downcast_ref::<StringArray>() {
+            return (0..strings.len())
+                .map(|index| {
+                    (!strings.is_null(index))
+                        .then(|| strings.value(index).to_string())
+                        .ok_or_else(|| {
+                            DataFusionError::Plan(format!(
+                                "VGI native format {label} contains a NULL location"
+                            ))
+                        })
+                })
+                .collect();
+        }
+        if let Some(strings) = values.as_any().downcast_ref::<LargeStringArray>() {
+            return (0..strings.len())
+                .map(|index| {
+                    (!strings.is_null(index))
+                        .then(|| strings.value(index).to_string())
+                        .ok_or_else(|| {
+                            DataFusionError::Plan(format!(
+                                "VGI native format {label} contains a NULL location"
+                            ))
+                        })
+                })
+                .collect();
+        }
+    }
+    Err(DataFusionError::Plan(format!(
+        "VGI native format {label} must be a string or list of strings, found {:?}",
+        array.data_type()
+    )))
+}
+
+fn locations_from_argument(value: &vgi_client::ArgValue) -> DFResult<Vec<String>> {
+    match value {
+        vgi_client::ArgValue::Text(value) => Ok(vec![value.clone()]),
+        vgi_client::ArgValue::Arrow(array) => strings_from_arrow(array.as_ref(), "location"),
+        vgi_client::ArgValue::Null(_) | vgi_client::ArgValue::Placeholder(_) => Err(
+            DataFusionError::Plan("VGI native format location must not be NULL".to_string()),
+        ),
+        other => Err(DataFusionError::Plan(format!(
+            "VGI native format location must be a string or list of strings, found {other:?}"
+        ))),
+    }
+}
+
+fn option_value(value: &vgi_client::ArgValue, name: &str) -> DFResult<String> {
+    match value {
+        vgi_client::ArgValue::Int(value) => Ok(value.to_string()),
+        vgi_client::ArgValue::Float(value) => Ok(value.to_string()),
+        vgi_client::ArgValue::Text(value) => Ok(value.clone()),
+        vgi_client::ArgValue::Bool(value) => Ok(value.to_string()),
+        vgi_client::ArgValue::Arrow(array) => {
+            if array.is_empty() || array.is_null(0) {
+                return Err(DataFusionError::Plan(format!(
+                    "VGI native format option {name:?} must not be NULL"
+                )));
+            }
+            let formatter = ArrayFormatter::try_new(array.as_ref(), &FormatOptions::default())?;
+            Ok(formatter.value(0).to_string())
+        }
+        vgi_client::ArgValue::Null(_) | vgi_client::ArgValue::Placeholder(_) => {
+            Err(DataFusionError::Plan(format!(
+                "VGI native format option {name:?} must not be NULL"
+            )))
+        }
+    }
+}
+
+fn exact_regex(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 4);
+    escaped.push('^');
+    for ch in value.chars() {
+        if matches!(
+            ch,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('$');
+    escaped
+}
+
+fn datafusion_format_options(
+    options: &[(String, vgi_client::ArgValue)],
+) -> DFResult<HashMap<String, String>> {
+    let mut translated = HashMap::new();
+    for (name, value) in options {
+        let normalized = name.to_ascii_lowercase();
+        let exact_null = matches!(normalized.as_str(), "nullstr" | "null_string");
+        let key = match normalized.as_str() {
+            "delim" | "delimiter" => "format.delimiter".to_string(),
+            "header" | "has_header" => "format.has_header".to_string(),
+            "nullstr" | "null_string" => "format.null_regex".to_string(),
+            _ if normalized.starts_with("format.") => normalized,
+            _ => format!("format.{normalized}"),
+        };
+        let mut value = option_value(value, name)?;
+        if exact_null {
+            value = exact_regex(&value);
+        }
+        if translated.insert(key.clone(), value).is_some() {
+            return Err(DataFusionError::Plan(format!(
+                "VGI native format supplied duplicate option {key:?} through aliases"
+            )));
+        }
+    }
+    Ok(translated)
+}
+
+fn exact_null_string(options: &[(String, vgi_client::ArgValue)]) -> DFResult<Option<String>> {
+    options
+        .iter()
+        .find(|(name, _)| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "nullstr" | "null_string"
+            )
+        })
+        .map(|(name, value)| option_value(value, name))
+        .transpose()
+}
+
+fn native_format_spec(branch: &vgi_client::ScanBranch) -> DFResult<Option<NativeFormatSpec>> {
+    if let Some(format) = branch
+        .format_name
+        .as_deref()
+        .filter(|format| !format.is_empty())
+    {
+        let arguments = match branch.format_options.as_ref() {
+            Some(options) => {
+                vgi_client::Arguments::from_scan_arguments(&options.0).map_err(to_df)?
+            }
+            None => vgi_client::Arguments::new(),
+        };
+        if !arguments.positional_values().is_empty() {
+            return Err(DataFusionError::Plan(
+                "VGI native format options must all be named".to_string(),
+            ));
+        }
+        return Ok(Some(NativeFormatSpec {
+            format: format.to_ascii_lowercase(),
+            locations: branch.format_locations.clone().unwrap_or_default(),
+            options: arguments.named_values().to_vec(),
+        }));
+    }
+
+    let Some(format) = native_reader_format(&branch.function_name) else {
+        return Ok(None);
+    };
+    let arguments =
+        vgi_client::Arguments::from_scan_arguments(&branch.arguments.0).map_err(to_df)?;
+    let [location] = arguments.positional_values() else {
+        return Err(DataFusionError::Plan(format!(
+            "VGI native reader {:?} requires exactly one positional location argument",
+            branch.function_name
+        )));
+    };
+    let locations = locations_from_argument(location)?;
+    Ok(Some(NativeFormatSpec {
+        format: format.to_string(),
+        locations,
+        options: arguments.named_values().to_vec(),
+    }))
+}
+
+#[cfg(test)]
+mod native_format_tests {
+    use super::*;
+
+    #[test]
+    fn translates_duckdb_csv_options_without_losing_semantics() {
+        let options = vec![
+            ("delim".to_string(), vgi_client::ArgValue::Text("|".into())),
+            ("header".to_string(), vgi_client::ArgValue::Bool(true)),
+            (
+                "nullstr".to_string(),
+                vgi_client::ArgValue::Text("row_2".into()),
+            ),
+        ];
+        let translated = datafusion_format_options(&options).unwrap();
+        assert_eq!(translated["format.delimiter"], "|");
+        assert_eq!(translated["format.has_header"], "true");
+        assert_eq!(translated["format.null_regex"], "^row_2$");
+    }
+
+    #[test]
+    fn null_string_becomes_an_exact_regex() {
+        assert_eq!(exact_regex(r"a.b[0]\\end"), r"^a\.b\[0\]\\\\end$");
+    }
+
+    #[test]
+    fn reads_scalar_arrow_string_locations() {
+        let value =
+            vgi_client::ArgValue::Arrow(Arc::new(StringArray::from(vec!["/tmp/branch.parquet"])));
+        assert_eq!(
+            locations_from_argument(&value).unwrap(),
+            ["/tmp/branch.parquet"]
+        );
+    }
+
+    #[test]
+    fn only_local_worker_transports_may_nominate_local_files() {
+        assert!(VgiConnection::from_location("/opt/vgi/worker")
+            .unwrap()
+            .allows_local_format_paths());
+        assert!(VgiConnection::from_location("unix:///tmp/vgi.sock")
+            .unwrap()
+            .allows_local_format_paths());
+        assert!(VgiConnection::from_location("http://127.0.0.1:8080")
+            .unwrap()
+            .allows_local_format_paths());
+        assert!(VgiConnection::from_location("tcp://[::1]:9000")
+            .unwrap()
+            .allows_local_format_paths());
+        assert!(!VgiConnection::from_location("https://worker.example/vgi")
+            .unwrap()
+            .allows_local_format_paths());
+        assert!(!VgiConnection::from_location("tcp://worker.example:9000")
+            .unwrap()
+            .allows_local_format_paths());
+        assert!(VgiConnection::from_location("https://worker.example/vgi")
+            .unwrap()
+            .with_local_format_paths(true)
+            .allows_local_format_paths());
+    }
 }
 
 /// A catalog table whose schema is available from discovery and whose scan
@@ -160,7 +442,65 @@ impl VgiCatalogTableProvider {
         Ok(provider)
     }
 
-    async fn multi_branches(&self) -> DFResult<Option<&Vec<BoundCatalogBranch>>> {
+    async fn bind_native_format(
+        &self,
+        state: &dyn Session,
+        spec: NativeFormatSpec,
+        branch_index: usize,
+    ) -> DFResult<Arc<dyn TableProvider>> {
+        let session_state = state
+            .as_any()
+            .downcast_ref::<SessionState>()
+            .ok_or_else(|| {
+                DataFusionError::Plan(
+                    "VGI native format branches require DataFusion SessionState file-format support"
+                        .to_string(),
+                )
+            })?;
+        if spec.locations.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "VGI native format branch {branch_index} for `{}.{}` names no locations",
+                self.schema_name, self.info.name
+            )));
+        }
+        let paths = spec
+            .locations
+            .iter()
+            .map(|location| {
+                let path = ListingTableUrl::parse(location)?;
+                if path.get_url().scheme() == "file" && !self.conn.allows_local_format_paths() {
+                    return Err(DataFusionError::Plan(format!(
+                        "remote VGI catalog {:?} may not nominate local format location {location:?}",
+                        self.mount_alias
+                    )));
+                }
+                Ok(path)
+            })
+            .collect::<DFResult<Vec<_>>>()?;
+        let factory = session_state
+            .get_file_format_factory(&spec.format)
+            .ok_or_else(|| {
+                DataFusionError::NotImplemented(format!(
+                    "VGI native format branch {branch_index} for `{}.{}` requires DataFusion file format {:?}, but no such format is registered",
+                    self.schema_name, self.info.name, spec.format
+                ))
+            })?;
+        let options = datafusion_format_options(&spec.options)?;
+        let format = factory.create(session_state, &options)?;
+        // The worker explicitly declared the format, so do not exclude a file
+        // merely because its location lacks that format's conventional suffix.
+        let listing_options = ListingOptions::new(format).with_file_extension("");
+        let config = ListingTableConfig::new_with_multi_paths(paths)
+            .with_listing_options(listing_options)
+            .infer_schema(session_state)
+            .await?;
+        Ok(Arc::new(ListingTable::try_new(config)?))
+    }
+
+    async fn multi_branches(
+        &self,
+        state: &dyn Session,
+    ) -> DFResult<Option<&Vec<BoundCatalogBranch>>> {
         let branches = self
             .branches
             .get_or_try_init(|| async {
@@ -219,39 +559,67 @@ impl VgiCatalogTableProvider {
                         self.schema_name, self.info.name
                     )));
                 }
-                if !resolved.required_extensions.is_empty() {
-                    return Err(DataFusionError::NotImplemented(format!(
-                        "VGI table `{}.{}` requires host extension(s) for its scan branches: {}",
-                        self.schema_name,
-                        self.info.name,
-                        resolved.required_extensions.join(", ")
-                    )));
+                let session_state = state
+                    .as_any()
+                    .downcast_ref::<SessionState>()
+                    .ok_or_else(|| {
+                        DataFusionError::Plan(
+                            "VGI catalog branches require DataFusion SessionState support"
+                                .to_string(),
+                        )
+                })?;
+                for extension in &resolved.required_extensions {
+                    let normalized = extension.to_ascii_lowercase();
+                    let format = if normalized == "ndjson" {
+                        "json"
+                    } else {
+                        normalized.as_str()
+                    };
+                    if session_state.get_file_format_factory(format).is_none() {
+                        return Err(DataFusionError::NotImplemented(format!(
+                            "VGI table `{}.{}` requires host extension {:?}, which is not registered as a DataFusion file format",
+                            self.schema_name, self.info.name, extension
+                        )));
+                    }
                 }
 
                 let mut bound = Vec::with_capacity(resolved.branches.len());
                 for (index, branch) in resolved.branches.into_iter().enumerate() {
-                    if branch.function_name.is_empty() {
-                        let kind = if branch.format_name.is_some() {
-                            "format"
-                        } else {
-                            "catalog-table"
-                        };
+                    if branch.source_table.is_some() {
                         return Err(DataFusionError::NotImplemented(format!(
-                            "VGI {kind} scan branch {index} for `{}.{}` is not yet mapped to a DataFusion provider",
+                            "VGI catalog-table scan branch {index} for `{}.{}` is not yet mapped to a DataFusion provider",
                             self.schema_name, self.info.name
                         )));
                     }
-                    let provider = VgiTableProvider::bind_catalog_branch(
-                        self.conn.clone(),
-                        &self.catalog,
-                        &self.schema_name,
-                        &branch.function_name,
-                        branch.arguments.clone(),
-                    )
-                    .await?;
+                    let (provider, null_string): (Arc<dyn TableProvider>, Option<String>) =
+                        if let Some(spec) = native_format_spec(&branch)? {
+                            let null_string = exact_null_string(&spec.options)?;
+                            (
+                                self.bind_native_format(state, spec, index).await?,
+                                null_string,
+                            )
+                        } else if branch.function_name.is_empty() {
+                            return Err(DataFusionError::NotImplemented(format!(
+                                "VGI scan branch {index} for `{}.{}` names no supported provider",
+                                self.schema_name, self.info.name
+                            )));
+                        } else {
+                            (
+                                VgiTableProvider::bind_catalog_branch(
+                                    self.conn.clone(),
+                                    &self.catalog,
+                                    &self.schema_name,
+                                    &branch.function_name,
+                                    branch.arguments.clone(),
+                                )
+                                .await?,
+                                None,
+                            )
+                        };
                     bound.push(BoundCatalogBranch {
                         info: branch,
                         provider,
+                        null_string,
                     });
                 }
                 Ok(Some(bound))
@@ -314,6 +682,57 @@ impl VgiCatalogTableProvider {
         )?))
     }
 
+    fn apply_native_null_string(
+        &self,
+        branch: &BoundCatalogBranch,
+        input: Arc<dyn ExecutionPlan>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let Some(null_string) = branch.null_string.as_ref() else {
+            return Ok(input);
+        };
+        let schema = input.schema();
+        let mut expressions = Vec::with_capacity(schema.fields().len());
+        for (index, field) in schema.fields().iter().enumerate() {
+            let column = Arc::new(PhysicalColumn::new(field.name(), index))
+                as Arc<dyn datafusion::physical_expr::PhysicalExpr>;
+            let marker = match field.data_type() {
+                DataType::Utf8 => Some(ScalarValue::Utf8(Some(null_string.clone()))),
+                DataType::LargeUtf8 => Some(ScalarValue::LargeUtf8(Some(null_string.clone()))),
+                DataType::Utf8View => Some(ScalarValue::Utf8View(Some(null_string.clone()))),
+                _ => None,
+            };
+            let expr = if let Some(marker) = marker {
+                let equals = physical_binary(
+                    Arc::clone(&column),
+                    Operator::Eq,
+                    Arc::new(PhysicalLiteral::new(marker)),
+                    schema.as_ref(),
+                )?;
+                physical_case(
+                    None,
+                    vec![(
+                        equals,
+                        Arc::new(PhysicalLiteral::new(ScalarValue::try_new_null(
+                            field.data_type(),
+                        )?)),
+                    )],
+                    Some(column),
+                )?
+            } else {
+                column
+            };
+            expressions.push(ProjectionExpr {
+                expr,
+                alias: field.name().clone(),
+            });
+        }
+        Ok(Arc::new(ProjectionExec::try_new_with_schema_metadata(
+            expressions,
+            input,
+            &schema,
+        )?))
+    }
+
     fn apply_branch_filter(
         &self,
         state: &dyn Session,
@@ -368,14 +787,40 @@ impl VgiCatalogTableProvider {
         state: &dyn Session,
         branches: &[BoundCatalogBranch],
         projection: Option<&Vec<usize>>,
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         let mut inputs = Vec::with_capacity(branches.len());
         for branch in branches {
-            // Query filters remain above this Inexact provider. Branch filters
-            // are mandatory source contracts and are enforced locally after
-            // by-name reconciliation.
-            let raw = branch.provider.scan(state, None, &[], None).await?;
+            // Send only predicates whose columns exist on this raw branch.
+            // The outer provider is Inexact, so DataFusion still rechecks
+            // every query predicate after reconciliation and union. Native
+            // Parquet providers can nevertheless use these hints for row-group
+            // pruning, while a branch missing a canonical column never sees an
+            // invalid predicate.
+            let raw_names = branch
+                .provider
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().to_ascii_lowercase())
+                .collect::<HashSet<_>>();
+            let branch_filters = filters
+                .iter()
+                .filter(|filter| {
+                    let mut columns = HashSet::new();
+                    expr_to_columns(filter, &mut columns).is_ok()
+                        && columns
+                            .iter()
+                            .all(|column| raw_names.contains(&column.name.to_ascii_lowercase()))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let raw = branch
+                .provider
+                .scan(state, None, &branch_filters, None)
+                .await?;
+            let raw = self.apply_native_null_string(branch, raw)?;
             let reconciled = self.reconcile_branch(raw)?;
             inputs.push(self.apply_branch_filter(state, branch, reconciled)?);
         }
@@ -578,9 +1023,9 @@ impl TableProvider for VgiCatalogTableProvider {
             };
             return Ok(Arc::new(EmptyExec::new(schema)));
         }
-        if let Some(branches) = self.multi_branches().await? {
+        if let Some(branches) = self.multi_branches(state).await? {
             return self
-                .scan_multi_branches(state, branches, projection, limit)
+                .scan_multi_branches(state, branches, projection, filters, limit)
                 .await;
         }
         let bound = self.bound().await?;

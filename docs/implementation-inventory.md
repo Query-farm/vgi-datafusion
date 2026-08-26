@@ -38,6 +38,10 @@ cross-query single-flight remain deferred.
   the declared VGI prefix and are removed on `DETACH` or replacement.
 - VGI-only companion catalogs attach recursively with depth and cycle guards;
   required unsupported companions fail rather than silently disappearing.
+- Multi-branch catalog tables execute worker-nominated CSV, Parquet, JSON/NDJSON,
+  and Arrow file arms through DataFusion's registered file-format factories and
+  `ListingTable`. Typed paths and options are preserved, schemas reconcile by
+  column name, and eligible filters reach the underlying native provider.
 - Function stability maps to DataFusion volatility. Directly bound table
   functions map exact worker filter application to
   `TableProviderFilterPushDown::Exact`; lazy catalog tables recheck locally.
@@ -70,6 +74,7 @@ cross-query single-flight remain deferred.
 |---|:---:|---|
 | ATTACH / DETACH | Supported | DuckDB-style syntax, typed worker options, OAuth, cache veto, and companion discovery |
 | Catalogs, schemas, tables, views | Supported | Views are registered after dependencies and qualified to their alias |
+| Native format scan branches | Supported | CSV, Parquet, JSON/NDJSON, and Arrow arms use registered DataFusion formats; custom formats require a host registration |
 | Scalar and SQL macro functions | Supported | Async scalar UDFs plus scalar/table macro expansion with typed defaults and named arguments |
 | Aggregate/window-frame use | Partial | ConstParams and retract work; dedicated VGI window RPC deferred |
 | Table and buffered functions | Supported | Table input is currently constrained to one column by scalar-subquery planning |
@@ -126,3 +131,8 @@ The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
 and diagnostics, correlated table calls, wide table input, writes, and secret
 host configuration. Publishing, stalled subprocess-RPC cancellation, and
 long-lived unbounded-stream tests remain release gates.
+
+The focused 10-file multi-branch slice additionally executes 75/75 positive
+records with all 53 comparable results exact over subprocess, Unix sockets, and
+loopback HTTP. This includes native CSV/Parquet arms, typed format options,
+schema reconciliation, branch filtering, and split redemption.

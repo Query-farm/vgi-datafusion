@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 1,
+      "original_sql": "COPY (SELECT range AS n, 'row_' || range AS label FROM range(5))\n    TO '${VGI_TEST_BRANCH_DIR}/vgi_format_branch.csv' (FORMAT 'csv', DELIMITER '|', HEADER);",
+      "replacement_sql": "COPY (SELECT value AS n, 'row_' || value AS label FROM range(5))\n    TO '${VGI_TEST_BRANCH_DIR}/vgi_format_branch.csv' STORED AS CSV\n    OPTIONS ('format.delimiter' '|', 'format.has_header' 'true');",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion spells COPY format and writer options with STORED AS and OPTIONS, and its range table column is named value."
+    }
+  ]
+}

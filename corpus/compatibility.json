@@ -72,7 +72,7 @@
       "title": "Catalogs, views, macros, and global functions",
       "status": "partial",
       "groups": ["catalog", "view", "macro", "global_functions", "schema_reconcile.test"],
-      "remaining": ["native format and companion-catalog scan branches", "heterogeneous multi-branch external fixtures", "broader view translation", "database metadata adaptations", "same-schema qualification for unqualified objects inside macro definitions"]
+      "remaining": ["catalog-table source scan branches", "custom formats without a registered DataFusion factory", "broader view translation", "database metadata adaptations", "same-schema qualification for unqualified objects inside macro definitions"]
     },
     {
       "id": "attach_settings",

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 1,
+      "original_sql": "COPY (SELECT * FROM (VALUES (1, 10), (2, 20), (3, 30)) AS t(a, b))\n     TO '${VGI_TEST_BRANCH_DIR}/vgi_recon_a_b.parquet' (FORMAT 'parquet');",
+      "replacement_sql": "COPY (SELECT * FROM (VALUES (1, 10), (2, 20), (3, 30)) AS t(a, b))\n     TO '${VGI_TEST_BRANCH_DIR}/vgi_recon_a_b.parquet' STORED AS PARQUET;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion expresses the same Parquet COPY destination with STORED AS PARQUET."
+    },
+    {
+      "record": 2,
+      "original_sql": "COPY (SELECT * FROM (VALUES (40, 4), (50, 5), (60, 6)) AS t(b, a))\n     TO '${VGI_TEST_BRANCH_DIR}/vgi_recon_b_a.parquet' (FORMAT 'parquet');",
+      "replacement_sql": "COPY (SELECT * FROM (VALUES (40, 4), (50, 5), (60, 6)) AS t(b, a))\n     TO '${VGI_TEST_BRANCH_DIR}/vgi_recon_b_a.parquet' STORED AS PARQUET;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion expresses the same Parquet COPY destination with STORED AS PARQUET."
+    },
+    {
+      "record": 3,
+      "original_sql": "COPY (SELECT * FROM (VALUES (7), (8), (9)) AS t(a))\n     TO '${VGI_TEST_BRANCH_DIR}/vgi_recon_a_only.parquet' (FORMAT 'parquet');",
+      "replacement_sql": "COPY (SELECT * FROM (VALUES (7), (8), (9)) AS t(a))\n     TO '${VGI_TEST_BRANCH_DIR}/vgi_recon_a_only.parquet' STORED AS PARQUET;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion expresses the same Parquet COPY destination with STORED AS PARQUET."
+    }
+  ]
+}

@@ -1495,8 +1495,10 @@ impl AttachSpec {
             })
         };
         let cache_enabled = bool_option("cache", true)?;
+        let allow_local_format_paths = bool_option("allow_local_format_paths", false)?;
         let mut connection = VgiConnection::pooled(location, pool)
             .with_cache_enabled(cache_enabled)
+            .with_local_format_paths(allow_local_format_paths)
             .with_connection_options(vgi_client::ConnectionOptions {
                 worker_debug,
                 launcher_idle_timeout,
@@ -1895,6 +1897,7 @@ const IMPLEMENTED_LOCAL_OPTIONS: &[&str] = &[
     "bearer_token",
     "oauth_refresh_token",
     "attach_companions",
+    "allow_local_format_paths",
 ];
 
 const UNAVAILABLE_LOCAL_OPTIONS: &[&str] = &["secrets", "attach_companion_secrets"];
@@ -2457,6 +2460,20 @@ mod tests {
                 .label(),
             "http://127.0.0.1:8080"
         );
+    }
+
+    #[test]
+    fn remote_local_format_paths_require_an_explicit_opt_in() {
+        let denied = spec("example?location=https://worker.example/vgi")
+            .connection()
+            .unwrap();
+        assert!(!denied.allows_local_format_paths());
+
+        let allowed =
+            spec("example?location=https://worker.example/vgi&allow_local_format_paths=true")
+                .connection()
+                .unwrap();
+        assert!(allowed.allows_local_format_paths());
     }
 
     #[test]

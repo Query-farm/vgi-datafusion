@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 1,
+      "original_sql": "COPY (SELECT range AS n FROM range(50, 100))\n    TO '${VGI_TEST_BRANCH_DIR}/vgi_hetero_branch.parquet' (FORMAT 'parquet');",
+      "replacement_sql": "COPY (SELECT value AS n FROM range(50, 100))\n    TO '${VGI_TEST_BRANCH_DIR}/vgi_hetero_branch.parquet' STORED AS PARQUET;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion spells the same Parquet COPY with STORED AS PARQUET and names its range output value."
+    }
+  ]
+}

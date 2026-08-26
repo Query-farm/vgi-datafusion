@@ -132,12 +132,20 @@ list. The adapter discovers their Arrow types, evaluates constant SQL values,
 casts them to the declared schema, enforces required/unknown options, and sends
 one typed row to `catalog_attach`. Local options currently implemented are
 `pool`, `pool_max`, `pool_timeout`, `worker_debug`,
-`launcher_idle_timeout`, `launcher_state_dir`, `data_version_spec`, and
-`implementation_version`, `cache`, and `attach_companions`. Launcher options are
+`launcher_idle_timeout`, `launcher_state_dir`, `data_version_spec`,
+`implementation_version`, `cache`, `attach_companions`, and
+`allow_local_format_paths`. Launcher options are
 rejected outside a `launch:` LOCATION. Worker-declared global functions are
 registered automatically. Raw `secrets` and `attach_companion_secrets` options
 fail explicitly; embedders instead install a scoped `VgiSecretResolver` on the
 session's `VgiRuntime`.
+
+Catalog scan branches may nominate CSV, Parquet, JSON/NDJSON, or Arrow files;
+the adapter reads them with DataFusion's registered native format factories.
+Subprocess, launcher, Unix, and loopback network workers may nominate local
+paths. Non-loopback HTTP/TCP workers may nominate configured object-store URLs,
+but local paths require the explicit client-side
+`allow_local_format_paths true` trust opt-in.
 
 The worker must opt a result into caching. Attach with `cache false` to veto it
 for a catalog. Inspect the session-owned cache and structured event history from

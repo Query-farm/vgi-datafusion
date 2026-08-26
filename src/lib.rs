@@ -117,6 +117,8 @@ pub struct VgiConnection {
     runtime: Arc<VgiRuntime>,
     /// Attachment-level veto for worker-opted-in result caching.
     cache_enabled: bool,
+    /// Explicit opt-in for remote workers to nominate client-local format paths.
+    allow_local_format_paths: bool,
     /// Per-catalog options used when the session handle is first established.
     attach_options: Arc<HashMap<String, AttachOptions>>,
     /// Attach handles, one per catalog, established once and reused.
@@ -180,6 +182,7 @@ impl VgiConnection {
             auth,
             runtime: Arc::new(VgiRuntime::default()),
             cache_enabled: true,
+            allow_local_format_paths: false,
             attach_options: Arc::new(HashMap::new()),
             attached: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -212,6 +215,18 @@ impl VgiConnection {
     #[must_use]
     pub fn with_cache_enabled(mut self, enabled: bool) -> Self {
         self.cache_enabled = enabled;
+        self
+    }
+
+    /// Permit a remote worker to nominate paths on DataFusion's local filesystem.
+    ///
+    /// Local subprocess, Unix-socket, launcher, and loopback network workers
+    /// are trusted this way automatically. Other HTTP/TCP callers must opt in
+    /// because a remote catalog could otherwise turn discovery into arbitrary
+    /// local-file reads.
+    #[must_use]
+    pub fn with_local_format_paths(mut self, enabled: bool) -> Self {
+        self.allow_local_format_paths = enabled;
         self
     }
 
@@ -369,6 +384,45 @@ impl VgiConnection {
     pub fn label(&self) -> &str {
         &self.label
     }
+
+    /// Whether a worker location is local enough to nominate host filesystem
+    /// paths for native format branches.
+    ///
+    /// A non-loopback HTTP/TCP catalog may still nominate object-store URLs
+    /// already configured in DataFusion's runtime, but it must not turn an
+    /// attach into arbitrary reads from the client's local filesystem.
+    pub(crate) fn allows_local_format_paths(&self) -> bool {
+        self.allow_local_format_paths
+            || matches!(
+                &self.location,
+                VgiLocation::Subprocess(_) | VgiLocation::Unix(_) | VgiLocation::Launch(_)
+            )
+            || match &self.location {
+                VgiLocation::Http(url) => http_host(url).is_some_and(host_is_loopback),
+                VgiLocation::Tcp { host, .. } => host_is_loopback(host),
+                _ => false,
+            }
+    }
+}
+
+fn http_host(url: &str) -> Option<&str> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?;
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        return bracketed.split_once(']').map(|(host, _)| host);
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => Some(host),
+        _ => Some(authority),
+    }
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// The cheapest column to fetch when the caller wants only a row count.

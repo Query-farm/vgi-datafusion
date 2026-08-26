@@ -187,6 +187,14 @@ records execute and all 34 comparable results are exact. One reviewed overlay
 rephrases DuckDB's unsupported `DESCRIBE`-as-derived-table syntax while querying
 the same diagnostic column and type.
 
+Native format branches now complete the wider 10-file multi-branch slice.
+Worker-declared CSV, Parquet, JSON/NDJSON, and Arrow locations use DataFusion's
+registered file-format factories; typed options, exact CSV null markers, schema
+reconciliation, and eligible filter pushdown are retained. Three sparse
+overlays translate only DuckDB's `COPY ... (FORMAT ...)` fixture syntax and its
+`range.range` column spelling. Subprocess, Unix, and loopback HTTP runs each
+execute 75/75 records, with all 53 comparable query results exact.
+
 ## What remains
 
 The following order maximizes useful coverage while keeping new DataFusion
@@ -211,10 +219,10 @@ engine work to a minimum:
    The adapter accepts the single-column expression shape DataFusion exposes
    naturally, plus literal one-row exchange. These two gaps are tracked but are
    not candidates for new DataFusion engine work in this project.
-5. **Catalog objects.** The focused scalar/table macro slice and the
-   function-backed multi-branch slice now pass completely. Native format arms,
-   companion-catalog arms, heterogeneous external branch fixtures, broader
-   views, database metadata adaptations, and same-schema qualification for
+5. **Catalog objects.** The focused scalar/table macro slice and the complete
+   function/native-format multi-branch slice now pass. Catalog-table source
+   arms, custom formats without a registered DataFusion factory, broader views,
+   database metadata adaptations, and same-schema qualification for
    unqualified objects inside macro definitions remain. Function inventory,
    overloads, argument docs/constraints, tags, categories, and global
    nominations use retained worker metadata. The committed full baseline still
