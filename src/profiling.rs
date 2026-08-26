@@ -17,13 +17,15 @@ use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 
-use crate::VgiScanExec;
+use crate::{VgiOrderPushdownSessionStateBuilderExt, VgiScanExec};
 
-/// Adds the VGI physical optimizer rules to a DataFusion session-state builder.
+/// Adds the VGI planner and physical optimizer rules to a session-state builder.
 ///
 /// The profiling rule marks VGI scans only when they are descendants of
 /// `EXPLAIN ANALYZE`. This is what keeps ordinary queries and plain `EXPLAIN`
-/// from issuing the post-execution worker callback.
+/// from issuing the post-execution worker callback. The same bridge also
+/// installs conservative ORDER BY / Top-N hint propagation so one planner does
+/// not replace the other.
 pub trait VgiSessionStateBuilderExt {
     /// Install the VGI rule with DataFusion's default query planner.
     ///
@@ -43,7 +45,7 @@ pub trait VgiSessionStateBuilderExt {
 impl VgiSessionStateBuilderExt for SessionStateBuilder {
     fn with_vgi_physical_optimizer(self) -> Self {
         self.with_physical_optimizer_rule(Arc::new(VgiExplainAnalyzeProfiling))
-            .with_query_planner(Arc::new(VgiQueryPlanner { inner: None }))
+            .with_vgi_order_pushdown_and_query_planner(Arc::new(VgiQueryPlanner { inner: None }))
     }
 
     fn with_vgi_physical_optimizer_and_query_planner(
@@ -51,7 +53,7 @@ impl VgiSessionStateBuilderExt for SessionStateBuilder {
         query_planner: Arc<dyn QueryPlanner + Send + Sync>,
     ) -> Self {
         self.with_physical_optimizer_rule(Arc::new(VgiExplainAnalyzeProfiling))
-            .with_query_planner(Arc::new(VgiQueryPlanner {
+            .with_vgi_order_pushdown_and_query_planner(Arc::new(VgiQueryPlanner {
                 inner: Some(query_planner),
             }))
     }

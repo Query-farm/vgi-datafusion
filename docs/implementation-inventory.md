@@ -98,6 +98,13 @@ DataFusion where there is no matching planning or execution seam.
   both configured tiers. Producer scan/cache counters also
   appear as native DataFusion execution metrics and in `EXPLAIN ANALYZE`;
   result-cache statistics distinguish exchange hits, stores, and bytes served.
+  The opt-in VGI session builder additionally calls a table function's
+  `dynamic_to_string` hook only after clean worker end-of-stream beneath
+  `EXPLAIN ANALYZE`. Escaped, bounded, partition-labelled values join the scan
+  metrics after cache publication; ordinary execution, plain `EXPLAIN`, errors,
+  cancellation/LIMIT abandonment, and cache replay skip the callback. Its query
+  planner bridge is composed with ORDER BY / Top-N propagation rather than
+  replacing it.
 - Cache admission vetoes use one credential-free reason vocabulary across
   producer, scalar, streaming exchange, and buffered exchange execution.
   Producer reporting emits one `cache.ineligible` event per standard

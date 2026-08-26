@@ -284,6 +284,12 @@ pipe writer still cannot interrupt a request write that has already blocked.
   a secret requirement, even when the host resolver returns no matching rows;
   those calls bypass these caches. Native
   DataFusion metrics expose producer cache/worker activity in `EXPLAIN ANALYZE`.
+  Sessions built with `VgiSessionStateBuilderExt` also request the worker's
+  bounded `dynamic_to_string` diagnostics after a clean scan end-of-stream and
+  render them on the VGI scan. Ordinary queries, plain `EXPLAIN`, failed or
+  cancelled/LIMIT-shortened scans, and result-cache replays do not issue that
+  callback. The same builder composes this profiling bridge with VGI ORDER BY /
+  Top-N propagation.
   Cache diagnostics distinguish exchange hits, stores, and bytes served.
   Producer cache vetoes emit one credential-free `cache.ineligible` event per
   standard DataFrame/`execute_stream_partitioned` run, deduplicated across

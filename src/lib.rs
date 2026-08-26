@@ -2642,6 +2642,7 @@ impl VgiScanExec {
             at: self.at.clone(),
             sample: self.sample,
             column_mapping: self.column_mapping.clone(),
+            dynamic_profile: self.dynamic_profile.clone(),
         })
     }
 
@@ -2916,6 +2917,7 @@ impl VgiScanExec {
             pushdown: self.pushdown.clone(),
             dynamic_filters: self.dynamic_filters.clone(),
             limit: self.limit,
+            order_by: self.order_by.clone(),
             filter_schema: self.filter_schema.clone(),
             remote_bind_schema: self.remote_bind_schema.clone(),
             schema: self.schema.clone(),
@@ -2938,6 +2940,7 @@ impl VgiScanExec {
             cache_flight_disk_probe: Arc::clone(&self.cache_flight_disk_probe),
             cache_capture: self.cache_capture.clone(),
             at: self.at.clone(),
+            sample: self.sample,
             column_mapping: self.column_mapping.clone(),
             dynamic_profile: Some(Arc::new(DynamicProfile::default())),
         }

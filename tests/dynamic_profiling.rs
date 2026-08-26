@@ -69,6 +69,30 @@ async fn profiling_is_analyze_only_and_skips_limit_and_cache_replay(
     assert!(!plain.contains("Batch Bytes:"), "{plain}");
     assert_eq!(callback_events(&runtime), 0, "plain EXPLAIN callback");
 
+    context.register_table(
+        "remote_order",
+        VgiTableProvider::bind_with_arguments(
+            connection.clone(),
+            "example",
+            "main",
+            "order_echo",
+            Arguments::new().positional(20_i64),
+        )
+        .await?,
+    )?;
+    let ordered = rendered(
+        &context,
+        "EXPLAIN SELECT * FROM remote_order ORDER BY n LIMIT 2",
+    )
+    .await?;
+    assert!(ordered.contains("TopK(fetch=2)"), "{ordered}");
+    assert!(ordered.contains("order_by=n"), "{ordered}");
+    assert_eq!(
+        callback_events(&runtime),
+        0,
+        "combined plain EXPLAIN callback"
+    );
+
     runtime.clear_events();
     let analyzed = rendered(
         &context,
