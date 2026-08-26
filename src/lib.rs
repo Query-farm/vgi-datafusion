@@ -77,7 +77,7 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 use vgi_client::{
     Arguments, AttachOptions, AttachedCatalog, BindSpec, FunctionKind, PlanOptions, PooledClient,
-    ScanOptions, ScanPlan, ScanSplitInfo, VgiClient, VgiLocation, WorkerPool,
+    Sample, ScanOptions, ScanPlan, ScanSplitInfo, VgiClient, VgiLocation, WorkerPool,
 };
 
 mod aggregate;
@@ -85,6 +85,7 @@ mod catalog;
 mod diagnostics;
 mod filters;
 mod runtime;
+mod sampling;
 mod scalar;
 mod session;
 mod settings;
@@ -539,6 +540,24 @@ fn narrowest_column(bound: &vgi_client::BoundFunction) -> Option<i64> {
         .map(|(i, _)| i as i64)
 }
 
+/// Stable wire-independent identity for a VGI sample hint.
+///
+/// `Sample` intentionally carries ordinary floats for the RPC surface. Cache
+/// keys use the exact IEEE-754 bits so different percentages and seeds cannot
+/// alias, without depending on debug/display formatting.
+fn sample_cache_identity(sample: Sample) -> Vec<u8> {
+    let mut identity = Vec::with_capacity(17);
+    identity.extend_from_slice(&sample.percentage.to_bits().to_le_bytes());
+    match sample.seed {
+        Some(seed) => {
+            identity.push(1);
+            identity.extend_from_slice(&seed.to_le_bytes());
+        }
+        None => identity.push(0),
+    }
+    identity
+}
+
 /// Capabilities that affect how a table scan is planned.
 #[derive(Debug, Clone, Copy, Default)]
 struct FunctionCapabilities {
@@ -552,6 +571,7 @@ struct FunctionCapabilities {
     /// still attempted for compatibility with hidden catalog scan functions
     /// and older workers.
     supports_splits: Option<bool>,
+    sampling_pushdown: bool,
     filters_exactly_applied: bool,
 }
 
@@ -590,6 +610,9 @@ fn function_capabilities(
                 .all(|info| info.filter_pushdown == Some(true)),
         ),
         supports_splits: Some(matches.iter().all(|info| info.supports_splits)),
+        sampling_pushdown: matches
+            .iter()
+            .all(|info| info.sampling_pushdown == Some(true)),
         filters_exactly_applied: matches.iter().all(|info| info.filters_exactly_applied),
     })
 }
@@ -916,6 +939,10 @@ pub struct VgiTableProvider {
     /// The discovery-time split declaration. `None` means the function was not
     /// discoverable, so `table_function_plan` is still probed for compatibility.
     supports_splits: Option<bool>,
+    /// Whether every advertised overload accepts a SYSTEM sample hint.
+    sampling_pushdown: bool,
+    /// Query-local sample hint installed by the relation planner.
+    sample: Option<Sample>,
     /// Whether DataFusion may omit its local copy of a pushed filter.
     filters_exactly_applied: bool,
     /// Catalog version captured by the bind and included in cache identity.
@@ -1108,6 +1135,8 @@ impl VgiTableProvider {
             projection_pushdown: capabilities.projection_pushdown,
             filter_pushdown: capabilities.filter_pushdown,
             supports_splits: capabilities.supports_splits,
+            sampling_pushdown: capabilities.sampling_pushdown,
+            sample: None,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
             secret_dependent,
@@ -1218,6 +1247,8 @@ impl VgiTableProvider {
             projection_pushdown: capabilities.projection_pushdown,
             filter_pushdown: capabilities.filter_pushdown,
             supports_splits: capabilities.supports_splits,
+            sampling_pushdown: capabilities.sampling_pushdown,
+            sample: None,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
             secret_dependent,
@@ -1270,6 +1301,8 @@ impl VgiTableProvider {
             projection_pushdown: capabilities.projection_pushdown,
             filter_pushdown: capabilities.filter_pushdown,
             supports_splits: capabilities.supports_splits,
+            sampling_pushdown: capabilities.sampling_pushdown,
+            sample: None,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
             secret_dependent,
@@ -1342,6 +1375,8 @@ impl VgiTableProvider {
             projection_pushdown: capabilities.projection_pushdown,
             filter_pushdown: capabilities.filter_pushdown,
             supports_splits: capabilities.supports_splits,
+            sampling_pushdown: capabilities.sampling_pushdown,
+            sample: None,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
             secret_dependent,
@@ -1401,6 +1436,24 @@ impl VgiTableProvider {
 
 /// Split planning and bin-packing.
 impl VgiTableProvider {
+    /// Clone this provider with a query-local VGI SYSTEM sampling hint.
+    ///
+    /// The SQL relation planner only calls this after it has identified this
+    /// exact provider inside the base relation. Keeping the hint on the cloned
+    /// provider makes it part of this one logical scan, not mutable catalog
+    /// state shared by later queries.
+    pub(crate) fn with_sample_hint(&self, sample: Sample) -> DFResult<Self> {
+        if !self.sampling_pushdown {
+            return Err(DataFusionError::NotImplemented(format!(
+                "VGI function `{}.{}` does not advertise sampling pushdown",
+                self.schema_name, self.function
+            )));
+        }
+        let mut provider = self.clone();
+        provider.sample = Some(sample);
+        Ok(provider)
+    }
+
     /// Divide the scan into splits and pack them into partitions.
     ///
     /// Returns `None` when this scan is not split-capable, which keeps the
@@ -1443,6 +1496,7 @@ impl VgiTableProvider {
                         projection: projection.clone(),
                         filters: pushdown.cache_identity(),
                         row_limit: limit.and_then(|value| i64::try_from(value).ok()),
+                        sample: self.sample.map(sample_cache_identity),
                         target_partitions,
                         catalog_version: self.catalog_version,
                         at: self
@@ -1465,6 +1519,7 @@ impl VgiTableProvider {
         let arguments = self.arguments.clone();
         let raw_arguments = self.raw_arguments.clone();
         let at = self.at.clone();
+        let sample = self.sample;
 
         // The client is blocking, so planning runs on a blocking thread rather
         // than a tokio worker — a blocking call on the runtime would stall every
@@ -1513,6 +1568,7 @@ impl VgiTableProvider {
                         // and the engine re-applies the limit above the coalesce, while
                         // dividing by N would under-produce under skew.
                         row_limit: limit.map(|l| l as i64),
+                        sample,
                         ..Default::default()
                     };
                     match client.plan(&bound, &opts) {
@@ -1929,6 +1985,7 @@ impl TableProvider for VgiTableProvider {
             split_groups,
             self.catalog_version,
             self.at.clone(),
+            self.sample,
             self.column_mapping.clone(),
             result_cache_ineligible,
         )))
@@ -1995,6 +2052,7 @@ pub struct VgiScanExec {
     cache_flight_disk_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
     cache_capture: Option<Arc<ScanCacheCapture>>,
     at: Option<vgi_client::At>,
+    sample: Option<Sample>,
     column_mapping: Option<Arc<HashMap<String, String>>>,
 }
 
@@ -2323,6 +2381,7 @@ impl VgiScanExec {
         split_groups: Option<PlannedSplits>,
         catalog_version: i64,
         at: Option<vgi_client::At>,
+        sample: Option<Sample>,
         column_mapping: Option<Arc<HashMap<String, String>>>,
         result_cache_ineligible: Option<crate::runtime::CacheIneligibleReason>,
     ) -> Self {
@@ -2415,7 +2474,7 @@ impl VgiScanExec {
                     attach_options: conn.cache_attach_context(&catalog),
                     row_limit: limit.and_then(|value| i64::try_from(value).ok()),
                     ordering: None,
-                    sample: None,
+                    sample: sample.map(sample_cache_identity),
                     plan: None,
                 }),
                 (None, _) => {
@@ -2495,6 +2554,7 @@ impl VgiScanExec {
             cache_flight_disk_probe: Arc::new(tokio::sync::OnceCell::new()),
             cache_capture,
             at,
+            sample,
             column_mapping,
         }
     }
@@ -2542,6 +2602,7 @@ impl VgiScanExec {
             cache_flight_disk_probe: Arc::new(tokio::sync::OnceCell::new()),
             cache_capture: None,
             at: self.at.clone(),
+            sample: self.sample,
             column_mapping: self.column_mapping.clone(),
         }
     }
@@ -3725,6 +3786,12 @@ impl DisplayAs for VgiScanExec {
         if let Some(l) = self.limit {
             write!(f, ", limit={l}")?;
         }
+        if let Some(sample) = self.sample {
+            write!(f, ", sample={} percent", sample.percentage)?;
+            if let Some(seed) = sample.seed {
+                write!(f, ", sample_seed={seed}")?;
+            }
+        }
         if !self.dynamic_filters.is_empty() {
             write!(f, ", dynamic_filters={}", self.dynamic_filters.len())?;
         }
@@ -3897,6 +3964,7 @@ impl ExecutionPlan for VgiScanExec {
         let arguments = self.arguments.clone();
         let raw_arguments = self.raw_arguments.clone();
         let at = self.at.clone();
+        let sample = self.sample;
         let projection = self.projection.clone();
         let projection_pushdown = self.projection_pushdown;
         let pushdown = self.pushdown.clone();
@@ -4025,6 +4093,7 @@ impl ExecutionPlan for VgiScanExec {
                     // worker evaluates the predicate against the wrong column.
                     filter_columns: Some(initial_pushdown.columns.clone()),
                     row_limit: limit.map(|l| l as i64),
+                    sample,
                     if_none_match: conditional.and_then(ScanCacheRevalidation::etag),
                     if_modified_since: conditional.and_then(ScanCacheRevalidation::last_modified),
                     ..Default::default()

@@ -324,6 +324,9 @@ fn explain_rows_agree(expected: &[String], got: &[String]) -> bool {
         "physical_plan\t<REGEX>:.*VGI_TABLE_SCAN.*" => {
             physical.iter().any(|plan| plan.contains("VgiScanExec"))
         }
+        "physical_plan\t<!REGEX>:.*STREAMING_SAMPLE.*" => {
+            physical.iter().all(|plan| !plan.contains("SampleExec"))
+        }
         _ => false,
     }
 }
@@ -354,6 +357,15 @@ mod rendering_tests {
         assert!(agrees_modulo_rendering(
             &["physical_plan\t<!REGEX>:.*EMPTY_RESULT.*".into()],
             &scan,
+        ));
+        assert!(agrees_modulo_rendering(
+            &["physical_plan\t<!REGEX>:.*STREAMING_SAMPLE.*".into()],
+            &scan,
+        ));
+        let locally_sampled = vec!["physical_plan\tSampleExec\n  VgiScanExec".into()];
+        assert!(!agrees_modulo_rendering(
+            &["physical_plan\t<!REGEX>:.*STREAMING_SAMPLE.*".into()],
+            &locally_sampled,
         ));
         assert!(!agrees_modulo_rendering(
             &["physical_plan\t<REGEX>:.*EMPTY_RESULT.*".into()],

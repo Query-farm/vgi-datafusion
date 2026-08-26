@@ -336,11 +336,15 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   `LATERAL m.main.forecast_hourly(g.latitude, g.longitude)` is therefore not yet
   representable; run the geocoder first and pass its coordinates as constants
   in a second statement.
-- **Transactions, writes, and planner-only hints.** VGI transactions, mutations,
-  custom COPY formats, order hints, and sampling do not yet have an end-to-end
-  adapter path. Table-level `AT (VERSION|TIMESTAMP => literal)` time travel is
-  supported independently. See `docs/implementation-inventory.md` for the API
-  boundaries and recommended sequence.
+- **Sampling and remaining planner-only hints.** VGI `TABLESAMPLE SYSTEM`
+  percentage/seed hints use DataFusion 55's relation-planner extension and are
+  included in split planning, scan initialization, and cache identity.
+  `BERNOULLI(100 PERCENT)` remains a host-owned identity operation and sends no
+  VGI hint. Transactions, mutations, custom COPY formats, and ORDER BY hints do
+  not yet have an end-to-end adapter path. Table-level
+  `AT (VERSION|TIMESTAMP => literal)` time travel is supported independently.
+  See `docs/implementation-inventory.md` for the API boundaries and recommended
+  sequence.
 
 ## SQLLogicTest compatibility
 

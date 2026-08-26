@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 3,
+      "original_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(10%);",
+      "replacement_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(10 PERCENT);",
+      "kind": "equivalent_sql",
+      "reason": "sqlparser spells the standard percentage unit as PERCENT; the VGI SYSTEM sampling hint is unchanged."
+    },
+    {
+      "record": 4,
+      "original_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(50%) REPEATABLE(42);",
+      "replacement_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(50 PERCENT) REPEATABLE(42);",
+      "kind": "equivalent_sql",
+      "reason": "sqlparser spells the standard percentage unit as PERCENT; percentage and repeatable seed are unchanged."
+    },
+    {
+      "record": 5,
+      "original_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE BERNOULLI(100%);",
+      "replacement_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE BERNOULLI(100 PERCENT);",
+      "kind": "equivalent_sql",
+      "reason": "sqlparser spells the standard percentage unit as PERCENT; 100-percent Bernoulli remains the identity and is not sent as a VGI hint."
+    },
+    {
+      "record": 6,
+      "original_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(100%);",
+      "replacement_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(100 PERCENT);",
+      "kind": "equivalent_sql",
+      "reason": "sqlparser spells the standard percentage unit as PERCENT; the VGI SYSTEM sampling hint is unchanged."
+    },
+    {
+      "record": 7,
+      "original_sql": "SELECT * FROM example.sample_echo(5) TABLESAMPLE SYSTEM(50%) WHERE n < 3;",
+      "replacement_sql": "SELECT * FROM example.sample_echo(5) TABLESAMPLE SYSTEM(50 PERCENT) WHERE n < 3;",
+      "kind": "equivalent_sql",
+      "reason": "sqlparser spells the standard percentage unit as PERCENT; sampling and filter semantics are unchanged."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT n, sample_percentage FROM example.sample_echo(3) TABLESAMPLE SYSTEM(25%);",
+      "replacement_sql": "SELECT n, sample_percentage FROM example.sample_echo(3) TABLESAMPLE SYSTEM(25 PERCENT);",
+      "kind": "equivalent_sql",
+      "reason": "sqlparser spells the standard percentage unit as PERCENT; sampling and projection semantics are unchanged."
+    },
+    {
+      "record": 9,
+      "original_sql": "EXPLAIN SELECT * FROM example.sample_echo(10) TABLESAMPLE SYSTEM(10%);",
+      "replacement_sql": "EXPLAIN SELECT * FROM example.sample_echo(10) TABLESAMPLE SYSTEM(10 PERCENT);",
+      "kind": "equivalent_sql",
+      "reason": "sqlparser spells the standard percentage unit as PERCENT; the sample is absorbed into the VGI scan with no local sampling operator."
+    }
+  ]
+}

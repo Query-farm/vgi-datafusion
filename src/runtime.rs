@@ -807,6 +807,7 @@ pub(crate) struct PlanCacheKey {
     pub(crate) projection: Option<Vec<i64>>,
     pub(crate) filters: Option<Vec<u8>>,
     pub(crate) row_limit: Option<i64>,
+    pub(crate) sample: Option<Vec<u8>>,
     pub(crate) target_partitions: usize,
     pub(crate) catalog_version: i64,
     pub(crate) at: Option<(String, String)>,

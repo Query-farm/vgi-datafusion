@@ -357,7 +357,9 @@ engine work to a minimum:
    initial DataFusion runtime membership snapshot use VGI v2 `join_keys`, with
    the side IPC included in split planning, scan initialization, and cache
    identity. Exact supported Arrow scalar types and same-column equality `OR`
-   membership are also covered. ORDER BY, TABLESAMPLE, late materialization,
+   membership are also covered. `TABLESAMPLE SYSTEM` percentage/seed hints now
+   use DataFusion's relation-planner API and pass all ten focused records after
+   the reviewed `%`-to-`PERCENT` syntax adaptation. ORDER BY, late materialization,
    continued refinement after an init-time membership set, tuple-correlated
    multi-column membership, and very large/Bloom join-key state remain explicit
    partial features. Small multi-column hash-join tuple sets now reach workers

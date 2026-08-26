@@ -1114,6 +1114,7 @@ fn reset_vgi_setting(
 pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
     let runtime = session_runtime(ctx);
     ensure_vgi_settings(ctx, &runtime);
+    crate::sampling::ensure_registered(ctx, &runtime)?;
     // Session-scoped diagnostics such as `vgi_catalogs(location)` are useful
     // before the first ATTACH. Registration is idempotent, so install them at
     // the adapter SQL boundary rather than waiting for attach discovery.
