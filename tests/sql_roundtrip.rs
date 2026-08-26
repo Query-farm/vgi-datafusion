@@ -144,6 +144,20 @@ async fn worker_function_metadata_is_queryable_and_detaches() -> datafusion::err
     let explain = datafusion::arrow::util::pretty::pretty_format_batches(&explain)?.to_string();
     assert!(explain.contains("EmptyExec"), "unexpected plan: {explain}");
 
+    // A function that advertises statistics but not remote filter pushdown
+    // still receives the predicate in `scan` for local min/max pruning. The
+    // worker itself must not need filter support for DataFusion to eliminate an
+    // impossible scan.
+    let explain = vgi_datafusion::sql(
+        &ctx,
+        "EXPLAIN SELECT * FROM ex.double_sequence(100) WHERE n > 1000.0",
+    )
+    .await?
+    .collect()
+    .await?;
+    let explain = datafusion::arrow::util::pretty::pretty_format_batches(&explain)?.to_string();
+    assert!(explain.contains("EmptyExec"), "unexpected plan: {explain}");
+
     let explain = vgi_datafusion::sql(
         &ctx,
         "EXPLAIN SELECT * FROM ex.data.departments WHERE id >= 1",

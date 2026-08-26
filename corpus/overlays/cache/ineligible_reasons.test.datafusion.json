@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 5,
+      "original_sql": "SELECT LIST(n) FROM (SELECT n FROM ex.cache_filtered(rows := 10000) ORDER BY n LIMIT 5);",
+      "replacement_sql": "SELECT array_agg(n ORDER BY n) FROM (SELECT n FROM ex.cache_filtered(rows := 10000) ORDER BY n LIMIT 5);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion spells DuckDB's LIST aggregate array_agg; retaining the explicit element order preserves the exact result."
+    }
+  ]
+}

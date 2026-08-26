@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 5,
+      "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'550e8400-e29b-41d4-a716-446655440000'::UUID: 'first'} AS m\n));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT MAP {'550e8400-e29b-41d4-a716-446655440000': 'first'} AS m));",
+      "kind": "equivalent_sql",
+      "reason": "This corpus assertion checks the UUID's canonical textual map key, which DataFusion can send losslessly as Arrow UTF-8 even though it has no UUID SQL type."
+    },
+    {
+      "record": 10,
+      "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'a': {'x':1, 'y':'foo'}}\n        ::MAP(VARCHAR, STRUCT(x INT, y VARCHAR)) AS m\n));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT map(['a'], [named_struct('x', 1, 'y', 'foo')]) AS m));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion map and named_struct construct the same Arrow Map<Utf8, Struct<x: Int32, y: Utf8>> value without DuckDB map-cast syntax."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'outer': MAP {'inner': 42}} AS m\n));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT map(['outer'], [map(['inner'], [42])]) AS m));",
+      "kind": "equivalent_sql",
+      "reason": "Nested DataFusion map calls construct the same Arrow map-of-map value without DuckDB nested MAP literal syntax."
+    },
+    {
+      "record": 13,
+      "original_sql": "SELECT m FROM example.echo((SELECT NULL::MAP(VARCHAR, INT) AS m));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT CASE WHEN true THEN NULL ELSE map(arrow_cast([], 'List(Utf8)'), arrow_cast([], 'List(Int32)')) END AS m));",
+      "kind": "equivalent_sql",
+      "reason": "The unreachable typed map branch gives NULL the same Arrow Map<Utf8, Int32> type without DuckDB MAP type-cast syntax."
+    },
+    {
+      "record": 14,
+      "original_sql": "SELECT m FROM example.echo((SELECT MAP {}::MAP(VARCHAR, INT) AS m));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT map(arrow_cast([], 'List(Utf8)'), arrow_cast([], 'List(Int32)')) AS m));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion map over typed empty key/value lists constructs the same non-NULL empty Arrow Map<Utf8, Int32>."
+    },
+    {
+      "record": 19,
+      "original_sql": "SELECT fa FROM example.echo((\n    SELECT [{'x':1}, {'x':2}, {'x':3}]::STRUCT(x INT)[3] AS fa\n));",
+      "replacement_sql": "SELECT fa FROM example.echo((SELECT arrow_cast([named_struct('x', 1), named_struct('x', 2), named_struct('x', 3)], 'FixedSizeList(3 x Struct(\"x\": Int32))') AS fa));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same Arrow FixedSizeList<Struct<x: Int32>, 3> value without DuckDB fixed-array cast syntax."
+    },
+    {
+      "record": 20,
+      "original_sql": "SELECT l FROM example.echo((\n    SELECT [[1,2,3], [4,5,6]]::INT[3][] AS l\n));",
+      "replacement_sql": "SELECT l FROM example.echo((SELECT [arrow_cast([1,2,3], 'FixedSizeList(3 x Int32)'), arrow_cast([4,5,6], 'FixedSizeList(3 x Int32)')] AS l));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs each inner Arrow FixedSizeList<Int32, 3>, preserving the outer variable List shape."
+    },
+    {
+      "record": 21,
+      "original_sql": "SELECT l FROM example.echo((\n    SELECT [[1,2], [3,4,5], [6]]::INT[][3] AS l\n));",
+      "replacement_sql": "SELECT l FROM example.echo((SELECT arrow_cast([[1,2], [3,4,5], [6]], 'FixedSizeList(3 x List(Int32))') AS l));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same outer Arrow FixedSizeList<List<Int32>, 3> value without DuckDB fixed-array cast syntax."
+    },
+    {
+      "record": 22,
+      "original_sql": "SELECT s FROM example.echo((\n    SELECT {'val': union_value(num := 1)}::STRUCT(val UNION(num INT, str VARCHAR)) AS s\n));",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no SQL expression that constructs an Arrow Union value; replacing it with a struct or scalar would stop testing the union protocol path. Adjacent non-union nested struct coverage remains executable below."
+    },
+    {
+      "record": 26,
+      "original_sql": "SELECT b FROM example.echo((SELECT '101010'::BIT AS b));",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting text or generic binary would not test the same wire value. Adjacent Arrow Binary key/value round-trips remain covered by records 8 and 48."
+    },
+    {
+      "record": 27,
+      "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES ('1'::BIT), ('11111'::BIT), ('1010101010'::BIT)) t(b)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES ('1'::BIT), ('11111'::BIT), ('1010101010'::BIT)) t(b)\n    ))\n);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting text or generic binary would not test the same multi-width wire values. Adjacent Arrow Binary round-trips remain covered by records 8 and 48."
+    },
+    {
+      "record": 28,
+      "original_sql": "SELECT l FROM example.echo((SELECT ['101'::BIT, '11110000'::BIT] AS l));",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot construct BIT list elements because it has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting strings would not test the nested BIT protocol path. Adjacent ordinary Arrow list round-trips remain executable."
+    },
+    {
+      "record": 29,
+      "original_sql": "SELECT s FROM example.echo((SELECT {'flags': '1010'::BIT, 'name': 'foo'} AS s));",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot construct a BIT struct child because it has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting a string would not test the nested BIT protocol path. Adjacent ordinary Arrow struct round-trips remain executable."
+    },
+    {
+      "record": 30,
+      "original_sql": "SELECT j FROM example.echo((SELECT '{\"a\": 1, \"b\": [1,2,3]}'::JSON AS j));",
+      "replacement_sql": "SELECT j FROM example.echo((SELECT '{\"a\": 1, \"b\": [1,2,3]}' AS j));",
+      "kind": "equivalent_sql",
+      "reason": "DuckDB JSON crosses Arrow IPC as UTF-8; the replacement sends the identical JSON bytes through echo without DataFusion-unsupported JSON syntax."
+    },
+    {
+      "record": 31,
+      "original_sql": "SELECT l FROM example.echo((\n    SELECT ['{\"x\":1}'::JSON, '{\"x\":2}'::JSON] AS l\n));",
+      "replacement_sql": "SELECT l FROM example.echo((SELECT ['{\"x\":1}', '{\"x\":2}'] AS l));",
+      "kind": "equivalent_sql",
+      "reason": "DuckDB JSON list elements cross Arrow IPC as UTF-8, so the replacement preserves the identical Arrow List<Utf8> values."
+    },
+    {
+      "record": 32,
+      "original_sql": "SELECT s FROM example.echo((\n    SELECT {'payload': '{\"k\":\"v\"}'::JSON, 'id': 1} AS s\n));",
+      "replacement_sql": "SELECT s FROM example.echo((SELECT {'payload': '{\"k\":\"v\"}', 'id': 1} AS s));",
+      "kind": "equivalent_sql",
+      "reason": "DuckDB JSON inside the struct crosses Arrow IPC as UTF-8, preserving the identical Struct<payload: Utf8, id: Int32> value."
+    },
+    {
+      "record": 33,
+      "original_sql": "SELECT s FROM example.echo((SELECT NULL::STRUCT(a INT, b VARCHAR) AS s));",
+      "replacement_sql": "SELECT s FROM example.echo((SELECT CASE WHEN true THEN NULL ELSE named_struct('a', 1, 'b', 'x') END AS s));",
+      "kind": "equivalent_sql",
+      "reason": "The unreachable named_struct branch gives NULL the same Arrow Struct<a: Int32, b: Utf8> type without DuckDB struct-cast syntax."
+    },
+    {
+      "record": 38,
+      "original_sql": "SELECT l FROM example.echo((SELECT [NULL,NULL]::STRUCT(x INT)[] AS l));",
+      "replacement_sql": "SELECT l FROM example.echo((SELECT [CASE WHEN true THEN NULL ELSE named_struct('x', 1) END, CASE WHEN true THEN NULL ELSE named_struct('x', 1) END] AS l));",
+      "kind": "equivalent_sql",
+      "reason": "Typed NULL expressions construct the same Arrow List<Struct<x: Int32>> containing two NULL struct elements."
+    },
+    {
+      "record": 39,
+      "original_sql": "SELECT COUNT(*) FROM (\n    SELECT [{'a':1},NULL,{'a':3}]::STRUCT(a INT)[] AS l\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT [{'a':1},NULL,{'a':3}]::STRUCT(a INT)[] AS l\n    ))\n);",
+      "replacement_sql": "SELECT COUNT(*) FROM (SELECT [named_struct('a',1), CASE WHEN true THEN NULL ELSE named_struct('a',1) END, named_struct('a',3)] AS l EXCEPT SELECT * FROM example.echo((SELECT [named_struct('a',1), CASE WHEN true THEN NULL ELSE named_struct('a',1) END, named_struct('a',3)] AS l)));",
+      "kind": "equivalent_sql",
+      "reason": "named_struct plus a typed NULL constructs the same Arrow List<Struct<a: Int32>> and retains the original round-trip EXCEPT assertion."
+    },
+    {
+      "record": 40,
+      "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT NULL::STRUCT(a INT, b VARCHAR) AS s FROM range(1000)\n));",
+      "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT CASE WHEN true THEN NULL ELSE named_struct('a', 1, 'b', 'x') END AS s FROM range(1000)));",
+      "kind": "equivalent_sql",
+      "reason": "The typed NULL expression produces the same 1,000-row Arrow Struct<a: Int32, b: Utf8> validity pattern."
+    },
+    {
+      "record": 41,
+      "original_sql": "SELECT COUNT(DISTINCT s) FROM example.echo((\n    SELECT NULL::STRUCT(a INT, b VARCHAR) AS s FROM range(1000)\n));",
+      "replacement_sql": "SELECT COUNT(DISTINCT s) FROM example.echo((SELECT CASE WHEN true THEN NULL ELSE named_struct('a', 1, 'b', 'x') END AS s FROM range(1000)));",
+      "kind": "equivalent_sql",
+      "reason": "The typed NULL expression preserves the same all-NULL Arrow struct column and distinct-count assertion."
+    },
+    {
+      "record": 42,
+      "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        ({'a':1, 'b':[1,2]}::STRUCT(a INT, b INT[])),\n        (NULL),\n        ({'a':3, 'b':NULL}),\n        ({'a':NULL, 'b':[]})\n    ) t(s)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            ({'a':1, 'b':[1,2]}::STRUCT(a INT, b INT[])),\n            (NULL),\n            ({'a':3, 'b':NULL}),\n            ({'a':NULL, 'b':[]})\n        ) t(s)\n    ))\n);",
+      "replacement_sql": "SELECT COUNT(*) FROM (SELECT * FROM (VALUES (named_struct('a',1,'b',[1,2])), (NULL), (named_struct('a',3,'b',NULL)), (named_struct('a',NULL,'b',[]))) t(s) EXCEPT SELECT * FROM example.echo((SELECT * FROM (VALUES (named_struct('a',1,'b',[1,2])), (NULL), (named_struct('a',3,'b',NULL)), (named_struct('a',NULL,'b',[]))) t(s))));",
+      "kind": "equivalent_sql",
+      "reason": "named_struct and VALUES inference construct the same Arrow Struct<a: Int32, b: List<Int32>> rows, including top-level, field, and empty-list cases, while retaining the EXCEPT assertion."
+    },
+    {
+      "record": 51,
+      "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT {'i': 1::HUGEINT, 'd': '2024-01-01'::DATE, 'b': '\\xFF'::BLOB}\n        ::STRUCT(i HUGEINT, d DATE, b BLOB) AS s\n    WHERE FALSE\n));",
+      "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT named_struct('i', arrow_cast(1, 'Decimal128(38, 0)'), 'd', '2024-01-01'::DATE, 'b', X'ff') AS s WHERE FALSE));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion-native constructors preserve the zero-row Arrow schema: Struct<i: Decimal128(38,0), d: Date32, b: Binary>."
+    },
+    {
+      "record": 52,
+      "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT MAP {1::BIGINT: {'a':1, 'b':'x'}}\n        ::MAP(BIGINT, STRUCT(a INT, b VARCHAR)) AS m\n    WHERE FALSE\n));",
+      "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT map([arrow_cast(1, 'Int64')], [named_struct('a', 1, 'b', 'x')]) AS m WHERE FALSE));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion map and named_struct preserve the zero-row Arrow Map<Int64, Struct<a: Int32, b: Utf8>> schema."
+    },
+    {
+      "record": 55,
+      "original_sql": "CREATE TYPE mood AS ENUM ('happy','sad','neutral');",
+      "kind": "out_of_scope",
+      "reason": "DataFusion has no session DDL for DuckDB enum types; the corresponding Arrow dictionary values are exercised by reviewed arrow_cast replacements below."
+    },
+    {
+      "record": 56,
+      "original_sql": "SELECT s FROM example.echo((SELECT {'state': 'happy'::mood, 'n': 1} AS s));",
+      "replacement_sql": "SELECT s FROM example.echo((SELECT named_struct('state', arrow_cast('happy', 'Dictionary(UInt8, Utf8)'), 'n', 1) AS s));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum child inside the struct without DataFusion session enum DDL."
+    },
+    {
+      "record": 57,
+      "original_sql": "SELECT l FROM example.echo((\n    SELECT ['happy'::mood, 'sad'::mood, 'neutral'::mood] AS l\n));",
+      "replacement_sql": "SELECT l FROM example.echo((SELECT [arrow_cast('happy', 'Dictionary(UInt8, Utf8)'), arrow_cast('sad', 'Dictionary(UInt8, Utf8)'), arrow_cast('neutral', 'Dictionary(UInt8, Utf8)')] AS l));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum values inside the list."
+    },
+    {
+      "record": 58,
+      "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'happy'::mood: 1, 'sad'::mood: 2} AS m\n));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT map([arrow_cast('happy', 'Dictionary(UInt8, Utf8)'), arrow_cast('sad', 'Dictionary(UInt8, Utf8)')], [1,2]) AS m));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum map keys."
+    },
+    {
+      "record": 59,
+      "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'a': 'happy'::mood, 'b': 'sad'::mood} AS m\n));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT map(['a','b'], [arrow_cast('happy', 'Dictionary(UInt8, Utf8)'), arrow_cast('sad', 'Dictionary(UInt8, Utf8)')]) AS m));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum map values."
+    },
+    {
+      "record": 60,
+      "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'happy'::mood: {'count': 5, 'tag': 'sad'::mood}} AS m\n));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT map([arrow_cast('happy', 'Dictionary(UInt8, Utf8)')], [named_struct('count', 5, 'tag', arrow_cast('sad', 'Dictionary(UInt8, Utf8)'))]) AS m));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum key and nested struct child."
+    },
+    {
+      "record": 61,
+      "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT * FROM (VALUES ('happy'::mood),(NULL),('sad'::mood)) t(m)\n));",
+      "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT * FROM (VALUES (arrow_cast('happy', 'Dictionary(UInt8, Utf8)')),(NULL),(arrow_cast('sad', 'Dictionary(UInt8, Utf8)'))) t(m)));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same mixed non-NULL/NULL Arrow Dictionary<UInt8, Utf8> column."
+    },
+    {
+      "record": 62,
+      "original_sql": "SELECT m FROM example.echo((SELECT NULL::mood AS m));",
+      "replacement_sql": "SELECT m FROM example.echo((SELECT arrow_cast(NULL, 'Dictionary(UInt8, Utf8)') AS m));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same top-level NULL Arrow Dictionary<UInt8, Utf8> value."
+    },
+    {
+      "record": 63,
+      "original_sql": "DROP TYPE mood;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion has no corresponding session enum type to drop; records 56-62 exercise the adjacent Arrow Dictionary<UInt8, Utf8> round-trips directly with arrow_cast."
+    },
+    {
+      "record": 64,
+      "original_sql": "CREATE TYPE bigenum AS ENUM (SELECT 'val_' || i::VARCHAR FROM range(500) t(i));",
+      "kind": "out_of_scope",
+      "reason": "DataFusion has no session DDL for a query-defined DuckDB enum; the Int16 Arrow dictionary values are exercised below."
+    },
+    {
+      "record": 65,
+      "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT ('val_' || (i % 500)::VARCHAR)::bigenum AS e FROM range(1000) t(i)\n));",
+      "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT arrow_cast('val_' || (i % 500)::VARCHAR, 'Dictionary(UInt16, Utf8)') AS e FROM range(1000) t(i)));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast dictionary-encodes the 500 values with Int16 indices, preserving the large-enum Arrow wire shape and row count."
+    },
+    {
+      "record": 66,
+      "original_sql": "SELECT COUNT(DISTINCT e) FROM example.echo((\n    SELECT ('val_' || (i % 500)::VARCHAR)::bigenum AS e FROM range(1000) t(i)\n));",
+      "replacement_sql": "SELECT COUNT(DISTINCT e) FROM example.echo((SELECT arrow_cast('val_' || (i % 500)::VARCHAR, 'Dictionary(UInt16, Utf8)') AS e FROM range(1000) t(i)));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast dictionary-encodes the 500 values with Int16 indices, preserving the large-enum Arrow wire shape for distinct counting."
+    },
+    {
+      "record": 67,
+      "original_sql": "DROP TYPE bigenum;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion has no corresponding session enum type to drop; records 65-66 exercise the adjacent Arrow Dictionary<UInt16, Utf8> round-trips directly with arrow_cast."
+    },
+    {
+      "record": 68,
+      "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        (union_value(num := 1)::UNION(num INT, str VARCHAR)),\n        (union_value(str := 'hi')::UNION(num INT, str VARCHAR)),\n        (union_value(num := 99)::UNION(num INT, str VARCHAR))\n    ) t(u)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            (union_value(num := 1)::UNION(num INT, str VARCHAR)),\n            (union_value(str := 'hi')::UNION(num INT, str VARCHAR)),\n            (union_value(num := 99)::UNION(num INT, str VARCHAR))\n        ) t(u)\n    ))\n);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no SQL expression that constructs mixed-variant Arrow Union values; a scalar/struct substitute would hide the untested protocol path. Adjacent multi-row nested Arrow struct/map/list and dictionary round-trips remain executable."
+    },
+    {
+      "record": 69,
+      "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        (union_value(num := 1)::UNION(num INT, str VARCHAR)),\n        (NULL),\n        (union_value(str := 'foo')::UNION(num INT, str VARCHAR))\n    ) t(u)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            (union_value(num := 1)::UNION(num INT, str VARCHAR)),\n            (NULL),\n            (union_value(str := 'foo')::UNION(num INT, str VARCHAR))\n        ) t(u)\n    ))\n);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no SQL expression that constructs nullable mixed-variant Arrow Union values; a substitute would hide the untested protocol path. Adjacent nullable nested Arrow struct/list and dictionary round-trips remain executable."
+    },
+    {
+      "record": 70,
+      "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        (union_value(s := {'a':1,'b':'x'})::UNION(s STRUCT(a INT, b VARCHAR), l INT[])),\n        (union_value(l := [1,2,3])::UNION(s STRUCT(a INT, b VARCHAR), l INT[]))\n    ) t(u)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            (union_value(s := {'a':1,'b':'x'})::UNION(s STRUCT(a INT, b VARCHAR), l INT[])),\n            (union_value(l := [1,2,3])::UNION(s STRUCT(a INT, b VARCHAR), l INT[]))\n        ) t(u)\n    ))\n);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no SQL expression that constructs Arrow Union values with struct/list children; substitutes would not test the same wire type. The adjacent standalone Arrow struct/list combinations remain executable."
+    },
+    {
+      "record": 71,
+      "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        ({'tag':'a', 'val': union_value(num := 1)}::STRUCT(tag VARCHAR, val UNION(num INT, str VARCHAR))),\n        ({'tag':'b', 'val': union_value(str := 'hello')})\n    ) t(s)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            ({'tag':'a', 'val': union_value(num := 1)}::STRUCT(tag VARCHAR, val UNION(num INT, str VARCHAR))),\n            ({'tag':'b', 'val': union_value(str := 'hello')})\n        ) t(s)\n    ))\n);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no SQL expression that constructs an Arrow Union child inside a struct; a substitute would not test the same wire type. The adjacent standalone Arrow struct round-trips remain executable."
+    },
+    {
+      "record": 72,
+      "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'a': union_value(num := 1)::UNION(num INT, str VARCHAR),\n                'b': union_value(str := 'hi')} AS m\n));",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no SQL expression that constructs Arrow Union values inside a map; a substitute would not test the same wire type. The adjacent non-union Arrow map-of-struct/list/map round-trips remain executable."
+    },
+    {
+      "record": 73,
+      "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        (union_value(i := 1)::UNION(i INT, s VARCHAR, d DOUBLE)),\n        (union_value(s := 'x')::UNION(i INT, s VARCHAR, d DOUBLE)),\n        (union_value(d := 3.14)::UNION(i INT, s VARCHAR, d DOUBLE))\n    ) t(u)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            (union_value(i := 1)::UNION(i INT, s VARCHAR, d DOUBLE)),\n            (union_value(s := 'x')::UNION(i INT, s VARCHAR, d DOUBLE)),\n            (union_value(d := 3.14)::UNION(i INT, s VARCHAR, d DOUBLE))\n        ) t(u)\n    ))\n);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no SQL expression that constructs three-variant Arrow Union values; scalar substitutes would not test the same wire type. Adjacent multi-row primitive and nested Arrow round-trips remain executable."
+    },
+    {
+      "record": 74,
+      "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT union_value(num := 1)::UNION(num INT, str VARCHAR) AS u WHERE FALSE\n));",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 has no SQL expression that constructs even a zero-row Arrow Union schema, so this bind-only union path cannot be expressed equivalently. Adjacent zero-row Arrow struct and map schemas remain covered by records 51-52."
+    }
+  ]
+}

@@ -763,9 +763,9 @@ fn cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
 /// Compatibility shape for the DuckDB extension's `vgi_result_cache()`.
 ///
 /// Keep the DataFusion-native diagnostic above stable and expose only fields
-/// this cache actually owns. In particular, disk tier and per-substream fields
-/// are not invented here: queries asking for them must continue to identify a
-/// real incomplete feature.
+/// this cache actually owns. Disk-tier fields are not invented here: the tier
+/// is truthfully `memory`, while batch/substream layout and time-travel identity
+/// come from the actual captured entry and key.
 fn duckdb_cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let entries = runtime.result_cache().entries();
     let schema = Arc::new(Schema::new(vec![
@@ -778,6 +778,13 @@ fn duckdb_cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         Field::new("stale", DataType::Boolean, false),
         Field::new("hits", DataType::UInt64, false),
         Field::new("revalidatable", DataType::Boolean, false),
+        Field::new("num_batches", DataType::UInt64, false),
+        Field::new("num_substreams", DataType::UInt64, false),
+        Field::new("at_unit", DataType::Utf8, false),
+        Field::new("at_value", DataType::Utf8, false),
+        Field::new("tier", DataType::Utf8, false),
+        Field::new("total_bytes", DataType::UInt64, false),
+        Field::new("partition_label", DataType::Utf8, false),
     ]));
     Ok(RecordBatch::try_new(
         schema,
@@ -816,6 +823,36 @@ fn duckdb_cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
                     .map(|entry| entry.revalidatable)
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries.iter().map(|entry| entry.num_batches as u64),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries.iter().map(|entry| entry.num_substreams as u64),
+            )),
+            Arc::new(StringArray::from_iter_values(entries.iter().map(|entry| {
+                entry
+                    .at
+                    .as_ref()
+                    .map(|(unit, _)| unit.as_str())
+                    .unwrap_or("")
+            }))),
+            Arc::new(StringArray::from_iter_values(entries.iter().map(|entry| {
+                entry
+                    .at
+                    .as_ref()
+                    .map(|(_, value)| value.as_str())
+                    .unwrap_or("")
+            }))),
+            Arc::new(StringArray::from_iter_values(
+                entries.iter().map(|_| "memory"),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries.iter().map(|entry| entry.bytes as u64),
+            )),
+            // The bounded DataFusion cache currently stores whole results, not
+            // per-partition entries. Empty is the DuckDB diagnostic's truthful
+            // label for such an entry and does not claim partition-cache support.
+            Arc::new(StringArray::from_iter_values(entries.iter().map(|_| ""))),
         ],
     )?)
 }
@@ -2293,7 +2330,8 @@ mod tests {
     #[tokio::test]
     async fn duckdb_cache_names_alias_the_session_cache() -> DFResult<()> {
         let ctx = SessionContext::new();
-        register(&ctx, Arc::new(VgiRuntime::default()));
+        let runtime = Arc::new(VgiRuntime::default());
+        register(&ctx, Arc::clone(&runtime));
 
         let flush = ctx
             .sql("SELECT flushed FROM vgi_result_cache_flush()")
@@ -2326,11 +2364,64 @@ mod tests {
         }
 
         let entries = ctx
-            .sql("SELECT key_hash, function, num_rows FROM vgi_result_cache()")
+            .sql(
+                "SELECT key_hash, function, num_rows, num_batches, num_substreams, \
+                        at_unit, at_value, tier, total_bytes, partition_label \
+                 FROM vgi_result_cache()",
+            )
             .await?
             .collect()
             .await?;
         assert_eq!(entries.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![1_i64, 2]))],
+        )?;
+        let tail = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![3_i64]))])?;
+        runtime.result_cache().insert_with_substreams(
+            vgi_client::CacheKey {
+                catalog: "example".to_string(),
+                identity_scope: "example:anonymous".to_string(),
+                worker_label: "fixture".to_string(),
+                function: "data.cacheable_numbers".to_string(),
+                arguments: Vec::new(),
+                projection: None,
+                filters: None,
+                catalog_version: 1,
+                at: Some(("VERSION".to_string(), "7".to_string())),
+                settings: Vec::new(),
+                attach_options: Vec::new(),
+                row_limit: None,
+                ordering: None,
+                sample: None,
+                plan: None,
+            },
+            vec![batch, tail],
+            3,
+            std::time::Duration::from_secs(60),
+            Some(&vgi_client::CacheControl::ttl(60)),
+        );
+        let observed = ctx
+            .sql(
+                "SELECT COUNT(*) FROM vgi_result_cache() \
+                 WHERE num_rows = 3 AND num_batches = 2 AND num_substreams = 3 \
+                   AND at_unit = 'VERSION' AND at_value = '7' AND tier = 'memory' \
+                   AND total_bytes > 0 AND partition_label = ''",
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(
+            observed[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("COUNT is Int64")
+                .value(0),
+            1
+        );
         Ok(())
     }
 

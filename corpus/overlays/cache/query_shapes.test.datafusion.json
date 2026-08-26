@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 10,
+      "original_sql": "SELECT LIST(c.n ORDER BY c.n) FROM ex.data.cacheable_numbers c JOIN (VALUES (3), (7), (9)) t(k) ON c.n = t.k;",
+      "replacement_sql": "SELECT array_agg(c.n ORDER BY c.n) FROM ex.data.cacheable_numbers c JOIN (VALUES (3), (7), (9)) t(k) ON c.n = t.k;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes the same ordered list aggregate as array_agg; ordering and element type are unchanged."
+    }
+  ]
+}

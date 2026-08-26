@@ -151,6 +151,85 @@ async fn hash_join_keys_reach_vgi_init_and_results_stay_exact() -> datafusion::e
     Ok(())
 }
 
+async fn assert_multi_column_hash_join_keys(
+    connection: VgiConnection,
+) -> datafusion::error::Result<()> {
+    let Some(schema) = filter_echo_schema(&connection).await else {
+        eprintln!("skipping: filter_echo_table_scan not in this catalog");
+        return Ok(());
+    };
+
+    let mut config = SessionConfig::new().with_target_partitions(1);
+    config
+        .options_mut()
+        .optimizer
+        .enable_join_dynamic_filter_pushdown = true;
+    let ctx = SessionContext::new_with_config(config);
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(connection, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    // DataFusion represents this two-key filter as a struct IN expression.
+    // The worker receives one VGI side batch per field. Their Cartesian product
+    // is a safe superset; the hash join retains the tuple correlation locally.
+    let batches = ctx
+        .sql(
+            "SELECT e.n, e.s, e.pushed_filters
+             FROM (VALUES
+                     (1, 'row_1'),
+                     (3, 'row_3'),
+                     (1, 'row_3')) AS keys(id, label)
+             JOIN echo e ON keys.id = e.n AND keys.label = e.s
+             ORDER BY e.n",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        2,
+        "the crossed build tuple must not become an extra result"
+    );
+    let pushed = batches
+        .iter()
+        .find_map(|batch| {
+            let index = batch.schema().index_of("pushed_filters").ok()?;
+            let strings = batch.column(index).as_any().downcast_ref::<StringArray>()?;
+            (!strings.is_empty() && !strings.is_null(0)).then(|| strings.value(0).to_string())
+        })
+        .unwrap_or_default();
+    assert!(
+        pushed.contains("n IN (1, 3") && pushed.contains("s IN ('row_1', 'row_3'"),
+        "worker did not receive both multi-column marginal sets: {pushed:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_column_hash_join_keys_reach_vgi_as_safe_marginal_sets(
+) -> datafusion::error::Result<()> {
+    let Some(worker) = example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    assert_multi_column_hash_join_keys(VgiConnection::subprocess([worker
+        .to_string_lossy()
+        .to_string()]))
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_column_hash_join_keys_reach_http_as_safe_marginal_sets(
+) -> datafusion::error::Result<()> {
+    let Some(worker) = example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    let worker = HttpWorker::start(&worker);
+    assert_multi_column_hash_join_keys(VgiConnection::http(worker.url())).await
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn static_equality_or_reaches_vgi_as_membership() -> datafusion::error::Result<()> {
     let Some(worker) = example_worker() else {

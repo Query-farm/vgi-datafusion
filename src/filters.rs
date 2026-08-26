@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, RecordBatch, StringArray};
+use datafusion::arrow::array::{Array, ArrayRef, RecordBatch, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{Result as DFResult, ScalarValue};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
@@ -33,7 +33,7 @@ use datafusion::physical_expr::expressions::{
     BinaryExpr as PhysicalBinaryExpr, CastExpr, Column as PhysicalColumn, InListExpr,
     IsNotNullExpr, IsNullExpr, Literal,
 };
-use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::{PhysicalExpr, ScalarFunctionExpr};
 
 /// A constant hoisted out of a predicate, to become its own typed Arrow column.
 ///
@@ -290,9 +290,70 @@ impl<'a> Builder<'a> {
                 return;
             }
         }
+        // DataFusion 55 represents a small multi-column hash-join filter as
+        // `struct(col_a, col_b, ...) IN ((a1, b1, ...), ...)`. VGI's existing
+        // join-key channel carries scalar columns rather than tuple values.
+        // Sending each tuple field as an independent top-level membership set
+        // is nevertheless safe: it admits the Cartesian product of the field
+        // sets, a superset of the original tuples. The hash join still tests
+        // the correlated keys locally, so it restores the exact tuple result.
+        // This gives the worker useful pruning without inventing a new
+        // protocol expression.
+        if side_join_keys {
+            if let Some(list) = expr.downcast_ref::<InListExpr>() {
+                if let Some(specs) = self.struct_memberships(list) {
+                    out.extend(specs);
+                    return;
+                }
+            }
+        }
         if let Some(spec) = self.build_physical(expr, side_join_keys) {
             out.push(spec);
         }
+    }
+
+    /// Decompose DataFusion's multi-column struct membership into independent
+    /// VGI join-key sets. This is only called for init-time side batches.
+    ///
+    /// The operation is atomic: any unsupported/null tuple field rolls back
+    /// every side batch and referenced column produced so far.
+    fn struct_memberships(&mut self, list: &InListExpr) -> Option<Vec<serde_json::Value>> {
+        if list.negated() || list.is_empty() {
+            return None;
+        }
+        let columns = physical_struct_columns(list.expr().as_ref())?;
+        if columns.len() < 2
+            || columns
+                .iter()
+                .enumerate()
+                .any(|(index, name)| columns[..index].contains(name))
+        {
+            return None;
+        }
+
+        let mut field_values = vec![Vec::with_capacity(list.len()); columns.len()];
+        for value in list.list() {
+            let ScalarValue::Struct(tuple) = physical_literal(value.as_ref())? else {
+                return None;
+            };
+            if tuple.len() != 1 || tuple.is_null(0) || tuple.num_columns() != columns.len() {
+                return None;
+            }
+            for (index, values) in field_values.iter_mut().enumerate() {
+                values.push(ScalarValue::try_from_array(tuple.column(index).as_ref(), 0).ok()?);
+            }
+        }
+
+        let checkpoint = self.checkpoint();
+        let mut specs = Vec::with_capacity(columns.len());
+        for (name, values) in columns.into_iter().zip(field_values) {
+            let Some(spec) = self.membership(name, values) else {
+                self.rollback(checkpoint);
+                return None;
+            };
+            specs.push(spec);
+        }
+        Some(specs)
     }
 
     fn physical_binary(
@@ -490,6 +551,20 @@ fn physical_literal(expr: &dyn PhysicalExpr) -> Option<ScalarValue> {
     expr.downcast_ref::<CastExpr>().and_then(|cast| {
         physical_literal(cast.expr.as_ref()).and_then(|v| v.cast_to(cast.cast_type()).ok())
     })
+}
+
+/// Return the scan columns assembled by DataFusion's physical `struct`
+/// function, if every struct field is a direct (optionally cast) column.
+fn physical_struct_columns(expr: &dyn PhysicalExpr) -> Option<Vec<String>> {
+    let function = expr.downcast_ref::<ScalarFunctionExpr>()?;
+    if function.name() != "struct" {
+        return None;
+    }
+    function
+        .args()
+        .iter()
+        .map(|argument| physical_column_name(argument.as_ref()))
+        .collect()
 }
 
 /// Flatten `column = literal OR ...` on one column into a typed membership
@@ -876,6 +951,8 @@ fn shift_value_refs(value: &mut serde_json::Value, offset: usize) {
 mod tests {
     use super::*;
     use datafusion::arrow::array::{Array, Int64Array};
+    use datafusion::common::config::ConfigOptions;
+    use datafusion::common::scalar::ScalarStructBuilder;
     use datafusion::logical_expr::{col, lit};
     use datafusion::physical_expr::expressions::{
         col as physical_col, lit as physical_lit, BinaryExpr as PhysicalBinaryExpr, InListExpr,
@@ -1357,6 +1434,130 @@ mod tests {
             keys.schema().metadata().get("vgi_join_keys_version"),
             Some(&"2".to_string())
         );
+    }
+
+    #[test]
+    fn physical_struct_membership_becomes_safe_per_column_join_keys() {
+        let fields = vec![
+            Field::new("c0", DataType::Int64, true),
+            Field::new("c1", DataType::Utf8, true),
+        ]
+        .into();
+        let tuple_expr = Arc::new(ScalarFunctionExpr::new(
+            "struct",
+            datafusion::functions::core::r#struct(),
+            vec![
+                physical_col("n", &schema()).unwrap(),
+                physical_col("name", &schema()).unwrap(),
+            ],
+            Arc::new(Field::new("struct", DataType::Struct(fields), true)),
+            Arc::new(ConfigOptions::default()),
+        )) as Arc<dyn PhysicalExpr>;
+        let tuple = |n, name| {
+            ScalarStructBuilder::new()
+                .with_scalar(
+                    Field::new("c0", DataType::Int64, true),
+                    ScalarValue::from(n),
+                )
+                .with_scalar(
+                    Field::new("c1", DataType::Utf8, true),
+                    ScalarValue::from(name),
+                )
+                .build()
+                .unwrap()
+        };
+        let list = InListExpr::try_new(
+            tuple_expr,
+            vec![
+                physical_lit(tuple(1_i64, "one")),
+                physical_lit(tuple(3_i64, "three")),
+            ],
+            false,
+            &schema(),
+        )
+        .unwrap();
+
+        let dynamic =
+            serialize_physical(&[Arc::new(list) as Arc<dyn PhysicalExpr>], &schema(), true)
+                .unwrap();
+        let (specs, batch) = decode(dynamic.blob.as_deref().unwrap());
+        assert_eq!(specs.as_array().unwrap().len(), 2);
+        assert_eq!(specs[0]["type"], "join_keys");
+        assert_eq!(specs[0]["column_name"], "n");
+        assert_eq!(specs[1]["type"], "join_keys");
+        assert_eq!(specs[1]["column_name"], "name");
+        assert_eq!(batch.num_columns(), 1, "all values use side batches");
+        assert_eq!(dynamic.columns, vec![0, 1]);
+        assert_eq!(dynamic.join_keys.len(), 2);
+
+        let mut n_reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&dynamic.join_keys[0]),
+            None,
+        )
+        .unwrap();
+        let n_keys = n_reader.next().unwrap().unwrap();
+        assert_eq!(
+            n_keys
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values(),
+            &[1, 3]
+        );
+
+        let mut name_reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&dynamic.join_keys[1]),
+            None,
+        )
+        .unwrap();
+        let name_keys = name_reader.next().unwrap().unwrap();
+        let names = name_keys
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "one");
+        assert_eq!(names.value(1), "three");
+    }
+
+    #[test]
+    fn physical_struct_membership_rolls_back_after_a_late_null_field() {
+        let fields = vec![
+            Field::new("c0", DataType::Int64, true),
+            Field::new("c1", DataType::Utf8, true),
+        ]
+        .into();
+        let tuple_expr = Arc::new(ScalarFunctionExpr::new(
+            "struct",
+            datafusion::functions::core::r#struct(),
+            vec![
+                physical_col("n", &schema()).unwrap(),
+                physical_col("name", &schema()).unwrap(),
+            ],
+            Arc::new(Field::new("struct", DataType::Struct(fields), true)),
+            Arc::new(ConfigOptions::default()),
+        )) as Arc<dyn PhysicalExpr>;
+        let tuple = ScalarStructBuilder::new()
+            .with_scalar(
+                Field::new("c0", DataType::Int64, true),
+                ScalarValue::from(1_i64),
+            )
+            .with_scalar(
+                Field::new("c1", DataType::Utf8, true),
+                ScalarValue::Utf8(None),
+            )
+            .build()
+            .unwrap();
+        let list =
+            InListExpr::try_new(tuple_expr, vec![physical_lit(tuple)], false, &schema()).unwrap();
+
+        let dynamic =
+            serialize_physical(&[Arc::new(list) as Arc<dyn PhysicalExpr>], &schema(), true)
+                .unwrap();
+        assert!(dynamic.blob.is_none());
+        assert!(dynamic.columns.is_empty());
+        assert!(dynamic.join_keys.is_empty());
     }
 
     #[test]

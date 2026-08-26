@@ -16,8 +16,13 @@ DataFusion where there is no matching planning or execution seam.
   captured; an error, cancellation, limit, or incomplete partition aborts the
   candidate atomically.
 - Keys isolate catalog identity and version, authenticated identity, worker and
-  function, arguments, attach options, typed session settings, projection,
-  static filters, and limit.
+  function, arguments, attach options, typed session settings, remotely applied
+  query shape, and limit. Projection and filter identity is capability-aware:
+  advertised pushdown stays in the key; explicitly local filters do not; and
+  unknown legacy filter behavior remains conservatively keyed.
+  A worker that does not advertise projection pushdown stores one full result
+  and DataFusion conforms each hit to the requested local projection, including
+  a zero-column `count(*)` projection.
   Split results with advertised ordering are not cached because flattened
   replay could violate DataFusion plan properties.
 - Producer results, stateless table-input batches, stable scalar per-value
@@ -50,9 +55,12 @@ DataFusion where there is no matching planning or execution seam.
   withdraws eligibility (`no_store`, transaction scope, or per-value opt-in)
   evicts the old entry instead of silently extending or retaining it.
 - SQL diagnostics expose cache statistics, entries, flushing, reaping, and plan
-  cache statistics. Producer scan/cache counters also appear as native
-  DataFusion execution metrics and in `EXPLAIN ANALYZE`; result-cache statistics
-  distinguish exchange hits, stores, and bytes served.
+  cache statistics. Entry inspection reports real batch and producer-substream
+  counts, time-travel coordinates, the memory tier and retained bytes, and an
+  empty partition label for whole-result entries rather than inventing
+  unsupported disk or per-partition state. Producer scan/cache counters also
+  appear as native DataFusion execution metrics and in `EXPLAIN ANALYZE`;
+  result-cache statistics distinguish exchange hits, stores, and bytes served.
 - SQL-owned `vgi_result_cache_max_entry_bytes`,
   `vgi_result_cache_max_bytes`, and `vgi_result_cache_max_entries` settings
   update the live session cache immediately. Reductions evict entries that no
@@ -140,6 +148,10 @@ cross-process sharing remain deferred.
   physical plan and streams through bounded channels. DataFusion backpressure,
   local truncation, and cancellation stop the child and worker without
   materializing the complete input; partial exchanges bypass result caching.
+- The single table-input column may carry nested Arrow lists, fixed-size lists,
+  maps, structs, dictionaries, temporal values, decimals, and binary values.
+  Reviewed DataFusion-native corpus overlays preserve those wire shapes; Arrow
+  Union and DuckDB BIT constructors remain unavailable in DataFusion SQL.
 - Start-only VGI splits now declare `Boundedness::Unbounded` instead of being
   rejected or misrepresented as bounded.
 
@@ -153,16 +165,16 @@ cross-process sharing remain deferred.
 | Scalar and SQL macro functions | Supported | Async scalar UDFs plus scalar/table macro expansion with typed defaults and named arguments |
 | Typed session settings | Supported | DataFusion `ConfigExtension`, `SET`/`RESET`, Arrow scalar and Struct encoding, metadata view, cache isolation |
 | Aggregate/window-frame use | Partial | ConstParams, retract, and advertised sliding-window callbacks work; DataFusion lacks EXCLUDE and aggregate-local ORDER BY window forms |
-| Table and buffered functions | Supported | Table input is currently constrained to one column by scalar-subquery planning |
+| Table and buffered functions | Supported | One input column can carry nested Arrow values; multiple top-level input columns remain constrained by scalar-subquery planning |
 | Global functions | Supported | Default-on/opt-out policy, collision ownership, concurrent attach linearization, replacement, and DETACH cleanup included |
 | Projection, static filters, LIMIT | Supported | Direct functions preserve exactness; lazy catalog tables recheck filters |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
-| Session result cache | Partial | Producer/split, streaming per-batch, stable scalar per-value, and unordered buffered whole-input tiers have conditional revalidation, single-flight, stale-if-error, revocation eviction, live SQL memory limits, and native scan metrics; no correlated 1:N cache, disk, or SWR |
+| Session result cache | Partial | Producer/split, streaming per-batch, stable scalar per-value, and unordered buffered whole-input tiers have conditional revalidation, single-flight, stale-if-error, revocation eviction, capability-aware scan identity/replay, truthful entry diagnostics, live SQL memory limits, and native scan metrics; no correlated 1:N cache, disk, or SWR |
 | Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
 | Correlated LATERAL table calls | Not wired | DataFusion binds table functions before an outer row is available |
-| Dynamic join filters | Partial | Single-column `IN` and same-column equality-OR sets use VGI v2 side IPC at init, with exact scalar types preserved; later constant/range generations use `vgi_pushdown_filters` over subprocess, Unix/TCP, and plain or authenticated HTTP continuations. Large hash/Bloom lookups and multi-column struct expressions remain local |
+| Dynamic join filters | Partial | Single-column `IN` and same-column equality-OR sets use VGI v2 side IPC at init, with exact scalar types preserved. Small multi-column hash-join tuple sets are safely decomposed into per-column marginal sets for worker pruning while DataFusion retains the exact tuple join locally. Later constant/range generations use `vgi_pushdown_filters` over subprocess, Unix/TCP, and plain or authenticated HTTP continuations; large hash/Bloom state and tuple-correlated protocol expressions remain local |
 | ORDER BY / TABLESAMPLE hints | Not wired | Current provider scan callback does not carry these VGI hints |
 | Table time travel | Supported | Fully-qualified VGI tables accept literal `AT (VERSION => …)` and `AT (TIMESTAMP => …)`; historical schemas and cache identities are isolated |
 | Catalog metadata | Supported | `SHOW TABLES`, `SHOW COLUMNS`, `SHOW FUNCTIONS`, and DataFusion `information_schema` expose VGI tables, views, columns, schemata, and routines without eager scan-function binds |
@@ -183,8 +195,10 @@ cross-process sharing remain deferred.
    aggregate applicable corpus coverage is complete; future additions should
    continue using the worker as the coercion authority.
 4. **Dynamic-filter breadth.** Add a VGI representation for DataFusion's large
-   hash/Bloom lookup and multi-column struct membership expressions, and decide
-   whether completed filters may safely refine split enumeration before init.
+   hash/Bloom lookup and tuple-correlated multi-column membership expressions;
+   the current per-column marginal decomposition is safe but intentionally
+   inexact. Decide whether completed filters may safely refine split
+   enumeration before init.
 5. **Metadata and documentation surfaces.** Preserve worker docs, examples,
    tags, settings requirements, and late-materialization declarations for host
    inspection before building custom operators around them.
@@ -200,38 +214,48 @@ wiring VGI into DataFusion rather than developing a parallel query engine.
 
 ## Production verification gate
 
-The 327-file shared VGI SQLLogicTest corpus now completes against both HTTP and
-an explicitly managed Unix-socket worker. Each transport executes 3,462 records
-with zero timeouts and produces 2,199 exact, 116 rendering-equivalent, and 168
-genuinely different results. The promoted reports are byte-identical.
+The current promoted 327-file shared VGI SQLLogicTest baseline completes
+against both HTTP and an explicitly managed Unix-socket worker. Each transport
+executes 3,526 records with zero timeouts and produces 2,252 exact, 126
+rendering-equivalent, and 169 genuinely different results. The promoted reports
+are byte-identical.
 The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
 and diagnostics, correlated table calls, wide table input, writes, and secret
-host configuration. Publishing, stalled subprocess-RPC cancellation, and
-long-lived unbounded-stream tests remain release gates.
+host configuration. Publishing, stalled subprocess-RPC cancellation,
+long-lived unbounded-stream tests, and consuming a released `vgi-rpc` with the
+HTTP blocking-dispatch fix remain release gates.
 
 The focused 10-file multi-branch slice additionally executes 75/75 positive
 records with all 53 comparable results exact over subprocess, Unix sockets, and
 loopback HTTP. This includes native CSV/Parquet arms, typed format options,
 schema reconciliation, branch filtering, and split redemption.
 
-Post-baseline focused verification also covers concurrent producer and split
-cache fills; producer, table-input, scalar per-value, and buffered whole-input
-immediate-stale revalidation; exchange single-flight and stale-if-error;
+Post-baseline focused verification also covers capability-aware scan cache
+identity and full-result replay across local projections and filters; truthful
+cache entry layout, time-travel, tier, and byte diagnostics; concurrent producer
+and split cache fills; producer, table-input, scalar per-value, and buffered
+whole-input immediate-stale revalidation; exchange single-flight and stale-if-error;
 revocation eviction; unordered buffered multiset identity and bounded capture;
 truthful scalar/buffered/table-input lifecycle events; incremental finite-LIMIT exchange;
 catalog-source provider resolution; pre-attach canonical catalog discovery;
 global-function opt-out/collision/lifecycle; scan Drop cancellation and pool
-poisoning; callback-only window median; overload incompatibility; native scalar
-overlays; and multi-scope secret binds. The reviewed aggregate window slice now
-executes 15/15 applicable records with all 14 results agreeing.
+poisoning; bounded Unix/HTTP transport behavior; callback-only window median;
+overload incompatibility; native scalar and nested table-input overlays; safe
+multi-column dynamic join-key marginals; and multi-scope secret binds. The
+reviewed aggregate window slice now executes 15/15 applicable records with all
+14 results agreeing.
 
-The current release-mode adapter suite passes 239/239 tests plus two doctests,
-including focused cache-limit,
-table-input observability, scalar-null, and deterministic single-flight
-regressions in addition to the existing transport and integration coverage.
+The release-mode adapter suite passes 249/249 tests plus two doctests. This
+includes the focused cache-identity, multi-column dynamic-filter, and transport
+hardening contracts in addition to cache-limit, table-input observability,
+scalar-null, deterministic single-flight, and the existing transport and
+integration coverage.
 The settings slice executes 42/42 records with all 14 results exact, and the
 required-filter slice executes 45/45 applicable records with all 25 results
 exact, over both Unix and HTTP. A 13-file
 aggregate/macro/filter/cache promotion slice is identical over Unix and HTTP:
 both execute 145/173 records and all 113 comparable queries agree. Aggregate
-executes 42/42; macro/catalog executes 24/24; cache executes 30/38.
+executes 42/42; macro/catalog executes 24/24; cache executes 30/38. Separately,
+the completed seven-file focused cache slice executes 79/79 applicable records
+with zero failures over both transports; its two genuine diagnostic
+differences are the still-missing detailed cache-ineligibility reason logs.

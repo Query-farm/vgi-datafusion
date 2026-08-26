@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 7,
+      "original_sql": "SELECT c, a, a FROM ex.data.cache_multicol WHERE a = 3;",
+      "replacement_sql": "SELECT c, a, a AS a_duplicate FROM ex.data.cache_multicol WHERE a = 3;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion requires unique projection names; aliasing the duplicate expression changes only its column label, not its value or cache projection."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT SUM(c), SUM(a), SUM(a) FROM (SELECT c, a, a AS a2 FROM ex.data.cache_multicol) t(c, a, a2);",
+      "replacement_sql": "SELECT SUM(c), SUM(a), SUM(a) AS a_duplicate FROM (SELECT c, a, a AS a2 FROM ex.data.cache_multicol) t(c, a, a2);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion requires unique aggregate output names; the alias preserves the duplicated aggregate value asserted by SQLLogicTest."
+    },
+    {
+      "record": 12,
+      "original_sql": "SELECT LIST(n) FROM (SELECT n FROM ex.data.cache_big ORDER BY n LIMIT 3 OFFSET 2500);",
+      "replacement_sql": "SELECT array_agg(n ORDER BY n) FROM (SELECT n FROM ex.data.cache_big ORDER BY n LIMIT 3 OFFSET 2500);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's array_agg is the equivalent list aggregate; explicit ordering preserves the replay window exactly."
+    }
+  ]
+}

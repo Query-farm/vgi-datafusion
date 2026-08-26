@@ -136,9 +136,9 @@ replacing the baseline deliberately. The historical
 `corpus/baselines/http.json` records the corresponding HTTP run because
 transport equivalence is itself part of completion.
 
-## Current baseline — 2026-08-26
+## Current promoted baseline — 2026-08-26
 
-The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,207
+The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,183
 measured positive records. The historical `subprocess.json` filename is kept
 for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
@@ -151,16 +151,16 @@ statistics also feed DataFusion's existing pruning API.
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 3,462 / 4,207 (82.3%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,315 / 2,483 (93.2%) |
-| Exact results | 1,567 | 2,199 |
-| Rendering-equivalent results | 37 | 116 |
-| Genuine value differences | 149 | 168 |
-| Not-applicable records reported separately | 607 | 514 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,526 / 4,183 (84.3%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,378 / 2,547 (93.4%) |
+| Exact results | 1,567 | 2,252 |
+| Rendering-equivalent results | 37 | 126 |
+| Genuine value differences | 149 | 169 |
+| Not-applicable records reported separately | 607 | 538 |
 | Timeouts | 0 | 0 |
 
-The HTTP run executes the same 3,462 records with 2,199 exact, 116
-rendering-equivalent, and 168 different results. Both transports have zero
+The HTTP run executes the same 3,526 records with 2,252 exact, 126
+rendering-equivalent, and 169 different results. Both transports have zero
 timeouts and byte-identical reports. `cache/basic.test` is fully
 executable with all 14 value checks
 exact. The settings slice is 42/42 with 14/14 exact, while reviewed
@@ -219,7 +219,21 @@ Focused operability coverage also verifies the positive `rpc_timeout` ATTACH
 override, unfinished-scan Drop cancellation and failed-stream pool poisoning,
 pre-attach canonical catalog discovery, and the default-on/opt-out, collision,
 replacement, concurrent-owner, DETACH, and re-ATTACH lifecycle of nominated
-global functions.
+global functions. New Unix/HTTP hardening contracts cover bounded producer
+backpressure, early-LIMIT cancellation, actionable expired-split errors, and
+post-error connection recovery. The server-side fix that prevents synchronous
+RPC callbacks from occupying Tokio HTTP workers is still unreleased in the
+sibling `vgi-rpc-rust` checkout; consuming that release and rerunning these
+contracts remains a production gate.
+
+Reviewed DataFusion-native overlays also broaden scalar and table-input wire
+coverage without adding adapter-only SQL. Constant-column calls cover unsigned
+Arrow integers, Decimal256, timestamp units, maps, lists, and nested structs.
+The single table-input column round-trips maps, structs, nested/fixed-size
+lists, dictionaries, temporal values, decimals, and binary values. DataFusion
+55 still cannot construct Arrow Union or DuckDB BIT values in SQL, and the
+logical table-function seam still cannot express multiple top-level input
+columns.
 
 The 2026-08-26 promotion slice covers 13 aggregate, macro/catalog, typed-filter,
 and cache files over both Unix sockets and HTTP. Both transports execute
@@ -228,6 +242,13 @@ four rendering-only differences). Aggregate is 42/42, macro/catalog is 24/24,
 and the cache slice is 30/38. The remaining 28 records are classified
 DataFusion SQL/type or table-expression boundaries; neither transport has a
 unique failure.
+
+A separate completed seven-file cache slice executes 79/79 applicable records
+over both Unix and HTTP, with zero failures, 19 reviewed non-applicable records,
+five SQL adaptations, 49 exact results, and two genuine diagnostic differences.
+Those two differences are missing detailed cache-ineligibility reason logs,
+which remain an honest gap. This is focused post-baseline evidence, not a new
+full-corpus total.
 
 ## What remains
 
@@ -254,9 +275,18 @@ engine work to a minimum:
    conditional revalidation, and lifecycle events over both transports.
    Three SQL settings now update the live per-entry, total-byte, and entry-count
    bounds, immediately evicting entries that no longer fit; `RESET` restores
-   the session constructor values. Correlated 1:N per-value entries, disk
+   the session constructor values. Scan cache identity now follows advertised
+   worker capabilities: remote projection/filter shape stays keyed, explicitly
+   local shape does not, and unknown legacy filter behavior remains
+   conservatively keyed. Non-projection-capable workers cache one full result
+   that is conformed on each local replay, including zero-column `count(*)`.
+   Entry diagnostics expose real batch/substream counts, time-travel identity,
+   memory bytes/tier, and truthful whole-result partition labeling. Correlated
+   1:N per-value entries, disk
    persistence/spilling, compression, stale-while-revalidate, and worker-log
-   forwarding remain. The promoted baseline executes 629/783 cache records.
+   forwarding and detailed ineligibility-reason logs remain. The promoted
+   baseline executes 646/783 cache records. The focused cache batch remains a
+   useful zero-failure regression slice within that promoted result.
 4. **Table-in/out engine boundary.** Correlated LATERAL calls and wide table
    subqueries remain the predominant engine-boundary failures. The adapter
    accepts the single-column expression shape DataFusion exposes naturally,
@@ -297,9 +327,11 @@ engine work to a minimum:
    the side IPC included in split planning, scan initialization, and cache
    identity. Exact supported Arrow scalar types and same-column equality `OR`
    membership are also covered. ORDER BY, TABLESAMPLE, late materialization,
-   continued refinement after an init-time membership set, multi-column
-   membership, and very large/Bloom join-key state remain explicit partial
-   features.
+   continued refinement after an init-time membership set, tuple-correlated
+   multi-column membership, and very large/Bloom join-key state remain explicit
+   partial features. Small multi-column hash-join tuple sets now reach workers
+   as safe per-column marginal sets; DataFusion's local hash join preserves the
+   exact tuple correlation.
 
 Focused regression contracts for projection pushdown, narrow-bind mismatch,
 and unary error propagation are already marked `complete`; they establish the

@@ -500,6 +500,11 @@ fn narrowest_column(bound: &vgi_client::BoundFunction) -> Option<i64> {
 #[derive(Debug, Clone, Copy, Default)]
 struct FunctionCapabilities {
     projection_pushdown: bool,
+    /// `Some(false)` means a discovered function did not opt into filters, so
+    /// predicates stay entirely local. `None` is reserved for an undiscovered
+    /// or legacy function whose capability is unknown; preserve the existing
+    /// optimistic send + cache identity for that compatibility path.
+    filter_pushdown: Option<bool>,
     /// `None` means discovery could not identify the function, so planning is
     /// still attempted for compatibility with hidden catalog scan functions
     /// and older workers.
@@ -536,6 +541,11 @@ fn function_capabilities(
         projection_pushdown: matches
             .iter()
             .all(|info| info.projection_pushdown == Some(true)),
+        filter_pushdown: Some(
+            matches
+                .iter()
+                .all(|info| info.filter_pushdown == Some(true)),
+        ),
         supports_splits: Some(matches.iter().all(|info| info.supports_splits)),
         filters_exactly_applied: matches.iter().all(|info| info.filters_exactly_applied),
     })
@@ -826,6 +836,8 @@ pub struct VgiTableProvider {
     /// The worker opted into receiving projection IDs. Functions that do not
     /// opt in return their full schema and are narrowed locally instead.
     projection_pushdown: bool,
+    /// See [`FunctionCapabilities::filter_pushdown`].
+    filter_pushdown: Option<bool>,
     /// The discovery-time split declaration. `None` means the function was not
     /// discoverable, so `table_function_plan` is still probed for compatibility.
     supports_splits: Option<bool>,
@@ -1023,6 +1035,7 @@ impl VgiTableProvider {
             function_statistics: tokio::sync::OnceCell::new(),
             output_schema,
             projection_pushdown: capabilities.projection_pushdown,
+            filter_pushdown: capabilities.filter_pushdown,
             supports_splits: capabilities.supports_splits,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
@@ -1132,6 +1145,7 @@ impl VgiTableProvider {
             function_statistics: tokio::sync::OnceCell::new(),
             output_schema,
             projection_pushdown: capabilities.projection_pushdown,
+            filter_pushdown: capabilities.filter_pushdown,
             supports_splits: capabilities.supports_splits,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
@@ -1183,6 +1197,7 @@ impl VgiTableProvider {
             function_statistics: tokio::sync::OnceCell::new(),
             output_schema,
             projection_pushdown: capabilities.projection_pushdown,
+            filter_pushdown: capabilities.filter_pushdown,
             supports_splits: capabilities.supports_splits,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
@@ -1254,6 +1269,7 @@ impl VgiTableProvider {
             function_statistics: tokio::sync::OnceCell::new(),
             output_schema,
             projection_pushdown: capabilities.projection_pushdown,
+            filter_pushdown: capabilities.filter_pushdown,
             supports_splits: capabilities.supports_splits,
             filters_exactly_applied: capabilities.filters_exactly_applied,
             catalog_version,
@@ -1351,6 +1367,8 @@ impl VgiTableProvider {
                         worker_label: self.conn.label().to_string(),
                         function: format!("{}.{}", self.schema_name, self.function),
                         arguments,
+                        // The caller already supplies only the projection the
+                        // worker is allowed to receive.
                         projection: projection.clone(),
                         filters: pushdown.cache_identity(),
                         row_limit: limit.and_then(|value| i64::try_from(value).ok()),
@@ -1724,11 +1742,12 @@ impl TableProvider for VgiTableProvider {
         TableType::Base
     }
 
-    /// Every filter is reported `Inexact`, so DataFusion re-applies it above the
-    /// scan and pushdown stays a pure optimisation — a worker that ignores or
-    /// mis-applies the blob still yields correct rows. Claiming `Exact` would
-    /// make every translation decision load-bearing for correctness in exchange
-    /// for saving a local filter pass.
+    /// A pushable filter is at least `Inexact`, so DataFusion supplies it to
+    /// [`scan`](Self::scan) for local statistics pruning and re-applies it above
+    /// the scan. Workers that did not advertise filter pushdown receive no wire
+    /// filter, but returning all rows is still a valid inexact application.
+    /// `Exact` is reserved for workers that explicitly advertise exact filter
+    /// application.
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
@@ -1738,7 +1757,7 @@ impl TableProvider for VgiTableProvider {
             .iter()
             .map(|f| {
                 if filters::is_pushable(f, &self.output_schema) {
-                    if self.filters_exactly_applied {
+                    if self.filter_pushdown != Some(false) && self.filters_exactly_applied {
                         TableProviderFilterPushDown::Exact
                     } else {
                         TableProviderFilterPushDown::Inexact
@@ -1775,7 +1794,11 @@ impl TableProvider for VgiTableProvider {
         } else {
             None
         };
-        let pushdown = filters::serialize(filters, &self.output_schema)?;
+        let pushdown = if self.filter_pushdown == Some(false) {
+            filters::Pushdown::default()
+        } else {
+            filters::serialize(filters, &self.output_schema)?
+        };
 
         // Divide the scan into named splits, then bin-pack them into partitions.
         //
@@ -1812,6 +1835,7 @@ impl TableProvider for VgiTableProvider {
             self.raw_arguments.clone(),
             projection_ids,
             self.projection_pushdown,
+            self.filter_pushdown,
             pushdown,
             limit,
             projected,
@@ -1839,6 +1863,7 @@ pub struct VgiScanExec {
     raw_arguments: Option<vgi_client::Bytes>,
     projection: Option<Vec<i64>>,
     projection_pushdown: bool,
+    filter_pushdown: Option<bool>,
     pushdown: filters::Pushdown,
     /// Runtime filters linked by DataFusion's post-optimizer pushdown pass.
     /// Hash joins produce an `IN` list plus min/max bounds; Top-K produces
@@ -1950,6 +1975,7 @@ impl VgiScanExec {
         raw_arguments: Option<vgi_client::Bytes>,
         projection: Option<Vec<i64>>,
         projection_pushdown: bool,
+        filter_pushdown: Option<bool>,
         pushdown: filters::Pushdown,
         limit: Option<usize>,
         schema: SchemaRef,
@@ -2032,7 +2058,15 @@ impl VgiScanExec {
                         worker_label: conn.label().to_string(),
                         function: format!("{schema_name}.{function}"),
                         arguments,
-                        projection: projection.clone(),
+                        // A projection changes remote bytes only when the
+                        // worker opted into receiving it. Otherwise cache the
+                        // full worker result once and conform it to each local
+                        // projection on replay.
+                        projection: if projection_pushdown {
+                            projection.clone()
+                        } else {
+                            None
+                        },
                         filters: pushdown.cache_identity(),
                         catalog_version,
                         at: at.as_ref().map(|at| (at.unit.clone(), at.value.clone())),
@@ -2067,6 +2101,7 @@ impl VgiScanExec {
             raw_arguments,
             projection,
             projection_pushdown,
+            filter_pushdown,
             pushdown,
             dynamic_filters: Vec::new(),
             limit,
@@ -2099,6 +2134,7 @@ impl VgiScanExec {
             raw_arguments: self.raw_arguments.clone(),
             projection: self.projection.clone(),
             projection_pushdown: self.projection_pushdown,
+            filter_pushdown: self.filter_pushdown,
             pushdown: self.pushdown.clone(),
             dynamic_filters,
             limit: self.limit,
@@ -2290,8 +2326,20 @@ impl ScanCacheCapture {
             .eligibility(Some(&control), Some(&self.key.identity_scope), bytes)
         {
             Ok(ttl) => {
-                self.cache
-                    .insert(self.key.clone(), batches, ttl, Some(&control));
+                let num_substreams = state
+                    .partitions
+                    .iter()
+                    .flatten()
+                    .filter(|batches| !batches.is_empty())
+                    .count()
+                    .max(1);
+                self.cache.insert_with_substreams(
+                    self.key.clone(),
+                    batches,
+                    num_substreams,
+                    ttl,
+                    Some(&control),
+                );
                 state.committed = true;
                 self.metrics.stores.add(1);
                 let mut event = VgiEvent::new("cache.store");
@@ -2734,6 +2782,16 @@ impl ExecutionPlan for VgiScanExec {
         child_pushdown_result: ChildPushdownResult,
         _config: &datafusion::common::config::ConfigOptions,
     ) -> DFResult<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        if self.filter_pushdown == Some(false) {
+            return Ok(FilterPushdownPropagation {
+                filters: child_pushdown_result
+                    .parent_filters
+                    .iter()
+                    .map(|_| PushedDown::No)
+                    .collect(),
+                updated_node: None,
+            });
+        }
         let mut results = Vec::with_capacity(child_pushdown_result.parent_filters.len());
         let mut dynamic_filters = self.dynamic_filters.clone();
         for parent in child_pushdown_result.parent_filters {
@@ -2810,9 +2868,16 @@ impl ExecutionPlan for VgiScanExec {
             }
             if let Some(entry) = cached {
                 let out_schema = self.schema.clone();
-                let batches = (partition == 0)
-                    .then(|| entry.batches().to_vec())
-                    .unwrap_or_default();
+                let batches = if partition == 0 {
+                    entry
+                        .batches()
+                        .iter()
+                        .cloned()
+                        .map(|batch| conform(batch, &out_schema, self.column_mapping.as_deref()))
+                        .collect::<DFResult<Vec<_>>>()?
+                } else {
+                    Vec::new()
+                };
                 let baseline = partition_metrics.baseline;
                 let stream = futures::stream::iter(batches.into_iter().map(Ok))
                     .map(move |batch| batch.record_output(&baseline));
@@ -2971,7 +3036,9 @@ impl ExecutionPlan for VgiScanExec {
                     {
                         let entry = revalidation.as_ref().expect("checked above");
                         for batch in entry.batches() {
-                            if tx.blocking_send(Ok(batch.clone())).is_err() {
+                            let batch =
+                                conform(batch.clone(), &scan_schema, column_mapping.as_deref())?;
+                            if tx.blocking_send(Ok(batch)).is_err() {
                                 break;
                             }
                         }
@@ -3017,7 +3084,12 @@ impl ExecutionPlan for VgiScanExec {
                             {
                                 let entry = revalidation.as_ref().expect("checked above");
                                 for batch in entry.batches() {
-                                    if tx.blocking_send(Ok(batch.clone())).is_err() {
+                                    let batch = conform(
+                                        batch.clone(),
+                                        &scan_schema,
+                                        column_mapping.as_deref(),
+                                    )?;
+                                    if tx.blocking_send(Ok(batch)).is_err() {
                                         break;
                                     }
                                 }
@@ -3042,6 +3114,11 @@ impl ExecutionPlan for VgiScanExec {
                     worker_metrics.worker_bytes.add(
                         datafusion::common::utils::memory::get_record_batch_memory_size(&batch),
                     );
+                    // Non-pushdown projections are a local DataFusion concern.
+                    // Retain the worker's full batch so every local projection
+                    // shares one cache entry; projection-capable functions keep
+                    // capturing only the remote shape they requested.
+                    let full_cache_batch = (!projection_pushdown).then(|| batch.clone());
                     // DataFusion requires every batch to match the declared
                     // schema exactly, so conform rather than trusting the
                     // worker to have honoured the projection.
@@ -3054,7 +3131,10 @@ impl ExecutionPlan for VgiScanExec {
                     };
                     emitted += batch.num_rows();
                     if cache_capture.is_some() {
-                        captured.push(batch.clone());
+                        captured.push(match full_cache_batch {
+                            Some(full) => full.slice(0, batch.num_rows()),
+                            None => batch.clone(),
+                        });
                     }
                     if tx.blocking_send(Ok(batch)).is_err() {
                         // Receiver dropped: the query was cancelled.
@@ -3115,7 +3195,9 @@ impl ExecutionPlan for VgiScanExec {
                         };
                         cache.slide(key, ttl);
                         for batch in entry.batches() {
-                            tx.blocking_send(Ok(batch.clone())).map_err(|_| {
+                            let batch =
+                                conform(batch.clone(), &scan_schema, column_mapping.as_deref())?;
+                            tx.blocking_send(Ok(batch)).map_err(|_| {
                                 DataFusionError::Execution(
                                     "cached revalidation consumer dropped".to_string(),
                                 )
@@ -3177,6 +3259,8 @@ impl ExecutionPlan for VgiScanExec {
                 format!("{}.{}", self.schema_name, self.function),
                 self.cache_metrics.clone(),
                 self.cache_capture.clone(),
+                self.schema.clone(),
+                self.column_mapping.clone(),
             )
         });
         let stream = futures::stream::unfold(
@@ -3193,6 +3277,8 @@ impl ExecutionPlan for VgiScanExec {
                     function,
                     cache_metrics,
                     capture,
+                    replay_schema,
+                    column_mapping,
                 )) = flight_context
                 {
                     match flight.get_or_init(|| runtime.acquire_result_flight(&key)) {
@@ -3225,9 +3311,15 @@ impl ExecutionPlan for VgiScanExec {
                                             // drops its sender, so replay closes normally.
                                             drop(job.take());
                                             if partition == 0 {
-                                                replay.extend(
-                                                    entry.batches().iter().cloned().map(Ok),
-                                                );
+                                                replay.extend(entry.batches().iter().cloned().map(
+                                                    |batch| {
+                                                        conform(
+                                                            batch,
+                                                            &replay_schema,
+                                                            column_mapping.as_deref(),
+                                                        )
+                                                    },
+                                                ));
                                                 cache_metrics.coalesced_hits.add(1);
                                                 let mut event =
                                                     VgiEvent::new("cache.coalesced_hit");

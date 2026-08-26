@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 39,
+      "original_sql": "SELECT LENGTH(col_0) FROM example.constant_columns(3, [1, 2, 3, 4, 5]);",
+      "replacement_sql": "SELECT array_length(col_0) FROM example.constant_columns(3, [1, 2, 3, 4, 5]);",
+      "kind": "equivalent_sql",
+      "reason": "DuckDB overloads LENGTH for lists; DataFusion exposes the identical list cardinality operation as array_length."
+    },
+    {
+      "record": 50,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(2, MAP {}::MAP(VARCHAR, INTEGER));",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(2, map(arrow_cast([], 'List(Utf8)'), arrow_cast([], 'List(Int32)')));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's existing map function constructs the same empty Arrow Map<Utf8, Int32> value without DuckDB's MAP type-cast syntax."
+    },
+    {
+      "record": 65,
+      "original_sql": "SELECT col_0.outer.inner FROM example.constant_columns(3, {'outer': {'inner': 100}});",
+      "replacement_sql": "SELECT col_0['outer']['inner'] FROM example.constant_columns(3, {'outer': {'inner': 100}});",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion expresses chained Arrow struct-field access with string subscripts; the selected nested field is identical."
+    },
+    {
+      "record": 66,
+      "original_sql": "SELECT col_0.a.b.c FROM example.constant_columns(3, {'a': {'b': {'c': 'value'}}});",
+      "replacement_sql": "SELECT col_0['a']['b']['c'] FROM example.constant_columns(3, {'a': {'b': {'c': 'value'}}});",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion expresses chained Arrow struct-field access with string subscripts; the selected nested field is identical."
+    },
+    {
+      "record": 70,
+      "original_sql": "SELECT col_0[1].id FROM example.constant_columns(3, [{'id': 100, 'x': 1}, {'id': 200, 'x': 2}]);",
+      "replacement_sql": "SELECT col_0[1]['id'] FROM example.constant_columns(3, [{'id': 100, 'x': 1}, {'id': 200, 'x': 2}]);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion uses a string subscript for the struct field after the same one-based list lookup."
+    },
+    {
+      "record": 71,
+      "original_sql": "SELECT col_0[2].id FROM example.constant_columns(3, [{'id': 100, 'x': 1}, {'id': 200, 'x': 2}]);",
+      "replacement_sql": "SELECT col_0[2]['id'] FROM example.constant_columns(3, [{'id': 100, 'x': 1}, {'id': 200, 'x': 2}]);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion uses a string subscript for the struct field after the same one-based list lookup."
+    },
+    {
+      "record": 82,
+      "original_sql": "SELECT col_0.data[1].values[2] FROM example.constant_columns(3, {'data': [{'values': [10, 20]}, {'values': [30, 40]}]});",
+      "replacement_sql": "SELECT col_0['data'][1]['values'][2] FROM example.constant_columns(3, {'data': [{'values': [10, 20]}, {'values': [30, 40]}]});",
+      "kind": "equivalent_sql",
+      "reason": "String subscripts select DataFusion struct fields while integer subscripts retain the same one-based list indexing."
+    },
+    {
+      "record": 84,
+      "original_sql": "SELECT col_0.rows[2].cells[3] FROM example.constant_columns(3, {'rows': [{'cells': [1, 2, 3]}, {'cells': [4, 5, 6]}]});",
+      "replacement_sql": "SELECT col_0['rows'][2]['cells'][3] FROM example.constant_columns(3, {'rows': [{'cells': [1, 2, 3]}, {'cells': [4, 5, 6]}]});",
+      "kind": "equivalent_sql",
+      "reason": "String subscripts select DataFusion struct fields while integer subscripts retain the same one-based list indexing."
+    },
+    {
+      "record": 125,
+      "original_sql": "SELECT COUNT(DISTINCT col_0::VARCHAR) FROM example.constant_columns(2500, {'a': {'b': {'c': 123}}});",
+      "replacement_sql": "SELECT COUNT(DISTINCT col_0) FROM example.constant_columns(2500, {'a': {'b': {'c': 123}}});",
+      "kind": "equivalent_sql",
+      "reason": "The assertion measures distinct returned struct values; DataFusion can hash the Arrow struct directly without DuckDB's display-string cast."
+    },
+    {
+      "record": 128,
+      "original_sql": "SELECT MIN(col_0::VARCHAR), MAX(col_0::VARCHAR)\nFROM example.constant_columns(3000, {'nested': {'deep': [1, 2, 3]}});",
+      "kind": "out_of_scope",
+      "reason": "This assertion is specifically about DuckDB's textual cast and ordering of an Arrow struct. DataFusion 55 does not cast nested structs to VARCHAR; the VGI multi-batch struct round-trip is covered by adjacent records."
+    }
+  ]
+}

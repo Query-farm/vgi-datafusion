@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 4,
+      "original_sql": "SELECT CURRENT_SETTING('dynamic_or_filter_threshold')::BIGINT;",
+      "kind": "out_of_scope",
+      "reason": "This assertion observes DuckDB's dynamic_or_filter_threshold mutation. DataFusion 55 chooses InList versus its existing hash-table lookup representation internally and exposes no equivalent mutable threshold setting."
+    }
+  ]
+}

@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 12,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, 170141183460469231731687303715884105727::HUGEINT);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast('170141183460469231731687303715884105727', 'Decimal256(39, 0)'));",
+      "kind": "equivalent_sql",
+      "reason": "This maximum HUGEINT needs 39 decimal digits; DataFusion can carry the identical integer losslessly as Arrow Decimal256(39, 0)."
+    },
+    {
+      "record": 13,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 255::UTINYINT);",
+      "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, arrow_cast(255, 'UInt8'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes the same Arrow UInt8 value through arrow_cast rather than DuckDB's UTINYINT spelling."
+    },
+    {
+      "record": 14,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, 255::UTINYINT);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast(255, 'UInt8'));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same UInt8 scalar to the VGI vararg."
+    },
+    {
+      "record": 15,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 65535::USMALLINT);",
+      "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, arrow_cast(65535, 'UInt16'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes the same Arrow UInt16 value through arrow_cast rather than DuckDB's USMALLINT spelling."
+    },
+    {
+      "record": 16,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, 65535::USMALLINT);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast(65535, 'UInt16'));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same UInt16 scalar to the VGI vararg."
+    },
+    {
+      "record": 17,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 4294967295::UINTEGER);",
+      "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, arrow_cast(4294967295, 'UInt32'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes the same Arrow UInt32 value through arrow_cast rather than DuckDB's UINTEGER spelling."
+    },
+    {
+      "record": 18,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, 4294967295::UINTEGER);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast(4294967295, 'UInt32'));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same UInt32 scalar to the VGI vararg."
+    },
+    {
+      "record": 19,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 18446744073709551615::UBIGINT);",
+      "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, arrow_cast(18446744073709551615, 'UInt64'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes the same Arrow UInt64 value through arrow_cast rather than DuckDB's UBIGINT spelling."
+    },
+    {
+      "record": 20,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, 18446744073709551615::UBIGINT);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast(18446744073709551615, 'UInt64'));",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast supplies the same UInt64 scalar to the VGI vararg."
+    },
+    {
+      "record": 37,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, '2024-01-15 12:30:45'::TIMESTAMP_S);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion retains the Arrow second unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps."
+    },
+    {
+      "record": 38,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, '2024-01-15 12:30:45'::TIMESTAMP_S);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast('2024-01-15 12:30:45', 'Timestamp(Second, None)'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's arrow_cast constructs the same Arrow second-resolution timestamp sent by DuckDB TIMESTAMP_S."
+    },
+    {
+      "record": 39,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, '2024-01-15 12:30:45.123'::TIMESTAMP_MS);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion retains the Arrow millisecond unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps."
+    },
+    {
+      "record": 40,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, '2024-01-15 12:30:45.123'::TIMESTAMP_MS);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast('2024-01-15 12:30:45.123', 'Timestamp(Millisecond, None)'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's arrow_cast constructs the same Arrow millisecond-resolution timestamp sent by DuckDB TIMESTAMP_MS."
+    },
+    {
+      "record": 41,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, '2024-01-15 12:30:45.123456789'::TIMESTAMP_NS);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion retains the Arrow nanosecond unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps."
+    },
+    {
+      "record": 42,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, '2024-01-15 12:30:45.123456789'::TIMESTAMP_NS);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast('2024-01-15 12:30:45.123456789', 'Timestamp(Nanosecond, None)'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's arrow_cast constructs the same Arrow nanosecond-resolution timestamp sent by DuckDB TIMESTAMP_NS."
+    },
+    {
+      "record": 53,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, '550e8400-e29b-41d4-a716-446655440000'::UUID);",
+      "kind": "out_of_scope",
+      "reason": "Arrow has no UUID logical type and DataFusion 55 does not implement DuckDB's UUID SQL type; the wire value is covered by the following UTF-8 adaptation."
+    },
+    {
+      "record": 54,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, '550e8400-e29b-41d4-a716-446655440000'::UUID);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, '550e8400-e29b-41d4-a716-446655440000'::VARCHAR);",
+      "kind": "equivalent_sql",
+      "reason": "This corpus assertion checks the UUID's canonical textual value, which DataFusion can send losslessly as Arrow UTF-8 even though it has no UUID SQL type."
+    },
+    {
+      "record": 55,
+      "original_sql": "CREATE TYPE test_mood AS ENUM ('happy', 'sad', 'neutral');",
+      "kind": "out_of_scope",
+      "reason": "DataFusion has no session DDL for DuckDB enum types; VGI receives the enum's Arrow UTF-8 value, covered below."
+    },
+    {
+      "record": 56,
+      "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 'happy'::test_mood);",
+      "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 'happy'::VARCHAR);",
+      "kind": "equivalent_sql",
+      "reason": "The upstream assertion expects VARCHAR because the DuckDB enum is intentionally reduced to Arrow UTF-8 across VGI."
+    },
+    {
+      "record": 57,
+      "original_sql": "SELECT col_0 FROM example.constant_columns(3, 'happy'::test_mood);",
+      "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, 'happy'::VARCHAR);",
+      "kind": "equivalent_sql",
+      "reason": "The VGI wire value is the same Arrow UTF-8 scalar after DuckDB removes enum identity."
+    },
+    {
+      "record": 58,
+      "original_sql": "DROP TYPE test_mood;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion has no corresponding session enum type to drop."
+    },
+    {
+      "record": 68,
+      "original_sql": "SELECT col_0, col_1\nFROM example.constant_columns(3, []::INTEGER[], MAP {}::MAP(VARCHAR, INTEGER));",
+      "replacement_sql": "SELECT col_0, col_1\nFROM example.constant_columns(3, []::INTEGER[], map(arrow_cast([], 'List(Utf8)'), arrow_cast([], 'List(Int32)')));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's existing map function constructs the same empty Arrow Map<Utf8, Int32> value without DuckDB's MAP type-cast syntax."
+    }
+  ]
+}

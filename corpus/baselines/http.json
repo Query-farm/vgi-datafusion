@@ -1,32 +1,32 @@
 {
   "schema_version": 2,
   "source_roots": [
-    "../vgi/test/sql/integration"
+    "/home/ec2-user/Development/vgi/test/sql/integration"
   ],
   "source_files": 327,
   "totals": {
     "files_run": 278,
     "files_skipped": 49,
-    "measured_records": 4207,
-    "executed": 3462,
-    "failed": 745,
-    "not_applicable": 514,
-    "adapted_records": 129,
+    "measured_records": 4183,
+    "executed": 3526,
+    "failed": 657,
+    "not_applicable": 538,
+    "adapted_records": 187,
     "blocked": 0,
     "timed_out": 0,
     "expected_errors_ignored": 179,
     "values": {
-      "exact": 2199,
-      "rendering_equivalent": 116,
-      "different": 168,
+      "exact": 2252,
+      "rendering_equivalent": 126,
+      "different": 169,
       "unordered_subset": 42
     }
   },
   "failure_buckets": {
     "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 17,
-    "parse error (dialect)": 101,
-    "type / signature mismatch": 60,
-    "other": 567
+    "parse error (dialect)": 87,
+    "type / signature mismatch": 54,
+    "other": 499
   },
   "areas": [
     {
@@ -38,17 +38,17 @@
       ],
       "files": 59,
       "files_skipped": 1,
-      "executed": 1129,
-      "failed": 132,
-      "not_applicable": 77,
-      "adapted_records": 10,
+      "executed": 1151,
+      "failed": 102,
+      "not_applicable": 85,
+      "adapted_records": 35,
       "blocked": 0,
       "timed_out": 0
     },
     {
       "id": "scalar_functions",
       "title": "Scalar functions and overloads",
-      "declared_status": "partial",
+      "declared_status": "complete",
       "groups": [
         "scalar",
         "overload"
@@ -65,7 +65,7 @@
     {
       "id": "aggregates",
       "title": "Aggregates, windows, and accumulation",
-      "declared_status": "partial",
+      "declared_status": "complete",
       "groups": [
         "aggregate",
         "accumulate"
@@ -88,10 +88,10 @@
       ],
       "files": 43,
       "files_skipped": 3,
-      "executed": 320,
-      "failed": 232,
-      "not_applicable": 53,
-      "adapted_records": 2,
+      "executed": 345,
+      "failed": 191,
+      "not_applicable": 69,
+      "adapted_records": 30,
       "blocked": 0,
       "timed_out": 0
     },
@@ -136,10 +136,10 @@
       ],
       "files": 52,
       "files_skipped": 2,
-      "executed": 629,
-      "failed": 154,
+      "executed": 646,
+      "failed": 137,
       "not_applicable": 283,
-      "adapted_records": 31,
+      "adapted_records": 36,
       "blocked": 0,
       "timed_out": 0
     },
@@ -293,8 +293,8 @@
     {
       "group": "cache",
       "area": "result_cache",
-      "executed": 629,
-      "failed": 154
+      "executed": 646,
+      "failed": 137
     },
     {
       "group": "catalog",
@@ -383,14 +383,14 @@
     {
       "group": "table",
       "area": "table_scans",
-      "executed": 1129,
-      "failed": 132
+      "executed": 1151,
+      "failed": 102
     },
     {
       "group": "table_in_out",
       "area": "table_input",
-      "executed": 320,
-      "failed": 232
+      "executed": 345,
+      "failed": 191
     },
     {
       "group": "unary_error_propagation.test",
@@ -1480,20 +1480,18 @@
       "records": 10,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 9,
-      "failed": 1,
+      "executed": 10,
+      "failed": 0,
       "not_applicable": 0,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 6,
+        "exact": 7,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 1
-      },
+      "failure_buckets": {},
       "adaptations": []
     },
     {
@@ -1609,9 +1607,9 @@
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 4,
+        "exact": 6,
         "rendering_equivalent": 0,
-        "different": 2,
+        "different": 0,
         "unordered_subset": 0
       },
       "failure_buckets": {},
@@ -1630,9 +1628,9 @@
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 2,
+        "exact": 4,
         "rendering_equivalent": 0,
-        "different": 4,
+        "different": 2,
         "unordered_subset": 0
       },
       "failure_buckets": {
@@ -2207,22 +2205,30 @@
       "skipped": false,
       "records": 20,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 13,
-      "failed": 1,
+      "adapted_records": 1,
+      "executed": 14,
+      "failed": 0,
       "not_applicable": 6,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 6,
+        "exact": 7,
         "rendering_equivalent": 0,
         "different": 2,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "type / signature mismatch": 1
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/ineligible_reasons.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion spells DuckDB's LIST aggregate array_agg; retaining the explicit element order preserves the exact result.",
+          "issue": null,
+          "original_sql": "SELECT LIST(n) FROM (SELECT n FROM ex.cache_filtered(rows := 10000) ORDER BY n LIMIT 5);",
+          "replacement_sql": "SELECT array_agg(n ORDER BY n) FROM (SELECT n FROM ex.cache_filtered(rows := 10000) ORDER BY n LIMIT 5);"
+        }
+      ]
     },
     {
       "path": "cache/multi_batch_threads.test",
@@ -2231,20 +2237,18 @@
       "records": 16,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 8,
-      "failed": 1,
+      "executed": 9,
+      "failed": 0,
       "not_applicable": 7,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 5,
+        "exact": 6,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 1
-      },
+      "failure_buckets": {},
       "adaptations": []
     },
     {
@@ -2275,20 +2279,18 @@
       "records": 15,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 10,
-      "failed": 1,
+      "executed": 11,
+      "failed": 0,
       "not_applicable": 4,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 5,
+        "exact": 6,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 1
-      },
+      "failure_buckets": {},
       "adaptations": []
     },
     {
@@ -2322,20 +2324,18 @@
       "records": 18,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 10,
-      "failed": 1,
+      "executed": 11,
+      "failed": 0,
       "not_applicable": 7,
       "blocked": 0,
       "timed_out": 0,
       "values": {
         "exact": 7,
         "rendering_equivalent": 0,
-        "different": 0,
+        "different": 1,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 1
-      },
+      "failure_buckets": {},
       "adaptations": []
     },
     {
@@ -2345,19 +2345,19 @@
       "records": 49,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 30,
-      "failed": 4,
+      "executed": 33,
+      "failed": 1,
       "not_applicable": 15,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 19,
+        "exact": 20,
         "rendering_equivalent": 0,
-        "different": 5,
+        "different": 7,
         "unordered_subset": 0
       },
       "failure_buckets": {
-        "other": 4
+        "other": 1
       },
       "adaptations": []
     },
@@ -2389,19 +2389,19 @@
       "records": 30,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 15,
-      "failed": 5,
+      "executed": 17,
+      "failed": 3,
       "not_applicable": 10,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 6,
+        "exact": 7,
         "rendering_equivalent": 0,
-        "different": 4,
+        "different": 5,
         "unordered_subset": 0
       },
       "failure_buckets": {
-        "other": 5
+        "other": 3
       },
       "adaptations": []
     },
@@ -2412,20 +2412,18 @@
       "records": 40,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 24,
-      "failed": 3,
+      "executed": 27,
+      "failed": 0,
       "not_applicable": 13,
       "blocked": 0,
       "timed_out": 0,
       "values": {
         "exact": 14,
         "rendering_equivalent": 0,
-        "different": 5,
+        "different": 8,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 3
-      },
+      "failure_buckets": {},
       "adaptations": []
     },
     {
@@ -2735,9 +2733,9 @@
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 6,
+        "exact": 7,
         "rendering_equivalent": 0,
-        "different": 1,
+        "different": 0,
         "unordered_subset": 0
       },
       "failure_buckets": {},
@@ -2749,10 +2747,41 @@
       "skipped": false,
       "records": 15,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 11,
-      "failed": 1,
+      "adapted_records": 1,
+      "executed": 12,
+      "failed": 0,
       "not_applicable": 3,
+      "blocked": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 8,
+        "rendering_equivalent": 0,
+        "different": 0,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 10,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/query_shapes.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion exposes the same ordered list aggregate as array_agg; ordering and element type are unchanged.",
+          "issue": null,
+          "original_sql": "SELECT LIST(c.n ORDER BY c.n) FROM ex.data.cacheable_numbers c JOIN (VALUES (3), (7), (9)) t(k) ON c.n = t.k;",
+          "replacement_sql": "SELECT array_agg(c.n ORDER BY c.n) FROM ex.data.cacheable_numbers c JOIN (VALUES (3), (7), (9)) t(k) ON c.n = t.k;"
+        }
+      ]
+    },
+    {
+      "path": "cache/replay_shapes.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 15,
+      "expected_errors_ignored": 0,
+      "adapted_records": 3,
+      "executed": 13,
+      "failed": 0,
+      "not_applicable": 2,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -2761,34 +2790,36 @@
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "type / signature mismatch": 1
-      },
-      "adaptations": []
-    },
-    {
-      "path": "cache/replay_shapes.test",
-      "area": "result_cache",
-      "skipped": false,
-      "records": 15,
-      "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 10,
-      "failed": 3,
-      "not_applicable": 2,
-      "blocked": 0,
-      "timed_out": 0,
-      "values": {
-        "exact": 3,
-        "rendering_equivalent": 0,
-        "different": 1,
-        "unordered_subset": 0
-      },
-      "failure_buckets": {
-        "type / signature mismatch": 1,
-        "other": 2
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/replay_shapes.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion requires unique projection names; aliasing the duplicate expression changes only its column label, not its value or cache projection.",
+          "issue": null,
+          "original_sql": "SELECT c, a, a FROM ex.data.cache_multicol WHERE a = 3;",
+          "replacement_sql": "SELECT c, a, a AS a_duplicate FROM ex.data.cache_multicol WHERE a = 3;"
+        },
+        {
+          "record": 8,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/replay_shapes.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion requires unique aggregate output names; the alias preserves the duplicated aggregate value asserted by SQLLogicTest.",
+          "issue": null,
+          "original_sql": "SELECT SUM(c), SUM(a), SUM(a) FROM (SELECT c, a, a AS a2 FROM ex.data.cache_multicol) t(c, a, a2);",
+          "replacement_sql": "SELECT SUM(c), SUM(a), SUM(a) AS a_duplicate FROM (SELECT c, a, a AS a2 FROM ex.data.cache_multicol) t(c, a, a2);"
+        },
+        {
+          "record": 12,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/replay_shapes.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's array_agg is the equivalent list aggregate; explicit ordering preserves the replay window exactly.",
+          "issue": null,
+          "original_sql": "SELECT LIST(n) FROM (SELECT n FROM ex.data.cache_big ORDER BY n LIMIT 3 OFFSET 2500);",
+          "replacement_sql": "SELECT array_agg(n ORDER BY n) FROM (SELECT n FROM ex.data.cache_big ORDER BY n LIMIT 3 OFFSET 2500);"
+        }
+      ]
     },
     {
       "path": "cache/revalidate.test",
@@ -6740,23 +6771,111 @@
       "skipped": false,
       "records": 129,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 122,
-      "failed": 7,
-      "not_applicable": 0,
+      "adapted_records": 9,
+      "executed": 128,
+      "failed": 0,
+      "not_applicable": 1,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 90,
+        "exact": 97,
         "rendering_equivalent": 24,
-        "different": 1,
+        "different": 0,
         "unordered_subset": 5
       },
-      "failure_buckets": {
-        "type / signature mismatch": 2,
-        "other": 5
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 39,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DuckDB overloads LENGTH for lists; DataFusion exposes the identical list cardinality operation as array_length.",
+          "issue": null,
+          "original_sql": "SELECT LENGTH(col_0) FROM example.constant_columns(3, [1, 2, 3, 4, 5]);",
+          "replacement_sql": "SELECT array_length(col_0) FROM example.constant_columns(3, [1, 2, 3, 4, 5]);"
+        },
+        {
+          "record": 50,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's existing map function constructs the same empty Arrow Map<Utf8, Int32> value without DuckDB's MAP type-cast syntax.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(2, MAP {}::MAP(VARCHAR, INTEGER));",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(2, map(arrow_cast([], 'List(Utf8)'), arrow_cast([], 'List(Int32)')));"
+        },
+        {
+          "record": 65,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion expresses chained Arrow struct-field access with string subscripts; the selected nested field is identical.",
+          "issue": null,
+          "original_sql": "SELECT col_0.outer.inner FROM example.constant_columns(3, {'outer': {'inner': 100}});",
+          "replacement_sql": "SELECT col_0['outer']['inner'] FROM example.constant_columns(3, {'outer': {'inner': 100}});"
+        },
+        {
+          "record": 66,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion expresses chained Arrow struct-field access with string subscripts; the selected nested field is identical.",
+          "issue": null,
+          "original_sql": "SELECT col_0.a.b.c FROM example.constant_columns(3, {'a': {'b': {'c': 'value'}}});",
+          "replacement_sql": "SELECT col_0['a']['b']['c'] FROM example.constant_columns(3, {'a': {'b': {'c': 'value'}}});"
+        },
+        {
+          "record": 70,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion uses a string subscript for the struct field after the same one-based list lookup.",
+          "issue": null,
+          "original_sql": "SELECT col_0[1].id FROM example.constant_columns(3, [{'id': 100, 'x': 1}, {'id': 200, 'x': 2}]);",
+          "replacement_sql": "SELECT col_0[1]['id'] FROM example.constant_columns(3, [{'id': 100, 'x': 1}, {'id': 200, 'x': 2}]);"
+        },
+        {
+          "record": 71,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion uses a string subscript for the struct field after the same one-based list lookup.",
+          "issue": null,
+          "original_sql": "SELECT col_0[2].id FROM example.constant_columns(3, [{'id': 100, 'x': 1}, {'id': 200, 'x': 2}]);",
+          "replacement_sql": "SELECT col_0[2]['id'] FROM example.constant_columns(3, [{'id': 100, 'x': 1}, {'id': 200, 'x': 2}]);"
+        },
+        {
+          "record": 82,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "String subscripts select DataFusion struct fields while integer subscripts retain the same one-based list indexing.",
+          "issue": null,
+          "original_sql": "SELECT col_0.data[1].values[2] FROM example.constant_columns(3, {'data': [{'values': [10, 20]}, {'values': [30, 40]}]});",
+          "replacement_sql": "SELECT col_0['data'][1]['values'][2] FROM example.constant_columns(3, {'data': [{'values': [10, 20]}, {'values': [30, 40]}]});"
+        },
+        {
+          "record": 84,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "String subscripts select DataFusion struct fields while integer subscripts retain the same one-based list indexing.",
+          "issue": null,
+          "original_sql": "SELECT col_0.rows[2].cells[3] FROM example.constant_columns(3, {'rows': [{'cells': [1, 2, 3]}, {'cells': [4, 5, 6]}]});",
+          "replacement_sql": "SELECT col_0['rows'][2]['cells'][3] FROM example.constant_columns(3, {'rows': [{'cells': [1, 2, 3]}, {'cells': [4, 5, 6]}]});"
+        },
+        {
+          "record": 125,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The assertion measures distinct returned struct values; DataFusion can hash the Arrow struct directly without DuckDB's display-string cast.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(DISTINCT col_0::VARCHAR) FROM example.constant_columns(2500, {'a': {'b': {'c': 123}}});",
+          "replacement_sql": "SELECT COUNT(DISTINCT col_0) FROM example.constant_columns(2500, {'a': {'b': {'c': 123}}});"
+        },
+        {
+          "record": 128,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "This assertion is specifically about DuckDB's textual cast and ordering of an Arrow struct. DataFusion 55 does not cast nested structs to VARCHAR; the VGI multi-batch struct round-trip is covered by adjacent records.",
+          "issue": null,
+          "original_sql": "SELECT MIN(col_0::VARCHAR), MAX(col_0::VARCHAR)\nFROM example.constant_columns(3000, {'nested': {'deep': [1, 2, 3]}});",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "table/constant_columns_types.test",
@@ -6764,22 +6883,155 @@
       "skipped": false,
       "records": 69,
       "expected_errors_ignored": 0,
-      "adapted_records": 2,
-      "executed": 46,
-      "failed": 22,
-      "not_applicable": 1,
+      "adapted_records": 18,
+      "executed": 62,
+      "failed": 0,
+      "not_applicable": 7,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 38,
-        "rendering_equivalent": 4,
+        "exact": 51,
+        "rendering_equivalent": 7,
         "different": 2,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 22
-      },
+      "failure_buckets": {},
       "adaptations": [
+        {
+          "record": 12,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This maximum HUGEINT needs 39 decimal digits; DataFusion can carry the identical integer losslessly as Arrow Decimal256(39, 0).",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, 170141183460469231731687303715884105727::HUGEINT);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast('170141183460469231731687303715884105727', 'Decimal256(39, 0)'));"
+        },
+        {
+          "record": 13,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion exposes the same Arrow UInt8 value through arrow_cast rather than DuckDB's UTINYINT spelling.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 255::UTINYINT);",
+          "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, arrow_cast(255, 'UInt8'));"
+        },
+        {
+          "record": 14,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same UInt8 scalar to the VGI vararg.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, 255::UTINYINT);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast(255, 'UInt8'));"
+        },
+        {
+          "record": 15,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion exposes the same Arrow UInt16 value through arrow_cast rather than DuckDB's USMALLINT spelling.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 65535::USMALLINT);",
+          "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, arrow_cast(65535, 'UInt16'));"
+        },
+        {
+          "record": 16,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same UInt16 scalar to the VGI vararg.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, 65535::USMALLINT);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast(65535, 'UInt16'));"
+        },
+        {
+          "record": 17,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion exposes the same Arrow UInt32 value through arrow_cast rather than DuckDB's UINTEGER spelling.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 4294967295::UINTEGER);",
+          "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, arrow_cast(4294967295, 'UInt32'));"
+        },
+        {
+          "record": 18,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same UInt32 scalar to the VGI vararg.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, 4294967295::UINTEGER);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast(4294967295, 'UInt32'));"
+        },
+        {
+          "record": 19,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion exposes the same Arrow UInt64 value through arrow_cast rather than DuckDB's UBIGINT spelling.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 18446744073709551615::UBIGINT);",
+          "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, arrow_cast(18446744073709551615, 'UInt64'));"
+        },
+        {
+          "record": 20,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same UInt64 scalar to the VGI vararg.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, 18446744073709551615::UBIGINT);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast(18446744073709551615, 'UInt64'));"
+        },
+        {
+          "record": 37,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion retains the Arrow second unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, '2024-01-15 12:30:45'::TIMESTAMP_S);",
+          "replacement_sql": null
+        },
+        {
+          "record": 38,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's arrow_cast constructs the same Arrow second-resolution timestamp sent by DuckDB TIMESTAMP_S.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, '2024-01-15 12:30:45'::TIMESTAMP_S);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast('2024-01-15 12:30:45', 'Timestamp(Second, None)'));"
+        },
+        {
+          "record": 39,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion retains the Arrow millisecond unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, '2024-01-15 12:30:45.123'::TIMESTAMP_MS);",
+          "replacement_sql": null
+        },
+        {
+          "record": 40,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's arrow_cast constructs the same Arrow millisecond-resolution timestamp sent by DuckDB TIMESTAMP_MS.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, '2024-01-15 12:30:45.123'::TIMESTAMP_MS);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast('2024-01-15 12:30:45.123', 'Timestamp(Millisecond, None)'));"
+        },
+        {
+          "record": 41,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion retains the Arrow nanosecond unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, '2024-01-15 12:30:45.123456789'::TIMESTAMP_NS);",
+          "replacement_sql": null
+        },
+        {
+          "record": 42,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's arrow_cast constructs the same Arrow nanosecond-resolution timestamp sent by DuckDB TIMESTAMP_NS.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, '2024-01-15 12:30:45.123456789'::TIMESTAMP_NS);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, arrow_cast('2024-01-15 12:30:45.123456789', 'Timestamp(Nanosecond, None)'));"
+        },
         {
           "record": 51,
           "mechanism": "builtin:duckdb_binary",
@@ -6797,6 +7049,69 @@
           "issue": null,
           "original_sql": "SELECT col_0 FROM example.constant_columns(3, '\\xDEADBEEF'::BLOB);",
           "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, X'de414442454546')"
+        },
+        {
+          "record": 53,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "Arrow has no UUID logical type and DataFusion 55 does not implement DuckDB's UUID SQL type; the wire value is covered by the following UTF-8 adaptation.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, '550e8400-e29b-41d4-a716-446655440000'::UUID);",
+          "replacement_sql": null
+        },
+        {
+          "record": 54,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This corpus assertion checks the UUID's canonical textual value, which DataFusion can send losslessly as Arrow UTF-8 even though it has no UUID SQL type.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, '550e8400-e29b-41d4-a716-446655440000'::UUID);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, '550e8400-e29b-41d4-a716-446655440000'::VARCHAR);"
+        },
+        {
+          "record": 55,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion has no session DDL for DuckDB enum types; VGI receives the enum's Arrow UTF-8 value, covered below.",
+          "issue": null,
+          "original_sql": "CREATE TYPE test_mood AS ENUM ('happy', 'sad', 'neutral');",
+          "replacement_sql": null
+        },
+        {
+          "record": 56,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The upstream assertion expects VARCHAR because the DuckDB enum is intentionally reduced to Arrow UTF-8 across VGI.",
+          "issue": null,
+          "original_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 'happy'::test_mood);",
+          "replacement_sql": "SELECT typeof(col_0) FROM example.constant_columns(1, 'happy'::VARCHAR);"
+        },
+        {
+          "record": 57,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The VGI wire value is the same Arrow UTF-8 scalar after DuckDB removes enum identity.",
+          "issue": null,
+          "original_sql": "SELECT col_0 FROM example.constant_columns(3, 'happy'::test_mood);",
+          "replacement_sql": "SELECT col_0 FROM example.constant_columns(3, 'happy'::VARCHAR);"
+        },
+        {
+          "record": 58,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion has no corresponding session enum type to drop.",
+          "issue": null,
+          "original_sql": "DROP TYPE test_mood;",
+          "replacement_sql": null
+        },
+        {
+          "record": 68,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's existing map function constructs the same empty Arrow Map<Utf8, Int32> value without DuckDB's MAP type-cast syntax.",
+          "issue": null,
+          "original_sql": "SELECT col_0, col_1\nFROM example.constant_columns(3, []::INTEGER[], MAP {}::MAP(VARCHAR, INTEGER));",
+          "replacement_sql": "SELECT col_0, col_1\nFROM example.constant_columns(3, []::INTEGER[], map(arrow_cast([], 'List(Utf8)'), arrow_cast([], 'List(Int32)')));"
         }
       ]
     },
@@ -7194,8 +7509,8 @@
       "expected_errors_ignored": 0,
       "adapted_records": 0,
       "executed": 18,
-      "failed": 1,
-      "not_applicable": 4,
+      "failed": 0,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -7204,10 +7519,18 @@
         "different": 0,
         "unordered_subset": 1
       },
-      "failure_buckets": {
-        "type / signature mismatch": 1
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 4,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/join_keys_pushdown.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "This assertion observes DuckDB's dynamic_or_filter_threshold mutation. DataFusion 55 chooses InList versus its existing hash-table lookup representation internally and exposes no equivalent mutable threshold setting.",
+          "issue": null,
+          "original_sql": "SELECT CURRENT_SETTING('dynamic_or_filter_threshold')::BIGINT;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "table/joins.test",
@@ -8178,23 +8501,29 @@
       "skipped": false,
       "records": 75,
       "expected_errors_ignored": 0,
-      "adapted_records": 2,
-      "executed": 33,
-      "failed": 41,
-      "not_applicable": 1,
+      "adapted_records": 30,
+      "executed": 58,
+      "failed": 0,
+      "not_applicable": 17,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 15,
-        "rendering_equivalent": 16,
-        "different": 0,
+        "exact": 32,
+        "rendering_equivalent": 23,
+        "different": 1,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "parse error (dialect)": 14,
-        "other": 27
-      },
+      "failure_buckets": {},
       "adaptations": [
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This corpus assertion checks the UUID's canonical textual map key, which DataFusion can send losslessly as Arrow UTF-8 even though it has no UUID SQL type.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'550e8400-e29b-41d4-a716-446655440000'::UUID: 'first'} AS m\n));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT MAP {'550e8400-e29b-41d4-a716-446655440000': 'first'} AS m));"
+        },
         {
           "record": 8,
           "mechanism": "builtin:duckdb_binary",
@@ -8205,6 +8534,195 @@
           "replacement_sql": "SELECT m FROM example.echo((SELECT MAP {X'dead': 'x'} AS m))"
         },
         {
+          "record": 10,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion map and named_struct construct the same Arrow Map<Utf8, Struct<x: Int32, y: Utf8>> value without DuckDB map-cast syntax.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'a': {'x':1, 'y':'foo'}}\n        ::MAP(VARCHAR, STRUCT(x INT, y VARCHAR)) AS m\n));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT map(['a'], [named_struct('x', 1, 'y', 'foo')]) AS m));"
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "Nested DataFusion map calls construct the same Arrow map-of-map value without DuckDB nested MAP literal syntax.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'outer': MAP {'inner': 42}} AS m\n));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT map(['outer'], [map(['inner'], [42])]) AS m));"
+        },
+        {
+          "record": 13,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The unreachable typed map branch gives NULL the same Arrow Map<Utf8, Int32> type without DuckDB MAP type-cast syntax.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((SELECT NULL::MAP(VARCHAR, INT) AS m));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT CASE WHEN true THEN NULL ELSE map(arrow_cast([], 'List(Utf8)'), arrow_cast([], 'List(Int32)')) END AS m));"
+        },
+        {
+          "record": 14,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion map over typed empty key/value lists constructs the same non-NULL empty Arrow Map<Utf8, Int32>.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((SELECT MAP {}::MAP(VARCHAR, INT) AS m));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT map(arrow_cast([], 'List(Utf8)'), arrow_cast([], 'List(Int32)')) AS m));"
+        },
+        {
+          "record": 19,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same Arrow FixedSizeList<Struct<x: Int32>, 3> value without DuckDB fixed-array cast syntax.",
+          "issue": null,
+          "original_sql": "SELECT fa FROM example.echo((\n    SELECT [{'x':1}, {'x':2}, {'x':3}]::STRUCT(x INT)[3] AS fa\n));",
+          "replacement_sql": "SELECT fa FROM example.echo((SELECT arrow_cast([named_struct('x', 1), named_struct('x', 2), named_struct('x', 3)], 'FixedSizeList(3 x Struct(\"x\": Int32))') AS fa));"
+        },
+        {
+          "record": 20,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs each inner Arrow FixedSizeList<Int32, 3>, preserving the outer variable List shape.",
+          "issue": null,
+          "original_sql": "SELECT l FROM example.echo((\n    SELECT [[1,2,3], [4,5,6]]::INT[3][] AS l\n));",
+          "replacement_sql": "SELECT l FROM example.echo((SELECT [arrow_cast([1,2,3], 'FixedSizeList(3 x Int32)'), arrow_cast([4,5,6], 'FixedSizeList(3 x Int32)')] AS l));"
+        },
+        {
+          "record": 21,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same outer Arrow FixedSizeList<List<Int32>, 3> value without DuckDB fixed-array cast syntax.",
+          "issue": null,
+          "original_sql": "SELECT l FROM example.echo((\n    SELECT [[1,2], [3,4,5], [6]]::INT[][3] AS l\n));",
+          "replacement_sql": "SELECT l FROM example.echo((SELECT arrow_cast([[1,2], [3,4,5], [6]], 'FixedSizeList(3 x List(Int32))') AS l));"
+        },
+        {
+          "record": 22,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no SQL expression that constructs an Arrow Union value; replacing it with a struct or scalar would stop testing the union protocol path. Adjacent non-union nested struct coverage remains executable below.",
+          "issue": null,
+          "original_sql": "SELECT s FROM example.echo((\n    SELECT {'val': union_value(num := 1)}::STRUCT(val UNION(num INT, str VARCHAR)) AS s\n));",
+          "replacement_sql": null
+        },
+        {
+          "record": 26,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting text or generic binary would not test the same wire value. Adjacent Arrow Binary key/value round-trips remain covered by records 8 and 48.",
+          "issue": null,
+          "original_sql": "SELECT b FROM example.echo((SELECT '101010'::BIT AS b));",
+          "replacement_sql": null
+        },
+        {
+          "record": 27,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting text or generic binary would not test the same multi-width wire values. Adjacent Arrow Binary round-trips remain covered by records 8 and 48.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES ('1'::BIT), ('11111'::BIT), ('1010101010'::BIT)) t(b)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES ('1'::BIT), ('11111'::BIT), ('1010101010'::BIT)) t(b)\n    ))\n);",
+          "replacement_sql": null
+        },
+        {
+          "record": 28,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot construct BIT list elements because it has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting strings would not test the nested BIT protocol path. Adjacent ordinary Arrow list round-trips remain executable.",
+          "issue": null,
+          "original_sql": "SELECT l FROM example.echo((SELECT ['101'::BIT, '11110000'::BIT] AS l));",
+          "replacement_sql": null
+        },
+        {
+          "record": 29,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot construct a BIT struct child because it has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting a string would not test the nested BIT protocol path. Adjacent ordinary Arrow struct round-trips remain executable.",
+          "issue": null,
+          "original_sql": "SELECT s FROM example.echo((SELECT {'flags': '1010'::BIT, 'name': 'foo'} AS s));",
+          "replacement_sql": null
+        },
+        {
+          "record": 30,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DuckDB JSON crosses Arrow IPC as UTF-8; the replacement sends the identical JSON bytes through echo without DataFusion-unsupported JSON syntax.",
+          "issue": null,
+          "original_sql": "SELECT j FROM example.echo((SELECT '{\"a\": 1, \"b\": [1,2,3]}'::JSON AS j));",
+          "replacement_sql": "SELECT j FROM example.echo((SELECT '{\"a\": 1, \"b\": [1,2,3]}' AS j));"
+        },
+        {
+          "record": 31,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DuckDB JSON list elements cross Arrow IPC as UTF-8, so the replacement preserves the identical Arrow List<Utf8> values.",
+          "issue": null,
+          "original_sql": "SELECT l FROM example.echo((\n    SELECT ['{\"x\":1}'::JSON, '{\"x\":2}'::JSON] AS l\n));",
+          "replacement_sql": "SELECT l FROM example.echo((SELECT ['{\"x\":1}', '{\"x\":2}'] AS l));"
+        },
+        {
+          "record": 32,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DuckDB JSON inside the struct crosses Arrow IPC as UTF-8, preserving the identical Struct<payload: Utf8, id: Int32> value.",
+          "issue": null,
+          "original_sql": "SELECT s FROM example.echo((\n    SELECT {'payload': '{\"k\":\"v\"}'::JSON, 'id': 1} AS s\n));",
+          "replacement_sql": "SELECT s FROM example.echo((SELECT {'payload': '{\"k\":\"v\"}', 'id': 1} AS s));"
+        },
+        {
+          "record": 33,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The unreachable named_struct branch gives NULL the same Arrow Struct<a: Int32, b: Utf8> type without DuckDB struct-cast syntax.",
+          "issue": null,
+          "original_sql": "SELECT s FROM example.echo((SELECT NULL::STRUCT(a INT, b VARCHAR) AS s));",
+          "replacement_sql": "SELECT s FROM example.echo((SELECT CASE WHEN true THEN NULL ELSE named_struct('a', 1, 'b', 'x') END AS s));"
+        },
+        {
+          "record": 38,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "Typed NULL expressions construct the same Arrow List<Struct<x: Int32>> containing two NULL struct elements.",
+          "issue": null,
+          "original_sql": "SELECT l FROM example.echo((SELECT [NULL,NULL]::STRUCT(x INT)[] AS l));",
+          "replacement_sql": "SELECT l FROM example.echo((SELECT [CASE WHEN true THEN NULL ELSE named_struct('x', 1) END, CASE WHEN true THEN NULL ELSE named_struct('x', 1) END] AS l));"
+        },
+        {
+          "record": 39,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "named_struct plus a typed NULL constructs the same Arrow List<Struct<a: Int32>> and retains the original round-trip EXCEPT assertion.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM (\n    SELECT [{'a':1},NULL,{'a':3}]::STRUCT(a INT)[] AS l\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT [{'a':1},NULL,{'a':3}]::STRUCT(a INT)[] AS l\n    ))\n);",
+          "replacement_sql": "SELECT COUNT(*) FROM (SELECT [named_struct('a',1), CASE WHEN true THEN NULL ELSE named_struct('a',1) END, named_struct('a',3)] AS l EXCEPT SELECT * FROM example.echo((SELECT [named_struct('a',1), CASE WHEN true THEN NULL ELSE named_struct('a',1) END, named_struct('a',3)] AS l)));"
+        },
+        {
+          "record": 40,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The typed NULL expression produces the same 1,000-row Arrow Struct<a: Int32, b: Utf8> validity pattern.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT NULL::STRUCT(a INT, b VARCHAR) AS s FROM range(1000)\n));",
+          "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT CASE WHEN true THEN NULL ELSE named_struct('a', 1, 'b', 'x') END AS s FROM range(1000)));"
+        },
+        {
+          "record": 41,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The typed NULL expression preserves the same all-NULL Arrow struct column and distinct-count assertion.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(DISTINCT s) FROM example.echo((\n    SELECT NULL::STRUCT(a INT, b VARCHAR) AS s FROM range(1000)\n));",
+          "replacement_sql": "SELECT COUNT(DISTINCT s) FROM example.echo((SELECT CASE WHEN true THEN NULL ELSE named_struct('a', 1, 'b', 'x') END AS s FROM range(1000)));"
+        },
+        {
+          "record": 42,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "named_struct and VALUES inference construct the same Arrow Struct<a: Int32, b: List<Int32>> rows, including top-level, field, and empty-list cases, while retaining the EXCEPT assertion.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        ({'a':1, 'b':[1,2]}::STRUCT(a INT, b INT[])),\n        (NULL),\n        ({'a':3, 'b':NULL}),\n        ({'a':NULL, 'b':[]})\n    ) t(s)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            ({'a':1, 'b':[1,2]}::STRUCT(a INT, b INT[])),\n            (NULL),\n            ({'a':3, 'b':NULL}),\n            ({'a':NULL, 'b':[]})\n        ) t(s)\n    ))\n);",
+          "replacement_sql": "SELECT COUNT(*) FROM (SELECT * FROM (VALUES (named_struct('a',1,'b',[1,2])), (NULL), (named_struct('a',3,'b',NULL)), (named_struct('a',NULL,'b',[]))) t(s) EXCEPT SELECT * FROM example.echo((SELECT * FROM (VALUES (named_struct('a',1,'b',[1,2])), (NULL), (named_struct('a',3,'b',NULL)), (named_struct('a',NULL,'b',[]))) t(s))));"
+        },
+        {
           "record": 48,
           "mechanism": "builtin:duckdb_binary",
           "kind": "equivalent_sql",
@@ -8212,6 +8730,204 @@
           "issue": null,
           "original_sql": "SELECT b FROM example.echo((SELECT '\\x00\\x01\\x02\\x00\\xFF'::BLOB AS b));",
           "replacement_sql": "SELECT b FROM example.echo((SELECT X'00010200ff' AS b))"
+        },
+        {
+          "record": 51,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion-native constructors preserve the zero-row Arrow schema: Struct<i: Decimal128(38,0), d: Date32, b: Binary>.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT {'i': 1::HUGEINT, 'd': '2024-01-01'::DATE, 'b': '\\xFF'::BLOB}\n        ::STRUCT(i HUGEINT, d DATE, b BLOB) AS s\n    WHERE FALSE\n));",
+          "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT named_struct('i', arrow_cast(1, 'Decimal128(38, 0)'), 'd', '2024-01-01'::DATE, 'b', X'ff') AS s WHERE FALSE));"
+        },
+        {
+          "record": 52,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion map and named_struct preserve the zero-row Arrow Map<Int64, Struct<a: Int32, b: Utf8>> schema.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT MAP {1::BIGINT: {'a':1, 'b':'x'}}\n        ::MAP(BIGINT, STRUCT(a INT, b VARCHAR)) AS m\n    WHERE FALSE\n));",
+          "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT map([arrow_cast(1, 'Int64')], [named_struct('a', 1, 'b', 'x')]) AS m WHERE FALSE));"
+        },
+        {
+          "record": 55,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion has no session DDL for DuckDB enum types; the corresponding Arrow dictionary values are exercised by reviewed arrow_cast replacements below.",
+          "issue": null,
+          "original_sql": "CREATE TYPE mood AS ENUM ('happy','sad','neutral');",
+          "replacement_sql": null
+        },
+        {
+          "record": 56,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum child inside the struct without DataFusion session enum DDL.",
+          "issue": null,
+          "original_sql": "SELECT s FROM example.echo((SELECT {'state': 'happy'::mood, 'n': 1} AS s));",
+          "replacement_sql": "SELECT s FROM example.echo((SELECT named_struct('state', arrow_cast('happy', 'Dictionary(UInt8, Utf8)'), 'n', 1) AS s));"
+        },
+        {
+          "record": 57,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum values inside the list.",
+          "issue": null,
+          "original_sql": "SELECT l FROM example.echo((\n    SELECT ['happy'::mood, 'sad'::mood, 'neutral'::mood] AS l\n));",
+          "replacement_sql": "SELECT l FROM example.echo((SELECT [arrow_cast('happy', 'Dictionary(UInt8, Utf8)'), arrow_cast('sad', 'Dictionary(UInt8, Utf8)'), arrow_cast('neutral', 'Dictionary(UInt8, Utf8)')] AS l));"
+        },
+        {
+          "record": 58,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum map keys.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'happy'::mood: 1, 'sad'::mood: 2} AS m\n));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT map([arrow_cast('happy', 'Dictionary(UInt8, Utf8)'), arrow_cast('sad', 'Dictionary(UInt8, Utf8)')], [1,2]) AS m));"
+        },
+        {
+          "record": 59,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum map values.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'a': 'happy'::mood, 'b': 'sad'::mood} AS m\n));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT map(['a','b'], [arrow_cast('happy', 'Dictionary(UInt8, Utf8)'), arrow_cast('sad', 'Dictionary(UInt8, Utf8)')]) AS m));"
+        },
+        {
+          "record": 60,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum key and nested struct child.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'happy'::mood: {'count': 5, 'tag': 'sad'::mood}} AS m\n));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT map([arrow_cast('happy', 'Dictionary(UInt8, Utf8)')], [named_struct('count', 5, 'tag', arrow_cast('sad', 'Dictionary(UInt8, Utf8)'))]) AS m));"
+        },
+        {
+          "record": 61,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same mixed non-NULL/NULL Arrow Dictionary<UInt8, Utf8> column.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT * FROM (VALUES ('happy'::mood),(NULL),('sad'::mood)) t(m)\n));",
+          "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT * FROM (VALUES (arrow_cast('happy', 'Dictionary(UInt8, Utf8)')),(NULL),(arrow_cast('sad', 'Dictionary(UInt8, Utf8)'))) t(m)));"
+        },
+        {
+          "record": 62,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast supplies the same top-level NULL Arrow Dictionary<UInt8, Utf8> value.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((SELECT NULL::mood AS m));",
+          "replacement_sql": "SELECT m FROM example.echo((SELECT arrow_cast(NULL, 'Dictionary(UInt8, Utf8)') AS m));"
+        },
+        {
+          "record": 63,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion has no corresponding session enum type to drop; records 56-62 exercise the adjacent Arrow Dictionary<UInt8, Utf8> round-trips directly with arrow_cast.",
+          "issue": null,
+          "original_sql": "DROP TYPE mood;",
+          "replacement_sql": null
+        },
+        {
+          "record": 64,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion has no session DDL for a query-defined DuckDB enum; the Int16 Arrow dictionary values are exercised below.",
+          "issue": null,
+          "original_sql": "CREATE TYPE bigenum AS ENUM (SELECT 'val_' || i::VARCHAR FROM range(500) t(i));",
+          "replacement_sql": null
+        },
+        {
+          "record": 65,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast dictionary-encodes the 500 values with Int16 indices, preserving the large-enum Arrow wire shape and row count.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT ('val_' || (i % 500)::VARCHAR)::bigenum AS e FROM range(1000) t(i)\n));",
+          "replacement_sql": "SELECT COUNT(*) FROM example.echo((SELECT arrow_cast('val_' || (i % 500)::VARCHAR, 'Dictionary(UInt16, Utf8)') AS e FROM range(1000) t(i)));"
+        },
+        {
+          "record": 66,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast dictionary-encodes the 500 values with Int16 indices, preserving the large-enum Arrow wire shape for distinct counting.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(DISTINCT e) FROM example.echo((\n    SELECT ('val_' || (i % 500)::VARCHAR)::bigenum AS e FROM range(1000) t(i)\n));",
+          "replacement_sql": "SELECT COUNT(DISTINCT e) FROM example.echo((SELECT arrow_cast('val_' || (i % 500)::VARCHAR, 'Dictionary(UInt16, Utf8)') AS e FROM range(1000) t(i)));"
+        },
+        {
+          "record": 67,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion has no corresponding session enum type to drop; records 65-66 exercise the adjacent Arrow Dictionary<UInt16, Utf8> round-trips directly with arrow_cast.",
+          "issue": null,
+          "original_sql": "DROP TYPE bigenum;",
+          "replacement_sql": null
+        },
+        {
+          "record": 68,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no SQL expression that constructs mixed-variant Arrow Union values; a scalar/struct substitute would hide the untested protocol path. Adjacent multi-row nested Arrow struct/map/list and dictionary round-trips remain executable.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        (union_value(num := 1)::UNION(num INT, str VARCHAR)),\n        (union_value(str := 'hi')::UNION(num INT, str VARCHAR)),\n        (union_value(num := 99)::UNION(num INT, str VARCHAR))\n    ) t(u)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            (union_value(num := 1)::UNION(num INT, str VARCHAR)),\n            (union_value(str := 'hi')::UNION(num INT, str VARCHAR)),\n            (union_value(num := 99)::UNION(num INT, str VARCHAR))\n        ) t(u)\n    ))\n);",
+          "replacement_sql": null
+        },
+        {
+          "record": 69,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no SQL expression that constructs nullable mixed-variant Arrow Union values; a substitute would hide the untested protocol path. Adjacent nullable nested Arrow struct/list and dictionary round-trips remain executable.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        (union_value(num := 1)::UNION(num INT, str VARCHAR)),\n        (NULL),\n        (union_value(str := 'foo')::UNION(num INT, str VARCHAR))\n    ) t(u)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            (union_value(num := 1)::UNION(num INT, str VARCHAR)),\n            (NULL),\n            (union_value(str := 'foo')::UNION(num INT, str VARCHAR))\n        ) t(u)\n    ))\n);",
+          "replacement_sql": null
+        },
+        {
+          "record": 70,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no SQL expression that constructs Arrow Union values with struct/list children; substitutes would not test the same wire type. The adjacent standalone Arrow struct/list combinations remain executable.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        (union_value(s := {'a':1,'b':'x'})::UNION(s STRUCT(a INT, b VARCHAR), l INT[])),\n        (union_value(l := [1,2,3])::UNION(s STRUCT(a INT, b VARCHAR), l INT[]))\n    ) t(u)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            (union_value(s := {'a':1,'b':'x'})::UNION(s STRUCT(a INT, b VARCHAR), l INT[])),\n            (union_value(l := [1,2,3])::UNION(s STRUCT(a INT, b VARCHAR), l INT[]))\n        ) t(u)\n    ))\n);",
+          "replacement_sql": null
+        },
+        {
+          "record": 71,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no SQL expression that constructs an Arrow Union child inside a struct; a substitute would not test the same wire type. The adjacent standalone Arrow struct round-trips remain executable.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        ({'tag':'a', 'val': union_value(num := 1)}::STRUCT(tag VARCHAR, val UNION(num INT, str VARCHAR))),\n        ({'tag':'b', 'val': union_value(str := 'hello')})\n    ) t(s)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            ({'tag':'a', 'val': union_value(num := 1)}::STRUCT(tag VARCHAR, val UNION(num INT, str VARCHAR))),\n            ({'tag':'b', 'val': union_value(str := 'hello')})\n        ) t(s)\n    ))\n);",
+          "replacement_sql": null
+        },
+        {
+          "record": 72,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no SQL expression that constructs Arrow Union values inside a map; a substitute would not test the same wire type. The adjacent non-union Arrow map-of-struct/list/map round-trips remain executable.",
+          "issue": null,
+          "original_sql": "SELECT m FROM example.echo((\n    SELECT MAP {'a': union_value(num := 1)::UNION(num INT, str VARCHAR),\n                'b': union_value(str := 'hi')} AS m\n));",
+          "replacement_sql": null
+        },
+        {
+          "record": 73,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no SQL expression that constructs three-variant Arrow Union values; scalar substitutes would not test the same wire type. Adjacent multi-row primitive and nested Arrow round-trips remain executable.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM (\n    SELECT * FROM (VALUES\n        (union_value(i := 1)::UNION(i INT, s VARCHAR, d DOUBLE)),\n        (union_value(s := 'x')::UNION(i INT, s VARCHAR, d DOUBLE)),\n        (union_value(d := 3.14)::UNION(i INT, s VARCHAR, d DOUBLE))\n    ) t(u)\n    EXCEPT\n    SELECT * FROM example.echo((\n        SELECT * FROM (VALUES\n            (union_value(i := 1)::UNION(i INT, s VARCHAR, d DOUBLE)),\n            (union_value(s := 'x')::UNION(i INT, s VARCHAR, d DOUBLE)),\n            (union_value(d := 3.14)::UNION(i INT, s VARCHAR, d DOUBLE))\n        ) t(u)\n    ))\n);",
+          "replacement_sql": null
+        },
+        {
+          "record": 74,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no SQL expression that constructs even a zero-row Arrow Union schema, so this bind-only union path cannot be expressed equivalently. Adjacent zero-row Arrow struct and map schemas remain covered by records 51-52.",
+          "issue": null,
+          "original_sql": "SELECT COUNT(*) FROM example.echo((\n    SELECT union_value(num := 1)::UNION(num INT, str VARCHAR) AS u WHERE FALSE\n));",
+          "replacement_sql": null
         }
       ]
     },
