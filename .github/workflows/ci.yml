@@ -1,0 +1,220 @@
+name: CI
+
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: "3"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  quality:
+    name: Format, lint, and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out vgi-datafusion
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: vgi-datafusion
+          persist-credentials: false
+
+      - name: Check out vgi-rust
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Query-farm/vgi-rust
+          ref: main
+          path: vgi-rust
+          persist-credentials: false
+
+      - name: Check out Apache DataFusion 55
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: apache/datafusion
+          ref: 55.0.0
+          path: datafusion
+          persist-credentials: false
+
+      - name: Install Rust 1.97
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, pinned 2026-08-26
+        with:
+          toolchain: 1.97.0
+          components: clippy,rustfmt
+
+      - name: Enable compiler cache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+      - name: Report toolchain and source revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          printf 'vgi-datafusion %s\n' "$(git -C vgi-datafusion rev-parse HEAD)"
+          printf 'vgi-rust       %s\n' "$(git -C vgi-rust rev-parse HEAD)"
+          printf 'datafusion     %s\n' "$(git -C datafusion rev-parse HEAD)"
+
+      - name: Build VGI example worker fixture
+        working-directory: vgi-rust
+        run: |
+          cargo generate-lockfile
+          cargo build --locked --package vgi-example-worker
+          test -x target/debug/vgi-example-worker
+
+      - name: Check formatting
+        working-directory: vgi-datafusion
+        run: cargo fmt --all -- --check
+
+      - name: Resolve dependencies
+        working-directory: vgi-datafusion
+        run: cargo generate-lockfile
+
+      - name: Check all targets
+        working-directory: vgi-datafusion
+        run: cargo check --locked --all-targets
+
+      - name: Run strict Clippy
+        working-directory: vgi-datafusion
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        working-directory: vgi-datafusion
+        run: cargo test --locked --all-targets
+
+      - name: Run durable producer cache tests (Unix)
+        working-directory: vgi-datafusion
+        shell: bash
+        run: |
+          set -euo pipefail
+          worker=../vgi-rust/target/debug/vgi-example-worker
+          socket="${RUNNER_TEMP}/vgi-durable-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sock"
+          log="${RUNNER_TEMP}/vgi-durable-cache-unix-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          worker_pid=""
+
+          cleanup() {
+            local status=$?
+            local state=""
+            trap - EXIT
+            if [[ -n "$worker_pid" ]]; then
+              kill -TERM "$worker_pid" 2>/dev/null || true
+              for _ in $(seq 1 50); do
+                state="$(ps -o stat= -p "$worker_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+                [[ -z "$state" || "$state" == Z* ]] && break
+                sleep 0.1
+              done
+              if [[ -n "$state" && "$state" != Z* ]]; then
+                kill -KILL "$worker_pid" 2>/dev/null || true
+              fi
+              wait "$worker_pid" 2>/dev/null || true
+            fi
+            if [[ $status -ne 0 && -f "$log" ]]; then
+              echo "::group::Unix worker log"
+              cat "$log"
+              echo "::endgroup::"
+            fi
+            rm -f "$socket" "$log"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          rm -f "$socket" "$log"
+          "$worker" --unix "$socket" >"$log" 2>&1 &
+          worker_pid=$!
+          for _ in $(seq 1 200); do
+            if [[ -S "$socket" ]]; then
+              break
+            fi
+            if ! kill -0 "$worker_pid" 2>/dev/null; then
+              echo "::error::Unix worker exited before creating $socket"
+              exit 1
+            fi
+            sleep 0.05
+          done
+          if [[ ! -S "$socket" ]]; then
+            echo "::error::Unix worker did not create $socket within 10 seconds"
+            exit 1
+          fi
+
+          VGI_TEST_WORKER="unix://${socket}" \
+            cargo test --locked --test durable_producer_cache -- --nocapture
+
+      - name: Run durable producer cache tests (HTTP)
+        working-directory: vgi-datafusion
+        shell: bash
+        run: |
+          set -euo pipefail
+          worker=../vgi-rust/target/debug/vgi-example-worker
+          log="${RUNNER_TEMP}/vgi-durable-cache-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          worker_pid=""
+          port=""
+
+          cleanup() {
+            local status=$?
+            local state=""
+            trap - EXIT
+            if [[ -n "$worker_pid" ]]; then
+              kill -TERM "$worker_pid" 2>/dev/null || true
+              for _ in $(seq 1 50); do
+                state="$(ps -o stat= -p "$worker_pid" 2>/dev/null | tr -d '[:space:]' || true)"
+                [[ -z "$state" || "$state" == Z* ]] && break
+                sleep 0.1
+              done
+              if [[ -n "$state" && "$state" != Z* ]]; then
+                kill -KILL "$worker_pid" 2>/dev/null || true
+              fi
+              wait "$worker_pid" 2>/dev/null || true
+            fi
+            if [[ $status -ne 0 && -f "$log" ]]; then
+              echo "::group::HTTP worker log"
+              cat "$log"
+              echo "::endgroup::"
+            fi
+            rm -f "$log"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          rm -f "$log"
+          "$worker" --http >"$log" 2>&1 &
+          worker_pid=$!
+          for _ in $(seq 1 200); do
+            if ! kill -0 "$worker_pid" 2>/dev/null; then
+              echo "::error::HTTP worker exited before announcing a port"
+              exit 1
+            fi
+            port="$(sed -n 's/.*PORT:\([0-9][0-9]*\).*/\1/p' "$log" | head -1)"
+            if [[ -n "$port" ]]; then
+              break
+            fi
+            sleep 0.05
+          done
+          if [[ -z "$port" ]]; then
+            echo "::error::HTTP worker did not announce a port within 10 seconds"
+            exit 1
+          fi
+
+          VGI_TEST_WORKER="http://127.0.0.1:${port}" \
+            cargo test --locked --test durable_producer_cache -- --nocapture
+
+      - name: Report compiler cache statistics
+        if: always()
+        run: sccache --show-stats

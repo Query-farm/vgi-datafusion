@@ -6,6 +6,9 @@ rust-version = "1.97"
 license = "Apache-2.0"
 description = "Apache DataFusion integration for the VGI protocol — attach a remote VGI catalog and query it with SQL"
 readme = "README.md"
+homepage = "https://query.farm"
+repository = "https://github.com/Query-farm/vgi-datafusion"
+documentation = "https://docs.rs/vgi-datafusion"
 keywords = ["vgi", "datafusion", "arrow", "sql", "federation"]
 categories = ["database", "api-bindings"]
 

@@ -1,0 +1,118 @@
+name: Build VGI DataFusion CLI artifact
+run-name: Build VGI DataFusion CLI from ${{ github.ref_name }}
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-artifact-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: "3"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  build:
+    name: Build release CLI (Linux x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out vgi-datafusion
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: vgi-datafusion
+          persist-credentials: false
+
+      - name: Check out vgi-rust
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Query-farm/vgi-rust
+          ref: main
+          path: vgi-rust
+          persist-credentials: false
+
+      - name: Check out VGI-enabled DataFusion 55
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: rustyconover/datafusion
+          ref: vgi/datafusion-55
+          path: datafusion
+          persist-credentials: false
+
+      - name: Install Rust 1.97
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master, pinned 2026-08-26
+        with:
+          toolchain: 1.97.0
+
+      - name: Enable compiler cache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+
+      - name: Record source revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          {
+            printf 'vgi-datafusion %s\n' "$(git -C vgi-datafusion rev-parse HEAD)"
+            printf 'vgi-rust %s\n' "$(git -C vgi-rust rev-parse HEAD)"
+            printf 'datafusion %s\n' "$(git -C datafusion rev-parse HEAD)"
+            printf 'rustc %s\n' "$(rustc --version)"
+          } | tee artifact/BUILD-SHAS.txt
+          {
+            echo '### Resolved source revisions'
+            echo '```text'
+            cat artifact/BUILD-SHAS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build release CLI
+        working-directory: datafusion
+        run: cargo build --locked --release --package datafusion-cli
+
+      - name: Package CLI and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name=vgi-datafusion-cli-linux-x86_64
+          package_dir="artifact/${package_name}"
+          dist_dir=artifact/dist
+          mkdir -p "$package_dir" "$dist_dir"
+
+          install -m 0755 datafusion/target/release/datafusion-cli "$package_dir/datafusion-cli"
+          install -m 0644 artifact/BUILD-SHAS.txt "$package_dir/BUILD-SHAS.txt"
+          install -m 0644 vgi-datafusion/LICENSE "$package_dir/LICENSE-vgi-datafusion"
+          install -m 0644 vgi-rust/LICENSE "$package_dir/LICENSE-vgi-rust"
+          install -m 0644 datafusion/LICENSE.txt "$package_dir/LICENSE-datafusion"
+
+          "$package_dir/datafusion-cli" --version
+          tar -C artifact -czf "$dist_dir/${package_name}.tar.gz" "$package_name"
+          (
+            cd "$package_dir"
+            sha256sum datafusion-cli > "../dist/${package_name}.binary.sha256"
+          )
+          (
+            cd "$dist_dir"
+            sha256sum "${package_name}.tar.gz" > "${package_name}.tar.gz.sha256"
+          )
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vgi-datafusion-cli-linux-x86_64-${{ github.run_number }}
+          path: |
+            artifact/BUILD-SHAS.txt
+            artifact/dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Report compiler cache statistics
+        if: always()
+        run: sccache --show-stats
