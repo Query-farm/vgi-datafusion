@@ -16,7 +16,8 @@ DataFusion where there is no matching planning or execution seam.
   captured; an error, cancellation, limit, or incomplete partition aborts the
   candidate atomically.
 - Keys isolate catalog identity and version, authenticated identity, worker and
-  function, arguments, attach options, projection, static filters, and limit.
+  function, arguments, attach options, typed session settings, projection,
+  static filters, and limit.
   Split results with advertised ordering are not cached because flattened
   replay could violate DataFusion plan properties.
 - Large stale entries support ETag/Last-Modified conditional revalidation and
@@ -71,6 +72,15 @@ remain deferred.
 - Scalar overload selection rejects incompatible typed arms without losing
   ConstParam literal coercion, allowing `ANY` arms or the worker's authoritative
   bind error instead of silently casting into the wrong overload.
+- Worker setting declarations retain their Arrow types and defaults. A dynamic
+  DataFusion `ConfigExtension` accepts native `SET vgi.name`, while the adapter
+  also qualifies attached workers' unprefixed `SET name` spelling and handles
+  `RESET`. Scalar, table, and table-in/out binds receive typed one-row IPC;
+  Struct values use JSON strings. `duckdb_settings()` projects the same live
+  declarations and values for corpus/CLI inspection.
+- Catalog-table `required_filters` are enforced as the protocol's AND-of-OR
+  groups. Nested struct paths remain precise, parent predicates satisfy child
+  requirements, and errors identify the missing groups before a scan starts.
 
 ### Secrets, runtime hooks, and observability
 
@@ -103,6 +113,7 @@ remain deferred.
 | Catalogs, schemas, tables, views | Supported | Views are registered after dependencies and qualified to their alias |
 | Native format scan branches | Supported | CSV, Parquet, JSON/NDJSON, and Arrow arms use registered DataFusion formats; custom formats require a host registration |
 | Scalar and SQL macro functions | Supported | Async scalar UDFs plus scalar/table macro expansion with typed defaults and named arguments |
+| Typed session settings | Supported | DataFusion `ConfigExtension`, `SET`/`RESET`, Arrow scalar and Struct encoding, metadata view, cache isolation |
 | Aggregate/window-frame use | Partial | ConstParams, retract, and advertised sliding-window callbacks work; DataFusion lacks EXCLUDE and aggregate-local ORDER BY window forms |
 | Table and buffered functions | Supported | Table input is currently constrained to one column by scalar-subquery planning |
 | Global functions | Supported | Prefix/collision rules and DETACH cleanup included |
@@ -150,9 +161,11 @@ wiring VGI into DataFusion rather than developing a parallel query engine.
 ## Production verification gate
 
 The 327-file shared VGI SQLLogicTest corpus now completes against both HTTP and
-Unix-socket launcher transports. HTTP executed 2,429 records and 91.3% of
-comparable query results agreed; the latest Unix run executed 2,446 and 91.2%
-agreed after enabling the same metadata surface as the CLI.
+an explicitly managed Unix-socket worker. Unix executes 3,273 records and HTTP
+3,271; both produce 2,122 exact, 106 rendering-equivalent, and 187 genuinely
+different results. The only transport delta is two additional HTTP timeouts in
+`table_in_out/parallel_fanout.test`; every completed result classification is
+otherwise identical.
 The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
 and diagnostics, correlated table calls, wide table input, writes, and secret
 host configuration. Publishing, stalled subprocess-RPC cancellation, and
@@ -169,7 +182,10 @@ provider resolution, callback-only window median, overload incompatibility,
 and multi-scope secret binds. The reviewed aggregate window slice now executes
 15/15 applicable records with all 14 results agreeing.
 
-The current release-mode adapter suite passes 181/181 tests. A 13-file
+The current release-mode adapter suite passes 194/194 tests plus two doctests.
+The settings slice executes 42/42 records with all 14 results exact, and the
+required-filter slice executes 45/45 applicable records with all 25 results
+exact, over both Unix and HTTP. A 13-file
 aggregate/macro/filter/cache promotion slice is identical over Unix and HTTP:
 both execute 145/173 records and all 113 comparable queries agree. Aggregate
 executes 42/42; macro/catalog executes 24/24; cache executes 30/38.

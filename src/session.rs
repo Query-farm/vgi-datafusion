@@ -70,11 +70,11 @@ use datafusion::dataframe::DataFrame;
 use datafusion::logical_expr::async_udf::AsyncScalarUDF;
 use datafusion::logical_expr::AggregateUDF;
 use datafusion::prelude::SessionContext;
-use datafusion::sql::parser::{DFParser, Statement as DFStatement};
+use datafusion::sql::parser::{DFParser, ResetStatement, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
     BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName,
-    ObjectNamePart, Query, SelectItem, SetExpr, Statement as SQLStatement, TableFactor, Value,
-    ValueWithSpan, VisitMut, Visitor, VisitorMut,
+    ObjectNamePart, Query, SelectItem, Set as SQLSet, SetExpr, Statement as SQLStatement,
+    TableFactor, Value, ValueWithSpan, VisitMut, Visitor, VisitorMut,
 };
 use datafusion::sql::sqlparser::dialect::SnowflakeDialect;
 
@@ -821,6 +821,117 @@ fn session_runtime(ctx: &SessionContext) -> Arc<VgiRuntime> {
     runtime
 }
 
+fn ensure_vgi_settings(ctx: &SessionContext) {
+    let state = ctx.state_ref();
+    let mut state = state.write();
+    if state
+        .config()
+        .options()
+        .extensions
+        .get::<crate::VgiSettings>()
+        .is_none()
+    {
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(crate::VgiSettings::default());
+    }
+}
+
+fn sync_vgi_settings(ctx: &SessionContext, runtime: &VgiRuntime) {
+    if let Some(settings) = ctx
+        .copied_config()
+        .options()
+        .extensions
+        .get::<crate::VgiSettings>()
+    {
+        runtime.replace_session_settings(settings.clone());
+    }
+}
+
+fn declared_vgi_setting(runtime: &VgiRuntime, name: &str) -> bool {
+    runtime.catalog_metadata().iter().any(|(_, metadata)| {
+        metadata
+            .settings
+            .iter()
+            .any(|setting| setting.name.eq_ignore_ascii_case(name))
+    })
+}
+
+fn setting_object_name(name: &ObjectName) -> Option<(bool, String)> {
+    match name.0.as_slice() {
+        [part] => part
+            .as_ident()
+            .map(|ident| (false, ident.value.to_ascii_lowercase())),
+        [prefix, part]
+            if prefix
+                .as_ident()
+                .is_some_and(|ident| ident.value.eq_ignore_ascii_case("vgi")) =>
+        {
+            part.as_ident()
+                .map(|ident| (true, ident.value.to_ascii_lowercase()))
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite DuckDB's unqualified worker setting spelling onto DataFusion's
+/// required third-party configuration namespace.
+fn qualify_vgi_set(statement: &mut DFStatement, runtime: &VgiRuntime) {
+    let DFStatement::Statement(statement) = statement else {
+        return;
+    };
+    let SQLStatement::Set(SQLSet::SingleAssignment { variable, .. }) = statement.as_mut() else {
+        return;
+    };
+    let Some((prefixed, name)) = setting_object_name(variable) else {
+        return;
+    };
+    if !prefixed && declared_vgi_setting(runtime, &name) {
+        variable.0.insert(
+            0,
+            ObjectNamePart::Identifier(datafusion::sql::sqlparser::ast::Ident::new("vgi")),
+        );
+    }
+}
+
+fn reset_vgi_setting(
+    ctx: &SessionContext,
+    runtime: &VgiRuntime,
+    statement: &DFStatement,
+) -> DFResult<bool> {
+    let DFStatement::Reset(ResetStatement::Variable(variable)) = statement else {
+        return Ok(false);
+    };
+    let Some((prefixed, name)) = setting_object_name(variable) else {
+        return Ok(false);
+    };
+    let configured = ctx
+        .copied_config()
+        .options()
+        .extensions
+        .get::<crate::VgiSettings>()
+        .is_some_and(|settings| settings.get(&name).is_some());
+    if !prefixed && !declared_vgi_setting(runtime, &name) && !configured {
+        return Ok(false);
+    }
+    if prefixed && !declared_vgi_setting(runtime, &name) && !configured {
+        return plan_err!("unknown VGI setting `{name}`");
+    }
+    let state = ctx.state_ref();
+    let mut state = state.write();
+    let settings = state
+        .config_mut()
+        .options_mut()
+        .extensions
+        .get_mut::<crate::VgiSettings>()
+        .expect("VGI settings extension was installed");
+    settings.reset_value(&name);
+    runtime.replace_session_settings(settings.clone());
+    Ok(true)
+}
+
 /// Run one SQL statement, handling `ATTACH` and `DETACH` for VGI catalogs.
 ///
 /// Every other statement is planned and executed by DataFusion exactly as
@@ -838,6 +949,10 @@ fn session_runtime(ctx: &SessionContext) -> Arc<VgiRuntime> {
 /// # }
 /// ```
 pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
+    ensure_vgi_settings(ctx);
+    let runtime = session_runtime(ctx);
+    sync_vgi_settings(ctx, &runtime);
+
     // DuckDB's own ATTACH spelling has to be handled before sqlparser sees it:
     // its grammar models exactly two options (READ_ONLY, TYPE), so
     // `(TYPE vgi, LOCATION '...')` is a *parse* error, and a parse error leaves
@@ -848,7 +963,7 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
     }
     let state = ctx.state();
     let dialect = state.config_options().sql_parser.dialect;
-    let statement = match state.sql_to_statement(query, &dialect) {
+    let mut statement = match state.sql_to_statement(query, &dialect) {
         Ok(statement) => statement,
         Err(original) if contains_time_travel_clause(query) => {
             // The default and DuckDB dialects parse `AT` as a table alias.
@@ -863,6 +978,11 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
         }
         Err(error) => return Err(error),
     };
+
+    if reset_vgi_setting(ctx, &runtime, &statement)? {
+        return ctx.read_empty();
+    }
+    qualify_vgi_set(&mut statement, &runtime);
 
     match classify(&statement)? {
         Some(Intercepted::Attach { target, alias }) => {
@@ -888,7 +1008,13 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
                 let _ = ctx.deregister_table(table);
             }
             let plan = plan?;
-            ctx.execute_logical_plan(plan).await
+            let dataframe = ctx.execute_logical_plan(plan).await?;
+            // SET mutates DataFusion's live SessionConfig while planning the
+            // statement. Refresh the runtime after every ordinary statement;
+            // for queries this is a cheap clone and for SET it makes the new
+            // values available to the next VGI bind.
+            sync_vgi_settings(ctx, &runtime);
+            Ok(dataframe)
         }
     }
 }
@@ -1940,6 +2066,7 @@ async fn attach_one(
             views: provider.metadata_views(),
             functions: provider.functions().cloned().collect(),
             macros: provider.metadata_macros().cloned().collect(),
+            settings: provider.settings().to_vec(),
             global_function_prefix: provider.global_function_prefix().to_string(),
             global_functions: provider.global_functions().to_vec(),
         },

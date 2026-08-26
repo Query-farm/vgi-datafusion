@@ -87,6 +87,7 @@ mod filters;
 mod runtime;
 mod scalar;
 mod session;
+mod settings;
 mod table_function;
 mod table_input;
 
@@ -98,6 +99,7 @@ pub use runtime::{
 };
 pub use scalar::VgiScalarUdf;
 pub use session::{sql, AttachSpec};
+pub use settings::VgiSettings;
 pub use table_function::VgiTableFunction;
 
 /// How to reach a VGI worker.
@@ -341,6 +343,16 @@ impl VgiConnection {
             cache.insert(catalog.to_string(), handle.clone());
         }
         Ok(handle)
+    }
+
+    /// Encode the session's configured `vgi.*` values using this worker's
+    /// attach-time Arrow setting declarations.
+    pub(crate) fn settings_for(
+        &self,
+        attached: &vgi_client::AttachedCatalog,
+    ) -> DFResult<Option<vgi_client::Bytes>> {
+        let declarations = vgi_client::decode_setting_specs(attached.info()).map_err(to_df)?;
+        crate::settings::encode_settings(&self.runtime.session_settings(), &declarations)
     }
 
     /// Spawn a worker as a child process.
@@ -698,14 +710,18 @@ pub(crate) fn bind_with_secrets_status(
     attached: &AttachedCatalog,
     spec: &BindSpec,
 ) -> DFResult<(vgi_client::BoundFunction, bool)> {
-    let first = client.bind(attached, spec).map_err(to_df)?;
+    let mut spec = spec.clone();
+    if spec.settings.is_none() {
+        spec.settings = conn.settings_for(attached)?;
+    }
+    let first = client.bind(attached, &spec).map_err(to_df)?;
     let requests = first.required_secrets();
     if requests.is_empty() {
         return Ok((first, false));
     }
     let secrets = resolve_secret_batch(conn.runtime(), requests)?;
     let second = client
-        .bind_with_resolved_secrets(attached, spec, secrets)
+        .bind_with_resolved_secrets(attached, &spec, secrets)
         .map_err(to_df)?;
     if !second.required_secret_types().is_empty() {
         return Err(DataFusionError::Execution(
@@ -737,8 +753,12 @@ pub(crate) fn bind_with_input_secrets_status(
     spec: &BindSpec,
     input_schema: &datafusion::arrow::datatypes::Schema,
 ) -> DFResult<(vgi_client::BoundFunction, bool)> {
+    let mut spec = spec.clone();
+    if spec.settings.is_none() {
+        spec.settings = conn.settings_for(attached)?;
+    }
     let first = client
-        .bind_with_input(attached, spec, input_schema)
+        .bind_with_input(attached, &spec, input_schema)
         .map_err(to_df)?;
     let requests = first.required_secrets();
     if requests.is_empty() {
@@ -746,7 +766,7 @@ pub(crate) fn bind_with_input_secrets_status(
     }
     let secrets = resolve_secret_batch(conn.runtime(), requests)?;
     let second = client
-        .bind_with_input_and_resolved_secrets(attached, spec, input_schema, secrets)
+        .bind_with_input_and_resolved_secrets(attached, &spec, input_schema, secrets)
         .map_err(to_df)?;
     if !second.required_secret_types().is_empty() {
         return Err(DataFusionError::Execution(
@@ -1331,6 +1351,7 @@ impl VgiTableProvider {
                             .at
                             .as_ref()
                             .map(|at| (at.unit.clone(), at.value.clone())),
+                        settings: self.conn.runtime.session_settings_identity(),
                         attach_options: self.conn.cache_attach_context(&self.catalog),
                     })
                 })
@@ -2006,7 +2027,7 @@ impl VgiScanExec {
                         filters: pushdown.cache_identity(),
                         catalog_version,
                         at: at.as_ref().map(|at| (at.unit.clone(), at.value.clone())),
-                        settings: Vec::new(),
+                        settings: conn.runtime.session_settings_identity(),
                         attach_options: conn.cache_attach_context(&catalog),
                         row_limit: limit.and_then(|value| i64::try_from(value).ok()),
                         ordering: None,

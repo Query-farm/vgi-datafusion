@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 2,
+      "original_sql": "SELECT s.a, s.b FROM example.data.rff_struct\nWHERE s = {a: 1, b: 10}::STRUCT(a BIGINT, b BIGINT);",
+      "replacement_sql": "SELECT s.a, s.b FROM example.data.rff_struct\nWHERE s = named_struct('a', 1::BIGINT, 'b', 10::BIGINT);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct constructor is equivalent to DuckDB's typed struct literal."
+    },
+    {
+      "record": 3,
+      "original_sql": "SELECT wrapper.mid.leaf FROM example.data.rff_nested\nWHERE wrapper.mid = {leaf: 1}::STRUCT(leaf BIGINT);",
+      "replacement_sql": "SELECT wrapper.mid.leaf FROM example.data.rff_nested\nWHERE wrapper.mid = named_struct('leaf', 1::BIGINT);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct constructor is equivalent to DuckDB's typed struct literal."
+    },
+    {
+      "record": 4,
+      "original_sql": "SELECT wrapper.mid.leaf FROM example.data.rff_nested\nWHERE wrapper = {mid: {leaf: 1}::STRUCT(leaf BIGINT)}::STRUCT(mid STRUCT(leaf BIGINT));",
+      "replacement_sql": "SELECT wrapper.mid.leaf FROM example.data.rff_nested\nWHERE wrapper = named_struct('mid', named_struct('leaf', 1::BIGINT));",
+      "kind": "equivalent_sql",
+      "reason": "Nested DataFusion named_struct calls preserve the same nested Arrow Struct value."
+    }
+  ]
+}

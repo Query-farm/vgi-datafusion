@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 2,
+      "original_sql": "SET config = {'start': 10, 'step': 5, 'label': 'item'};",
+      "replacement_sql": "SET vgi.config = '{\"start\":10,\"step\":5,\"label\":\"item\"}';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion ConfigExtension values are scalar strings; JSON preserves the worker's advertised Arrow Struct fields and types."
+    },
+    {
+      "record": 4,
+      "original_sql": "SET config = {'start': 0, 'step': 100, 'label': 'row'};",
+      "replacement_sql": "SET vgi.config = '{\"start\":0,\"step\":100,\"label\":\"row\"}';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion ConfigExtension values are scalar strings; JSON preserves the worker's advertised Arrow Struct fields and types."
+    }
+  ]
+}

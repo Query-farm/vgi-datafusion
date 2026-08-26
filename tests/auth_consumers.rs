@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -19,23 +19,7 @@ use vgi_datafusion::{
     VgiTableProvider,
 };
 
-fn example_worker() -> Option<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .join("vgi-rust")
-        .join("target");
-    for profile in ["debug", "release"] {
-        let executable = root.join(profile).join(if cfg!(windows) {
-            "vgi-example-worker.exe"
-        } else {
-            "vgi-example-worker"
-        });
-        if executable.exists() {
-            return Some(executable);
-        }
-    }
-    None
-}
+mod common;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Lookup {
@@ -127,7 +111,7 @@ async fn query_string(context: &SessionContext, query: &str) -> datafusion::comm
 
 #[tokio::test(flavor = "multi_thread")]
 async fn deterministic_secret_reaches_nullary_scalars() -> datafusion::common::Result<()> {
-    let Some(worker) = example_worker() else {
+    let Some(worker) = common::example_worker() else {
         eprintln!("skipping: vgi-example-worker not built");
         return Ok(());
     };
@@ -176,7 +160,7 @@ async fn deterministic_secret_reaches_nullary_scalars() -> datafusion::common::R
 #[tokio::test(flavor = "multi_thread")]
 async fn deterministic_secret_reaches_table_aggregate_and_exchange_shapes(
 ) -> datafusion::common::Result<()> {
-    let Some(worker) = example_worker() else {
+    let Some(worker) = common::example_worker() else {
         eprintln!("skipping: vgi-example-worker not built");
         return Ok(());
     };
@@ -286,6 +270,25 @@ async fn deterministic_secret_reaches_table_aggregate_and_exchange_shapes(
         (secrets.value(0), secrets.value(1)),
         ("coverage-secret", "coverage-secret")
     );
+    let cache_stats = vgi_datafusion::sql(
+        &context,
+        "SELECT exchange_hits, exchange_stores FROM vgi_result_cache_stats()",
+    )
+    .await?
+    .collect()
+    .await?;
+    for column in 0..2 {
+        assert_eq!(
+            cache_stats[0]
+                .column(column)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+                .expect("exchange cache statistic is UInt64")
+                .value(0),
+            0,
+            "secret-consuming table-in/out calls must ignore worker cache opt-in"
+        );
+    }
 
     let lookups = resolver.lookups();
     assert!(
@@ -300,7 +303,7 @@ async fn deterministic_secret_reaches_table_aggregate_and_exchange_shapes(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_host_secret_resolver_fails_before_execution() -> datafusion::common::Result<()> {
-    let Some(worker) = example_worker() else {
+    let Some(worker) = common::example_worker() else {
         eprintln!("skipping: vgi-example-worker not built");
         return Ok(());
     };
@@ -442,7 +445,7 @@ impl Drop for ProtectedWorker {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bearer_principals_cannot_cross_serve_cached_results() -> datafusion::common::Result<()> {
-    let Some(executable) = example_worker() else {
+    let Some(executable) = common::example_worker() else {
         eprintln!("skipping: vgi-example-worker not built");
         return Ok(());
     };
@@ -530,7 +533,7 @@ impl vgi_client::auth::CatalogAuth for ResolvedOAuthAuth {
 #[tokio::test(flavor = "multi_thread")]
 async fn resolved_oauth_subjects_cannot_cross_serve_cached_results(
 ) -> datafusion::common::Result<()> {
-    let Some(executable) = example_worker() else {
+    let Some(executable) = common::example_worker() else {
         eprintln!("skipping: vgi-example-worker not built");
         return Ok(());
     };

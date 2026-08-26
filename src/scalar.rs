@@ -386,7 +386,13 @@ impl VgiScalarUdf {
         if let Some(t) = &self.return_type {
             return Ok(t.clone());
         }
-        let key = format!("{arg_types:?}|{values:?}");
+        // A setting may change a worker's resolved output type (the example
+        // worker's verbose-mode function deliberately does). Never reuse a
+        // bind-derived type across different session-setting snapshots.
+        let key = format!(
+            "{arg_types:?}|{values:?}|{:?}",
+            self.conn.runtime().session_settings_identity()
+        );
         if let Ok(cache) = self.resolved.lock() {
             if let Some(t) = cache.get(&key) {
                 return Ok(t.clone());

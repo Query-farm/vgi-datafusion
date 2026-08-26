@@ -271,6 +271,7 @@ pub(crate) struct ExchangeCacheKeyTemplate {
     worker_label: String,
     function: String,
     catalog_version: i64,
+    settings: Vec<u8>,
     static_digest: [u8; 32],
 }
 
@@ -303,7 +304,7 @@ impl ExchangeCacheKeyTemplate {
             filters: None,
             catalog_version: self.catalog_version,
             at: None,
-            settings: Vec::new(),
+            settings: self.settings.clone(),
             attach_options: Vec::new(),
             row_limit: None,
             ordering: None,
@@ -358,6 +359,8 @@ pub(crate) fn exchange_cache_key_template(
     hash_exchange_field(&mut digest, arguments);
     hash_exchange_field(&mut digest, &catalog_version.to_le_bytes());
     hash_exchange_field(&mut digest, &conn.cache_attach_context(catalog));
+    let settings = conn.runtime().session_settings_identity();
+    hash_exchange_field(&mut digest, &settings);
     let output_schema = vgi_protocol::ipc::write_schema(output_schema).map_err(to_df)?;
     hash_exchange_field(&mut digest, &output_schema);
     Ok(Some(ExchangeCacheKeyTemplate {
@@ -366,6 +369,7 @@ pub(crate) fn exchange_cache_key_template(
         worker_label: conn.label().to_string(),
         function: format!("{schema_name}.{function}"),
         catalog_version,
+        settings,
         static_digest: digest.finalize().into(),
     }))
 }
@@ -769,5 +773,38 @@ mod cache_key_tests {
         .key_for_input(&one_row(&schema, 1))
         .unwrap();
         assert_ne!(first, different_static);
+    }
+
+    #[test]
+    fn exchange_keys_are_isolated_by_session_settings() {
+        let conn = VgiConnection::subprocess(["unused"]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let key = || {
+            exchange_cache_key_template(
+                &conn,
+                "example",
+                "main",
+                "settings_aware",
+                &[],
+                7,
+                schema.as_ref(),
+                b"scalar_per_value_v2",
+            )
+            .unwrap()
+            .unwrap()
+            .key_for_input(&one_row(&schema, 1))
+            .unwrap()
+        };
+        let initial = key();
+        let mut settings = crate::VgiSettings::default();
+        settings.set_value("multiplier", "5").unwrap();
+        conn.runtime().replace_session_settings(settings);
+        let configured = key();
+        assert_ne!(initial, configured);
+        assert_ne!(initial.settings, configured.settings);
     }
 }

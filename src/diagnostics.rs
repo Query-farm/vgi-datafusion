@@ -2,6 +2,7 @@
 
 //! SQL surfaces for session-scoped VGI cache and event diagnostics.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
@@ -291,6 +292,7 @@ enum DiagnosticsKind {
     Logs,
     DuckDbLogs,
     DuckDbFunctions,
+    DuckDbSettings,
     DuckDbDatabases,
     DuckDbSchemas,
     DuckDbTables,
@@ -317,6 +319,7 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::Logs => logs(&self.runtime)?,
             DiagnosticsKind::DuckDbLogs => duckdb_logs(&self.runtime)?,
             DiagnosticsKind::DuckDbFunctions => duckdb_functions(&self.runtime)?,
+            DiagnosticsKind::DuckDbSettings => duckdb_settings(&self.runtime)?,
             DiagnosticsKind::DuckDbDatabases => duckdb_databases(&self.runtime)?,
             DiagnosticsKind::DuckDbSchemas => duckdb_schemas(&self.runtime)?,
             DiagnosticsKind::DuckDbTables => duckdb_tables(&self.runtime)?,
@@ -863,6 +866,74 @@ fn string_list_array(rows: &[Vec<String>]) -> ArrayRef {
         builder.append(true);
     }
     Arc::new(builder.finish())
+}
+
+/// Compatibility projection of the VGI declarations installed into
+/// DataFusion's dynamic `vgi.*` ConfigExtension. This is intentionally a
+/// metadata view: setting mutation remains DataFusion's native SET surface.
+fn duckdb_settings(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let configured = runtime.session_settings();
+    let mut settings = BTreeMap::new();
+    for (_, metadata) in runtime.catalog_metadata() {
+        for setting in metadata.settings {
+            settings
+                .entry(setting.name.to_ascii_lowercase())
+                .or_insert(setting);
+        }
+    }
+    let rows = settings
+        .into_values()
+        .map(|setting| {
+            let value = configured
+                .get(&setting.name)
+                .map(str::to_string)
+                .or_else(|| {
+                    setting.default_value.as_ref().and_then(|array| {
+                        ScalarValue::try_from_array(array, 0)
+                            .ok()
+                            .map(|value| value.to_string())
+                    })
+                });
+            (
+                setting.name,
+                value,
+                setting.description,
+                duckdb_type_name(&setting.data_type),
+            )
+        })
+        .collect::<Vec<_>>();
+    let aliases = vec![Vec::<String>::new(); rows.len()];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("value", DataType::Utf8, true),
+        Field::new("description", DataType::Utf8, false),
+        Field::new("input_type", DataType::Utf8, false),
+        Field::new("scope", DataType::Utf8, false),
+        Field::new(
+            "aliases",
+            DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, true))),
+            false,
+        ),
+    ]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.0.as_str()),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.1.as_deref()).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.2.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.3.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "GLOBAL"))),
+            string_list_array(&aliases),
+        ],
+    )?)
 }
 
 /// Compatibility projection of attached VGI routine declarations through the
@@ -1862,6 +1933,7 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ("vgi_result_cache_reap", DiagnosticsKind::CacheReap),
         ("duckdb_logs", DiagnosticsKind::DuckDbLogs),
         ("duckdb_functions", DiagnosticsKind::DuckDbFunctions),
+        ("duckdb_settings", DiagnosticsKind::DuckDbSettings),
         ("duckdb_databases", DiagnosticsKind::DuckDbDatabases),
         ("duckdb_schemas", DiagnosticsKind::DuckDbSchemas),
         ("duckdb_tables", DiagnosticsKind::DuckDbTables),

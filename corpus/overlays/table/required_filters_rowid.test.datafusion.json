@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 2,
+      "original_sql": "SELECT rowid, bbox.xmin FROM example.data.rff_rowid\nWHERE rowid = 5\n  AND bbox.xmin >= 0 AND bbox.ymin > 0 AND bbox.ymax <= 100 AND bbox.xmax <= 100.2;",
+      "kind": "out_of_scope",
+      "reason": "This assertion targets DuckDB's hidden virtual rowid sentinel. DataFusion exposes only the worker's physical row_id column and has no equivalent virtual-rowid provider contract."
+    }
+  ]
+}

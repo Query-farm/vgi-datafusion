@@ -38,6 +38,7 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 use datafusion::catalog::{CatalogProvider, SchemaProvider, Session, TableProvider};
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{
     Constraints, DFSchema, DataFusionError, Result as DFResult, ScalarValue, Statistics,
 };
@@ -86,6 +87,84 @@ struct CatalogTableSpec {
     catalog: String,
     schema: String,
     table: String,
+}
+
+/// Collect the catalog column paths constrained by predicates offered to a
+/// table provider. DataFusion lowers `s.a` and deeper struct access to the
+/// variadic `get_field(s, 'a', ...)` UDF. Record that as the precise dotted
+/// path and skip its children: also recording the base `s` would incorrectly
+/// satisfy every required descendant of the struct.
+fn filtered_catalog_paths(filters: &[Expr]) -> DFResult<HashSet<String>> {
+    let mut present = HashSet::new();
+    for filter in filters {
+        filter.apply(|expr| {
+            if let Expr::ScalarFunction(function) = expr {
+                if function.name() == "get_field" {
+                    if let Some(path) = static_get_field_path(expr) {
+                        present.insert(path);
+                        return Ok(TreeNodeRecursion::Jump);
+                    }
+                }
+            }
+            if let Expr::Column(column) = expr {
+                present.insert(column.name.clone());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+    }
+    Ok(present)
+}
+
+fn static_get_field_path(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Column(column) => Some(column.name.clone()),
+        Expr::ScalarFunction(function)
+            if function.name() == "get_field" && function.args.len() >= 2 =>
+        {
+            let mut path = static_get_field_path(&function.args[0])?;
+            for field in &function.args[1..] {
+                let name = match field {
+                    Expr::Literal(ScalarValue::Utf8(Some(name)), _)
+                    | Expr::Literal(ScalarValue::Utf8View(Some(name)), _)
+                    | Expr::Literal(ScalarValue::LargeUtf8(Some(name)), _) => name,
+                    _ => return None,
+                };
+                path.push('.');
+                path.push_str(name);
+            }
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn required_path_is_present(required: &str, present: &HashSet<String>) -> bool {
+    let mut candidate = required;
+    loop {
+        if present.contains(candidate) {
+            return true;
+        }
+        let Some((parent, _)) = candidate.rsplit_once('.') else {
+            return false;
+        };
+        candidate = parent;
+    }
+}
+
+fn render_required_filter_group(group: &[String]) -> String {
+    if group.len() == 1 {
+        group[0].clone()
+    } else {
+        format!("one of ({})", group.join(", "))
+    }
+}
+
+fn render_required_filter_groups<'a>(groups: impl IntoIterator<Item = &'a Vec<String>>) -> String {
+    groups
+        .into_iter()
+        .map(|group| render_required_filter_group(group))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +475,46 @@ fn native_format_spec(branch: &vgi_client::ScanBranch) -> DFResult<Option<Native
         locations,
         options: arguments.named_values().to_vec(),
     }))
+}
+
+#[cfg(test)]
+mod required_filter_tests {
+    use super::*;
+    use datafusion::functions::core::expr_fn::get_field_path;
+    use datafusion::prelude::{col, lit};
+
+    #[test]
+    fn dotted_get_field_paths_do_not_collapse_to_the_parent_struct() {
+        let filters = vec![
+            col("top").eq(lit(1_i64)),
+            get_field_path(col("s"), vec![lit("a")]).eq(lit(2_i64)),
+            get_field_path(col("wrapper"), vec![lit("mid"), lit("leaf")]).is_not_null(),
+        ];
+        let present = filtered_catalog_paths(&filters).unwrap();
+        assert!(present.contains("top"));
+        assert!(present.contains("s.a"));
+        assert!(present.contains("wrapper.mid.leaf"));
+        assert!(!present.contains("s"));
+        assert!(!present.contains("wrapper"));
+    }
+
+    #[test]
+    fn only_present_parent_paths_satisfy_required_descendants() {
+        let present = HashSet::from(["bbox".to_string(), "ticker.symbol".to_string()]);
+        assert!(required_path_is_present("bbox.xmin", &present));
+        assert!(required_path_is_present("ticker.symbol", &present));
+        assert!(!required_path_is_present("ticker", &present));
+        assert!(!required_path_is_present("bbox2.xmin", &present));
+    }
+
+    #[test]
+    fn cnf_groups_render_with_or_members() {
+        let required = vec![vec!["ticker".into(), "cik".into()], vec!["date".into()]];
+        assert_eq!(
+            render_required_filter_groups(&required),
+            "one of (ticker, cik), date"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -770,6 +889,35 @@ impl VgiCatalogTableProvider {
             branches: tokio::sync::OnceCell::new(),
             statistics: tokio::sync::OnceCell::new(),
         }))
+    }
+
+    fn enforce_required_filters(&self, filters: &[Expr]) -> DFResult<()> {
+        let required = &self.info.required_filters;
+        if required.is_empty() {
+            return Ok(());
+        }
+        let present = filtered_catalog_paths(filters)?;
+        let missing = required
+            .iter()
+            .filter(|group| {
+                !group
+                    .iter()
+                    .any(|path| required_path_is_present(path, &present))
+            })
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(DataFusionError::Plan(format!(
+            "VGI table '{}.{}.{}' requires WHERE filters on: {}. Missing: {}. \
+             Add predicates targeting those columns (or a filter on a parent struct) \
+             to avoid scanning the entire table.",
+            self.mount_alias,
+            self.schema_name,
+            self.info.name,
+            render_required_filter_groups(required),
+            render_required_filter_groups(missing),
+        )))
     }
 
     async fn bound(&self) -> DFResult<&Arc<VgiTableProvider>> {
@@ -1487,6 +1635,7 @@ impl TableProvider for VgiCatalogTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        self.enforce_required_filters(filters)?;
         if self.filters_prune_table(state, filters).await? {
             let schema = match projection {
                 Some(indices) => Arc::new(self.output_schema.project(indices)?),
@@ -1975,6 +2124,7 @@ pub struct VgiCatalogProvider {
     /// spelling on both engines, rather than each client inventing its own.
     global_function_prefix: String,
     global_functions: Vec<vgi_client::dtos::FunctionInfo>,
+    settings: Vec<vgi_client::SettingSpec>,
     companion_catalogs: Vec<vgi_client::dtos::AttachCatalogInfo>,
 }
 
@@ -2000,6 +2150,7 @@ impl VgiCatalogProvider {
             resolved_implementation_version,
             global_function_prefix,
             global_functions,
+            settings,
             companion_catalogs,
         ) = tokio::task::spawn_blocking(move || {
             let mut client = c.connect()?;
@@ -2012,6 +2163,7 @@ impl VgiCatalogProvider {
             let resolved_data_version = info.resolved_data_version.clone();
             let resolved_implementation_version = info.resolved_implementation_version.clone();
             let global_functions = attached.global_functions().map_err(to_df)?;
+            let settings = vgi_client::decode_setting_specs(info).map_err(to_df)?;
             let companion_catalogs = attached.companion_catalogs().map_err(to_df)?;
             let schema_infos = client.schemas(&attached).map_err(to_df)?;
             Ok::<_, DataFusionError>((
@@ -2023,6 +2175,7 @@ impl VgiCatalogProvider {
                 resolved_implementation_version,
                 prefix,
                 global_functions,
+                settings,
                 companion_catalogs,
             ))
         })
@@ -2044,6 +2197,7 @@ impl VgiCatalogProvider {
             schema_infos,
             global_function_prefix,
             global_functions,
+            settings,
             companion_catalogs,
         }))
     }
@@ -2082,6 +2236,11 @@ impl VgiCatalogProvider {
     /// Function descriptors explicitly nominated for global publication.
     pub fn global_functions(&self) -> &[vgi_client::dtos::FunctionInfo] {
         &self.global_functions
+    }
+
+    /// Typed session settings declared by this attachment.
+    pub fn settings(&self) -> &[vgi_client::SettingSpec] {
+        &self.settings
     }
 
     /// Companion catalogs requested by this attachment.

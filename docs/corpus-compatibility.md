@@ -134,12 +134,13 @@ group, and individual file. Improvements are accepted by reviewing the diff and
 replacing the baseline deliberately. Unix and HTTP baselines should remain
 separate because transport equivalence is itself part of completion.
 
-## Current baseline — 2026-08-25
+## Current baseline — 2026-08-26
 
-The canonical EC2 subprocess run of the 327-file normal corpus contains 4,114
-measured positive records. This baseline includes the DataFusion-native
+The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,127
+measured positive records. The historical `subprocess.json` filename is kept
+for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
-`duckdb_functions()`, `vgi_function_arguments()`, and
+`duckdb_functions()`, `duckdb_settings()`, `vgi_function_arguments()`, and
 `vgi_table_statistics()` compatibility views backed by adapter state and the
 worker's retained discovery metadata. Catalog and bound-function column
 statistics also feed DataFusion's existing pruning API.
@@ -147,21 +148,21 @@ statistics also feed DataFusion's existing pruning API.
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 2,999 / 4,114 (72.9%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 1,945 / 2,162 (90.0%) |
-| Exact results | 1,567 | 1,882 |
-| Rendering-equivalent results | 37 | 63 |
-| Genuine value differences | 149 | 217 |
-| DuckDB/extension configuration records reported separately | 607 | 607 |
-| Timeouts | 0 | 0 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,273 / 4,127 (79.3%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,270 / 2,457 (92.4%) |
+| Exact results | 1,567 | 2,122 |
+| Rendering-equivalent results | 37 | 106 |
+| Genuine value differences | 149 | 187 |
+| DuckDB/extension configuration records reported separately | 607 | 594 |
+| Timeouts | 0 | 1 |
 
-The larger mismatch count is expected evidence, not a regression: 409 more
-queries now reach result comparison instead of failing during planning. The
-regression gate separately guarantees that no previously agreeing check was
-lost. `cache/basic.test` is now fully executable with all 14 value checks
-exact. The two catalog/function statistics files are also complete: all 91
-positive records execute and all 89 query results agree (63 exact and 26
-engine-plan rendering equivalents).
+The HTTP run executes 3,271 records with the same 2,122 exact, 106
+rendering-equivalent, and 187 different results. It has two additional timeouts
+in `table_in_out/parallel_fanout.test`; all other completed classifications
+match Unix. `cache/basic.test` is fully executable with all 14 value checks
+exact. The settings slice is 42/42 with 14/14 exact, while reviewed
+required-filter files are 45/45 applicable records with 25/25 exact on both
+transports.
 
 The deferred writable corpus under `../vgi/test_deferred/writable` is tracked
 as a future input, not mixed into this baseline. Six `.test_slow` files are also
@@ -217,8 +218,8 @@ engine work to a minimum:
 1. **Corpus adaptation and classification.** DuckDB/extension-surface failures
    fell from 678 to 70; 118 parser failures remain. Continue with reviewable
    equivalents for metadata queries, struct extraction, and harmless dialect
-   differences. Keep extension settings and DuckDB storage internals
-   `out_of_scope` where DataFusion has no semantic equivalent.
+   differences. Keep DuckDB storage internals and its hidden virtual-rowid
+   sentinel `out_of_scope` where DataFusion has no semantic equivalent.
 2. **Advertised function publication and binding.** The largest error shape is
    now 138 instances of `table function ... not found`, down from 655. Resolve
    the remainder by capability area, prioritizing functions that map to an

@@ -13,7 +13,7 @@
     "Run standard SQL and SQL accepted by DataFusion unchanged.",
     "Adapt DuckDB syntax only when DataFusion exposes equivalent semantics; keep sparse, exact-SQL-guarded sidecars under corpus/overlays and trace every adaptation in the report.",
     "Map typeof, duckdb_logs, and VGI diagnostics to existing DataFusion APIs when the adapter has equivalent state.",
-    "Mark DuckDB extension settings, PRAGMAs, unavailable duckdb_* metadata, and storage internals out_of_scope rather than treating them as adapter failures.",
+    "Mark DuckDB PRAGMAs, unavailable duckdb_* metadata, and storage internals out_of_scope rather than treating them as adapter failures.",
     "Do not adapt away a missing VGI protocol feature or a wrong result.",
     "Expected-error statements are tracked but excluded from positive execution rates until error-contract comparison is implemented."
   ],
@@ -23,7 +23,7 @@
       "title": "Table functions and scans",
       "status": "partial",
       "groups": ["table"],
-      "remaining": ["ORDER BY and TABLESAMPLE hints", "late materialization", "transaction storage", "some required-filter and rowid forms"]
+      "remaining": ["ORDER BY and TABLESAMPLE hints", "late materialization", "transaction storage", "DuckDB-only virtual rowid forms"]
     },
     {
       "id": "scalar_functions",
@@ -79,7 +79,7 @@
       "title": "Attach, versions, settings, and validation",
       "status": "partial",
       "groups": ["attach", "settings", "connection_string.test", "bad_enum.test"],
-      "remaining": ["remaining settings application", "DDL metadata equivalence", "HTTP fixture variants"]
+      "remaining": ["DDL metadata equivalence", "external HTTP fixture variants"]
     },
     {
       "id": "authentication_secrets",

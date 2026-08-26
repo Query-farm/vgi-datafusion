@@ -33,6 +33,7 @@ ctx.sql("SELECT count(*) FROM orders").await?.show().await?;
 | Dynamic filters and join keys | physical filter pushdown + continuation metadata | ◐ |
 | Split planning | physical scan partitions + plan cache | ✅ |
 | Worker-opted result cache | bounded session memory + revalidation | ◐ |
+| Typed session settings | DataFusion `ConfigExtension` + `SET` / `RESET` | ✅ |
 | Worker secrets | host `VgiSecretResolver` | ✅ |
 | Structured diagnostics | SQL functions + host event sink | ✅ |
 | Table-in-out / buffered | table-valued subquery argument | ✅, one input column |
@@ -97,10 +98,29 @@ SELECT * FROM information_schema.views
 WHERE table_catalog = 'm';
 ```
 
-These are DataFusion's metadata surfaces; DuckDB-specific names such as
-`duckdb_tables()` are not aliases. VGI primary-key and unique constraints feed
+These are DataFusion's native metadata surfaces. The adapter also supplies the
+small `duckdb_*` compatibility projections used by the shared corpus, backed by
+the same retained catalog state. VGI primary-key and unique constraints feed
 DataFusion's native optimizer constraint API, while check, foreign-key, and
 standalone NOT NULL metadata have no matching DataFusion constraint type.
+
+Worker-declared settings are installed in DataFusion's dynamic `vgi.*`
+configuration namespace and encoded to their advertised Arrow types at every
+bind. Once a worker is attached, its unqualified DuckDB spelling is accepted
+too:
+
+```sql
+SET multiplier = 5;              -- rewritten to vgi.multiplier
+SET vgi.scale_factor = 2.5;      -- native DataFusion spelling
+SET vgi.config = '{"start":10,"step":5,"label":"item"}';
+RESET multiplier;
+
+SELECT * FROM duckdb_settings() WHERE name = 'multiplier';
+```
+
+JSON strings provide DataFusion's spelling for Arrow Struct settings. Setting
+values are included in split-plan, producer-result, exchange, and scalar-type
+cache identity, so changing a setting cannot cross-serve cached state.
 
 HTTP attachments automatically follow an RFC 9728 OAuth challenge. The CLI
 prints a device URL and code, then retries the attach after approval; access and

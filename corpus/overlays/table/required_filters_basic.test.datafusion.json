@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 11,
+      "original_sql": "SELECT s.a, top FROM example.data.rff_multi WHERE top = 100 AND s.a = 1;",
+      "replacement_sql": "SELECT s.a, \"top\" FROM example.data.rff_multi WHERE \"top\" = 100 AND s.a = 1;",
+      "kind": "equivalent_sql",
+      "reason": "TOP is a DataFusion SQL keyword; quoting preserves the catalog column name and predicate semantics."
+    }
+  ]
+}

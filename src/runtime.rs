@@ -33,6 +33,7 @@ pub(crate) struct VgiCatalogMetadata {
     pub views: Vec<(vgi_client::dtos::ViewInfo, Vec<String>)>,
     pub functions: Vec<vgi_client::dtos::FunctionInfo>,
     pub macros: Vec<vgi_client::dtos::MacroInfo>,
+    pub settings: Vec<vgi_client::SettingSpec>,
     pub global_function_prefix: String,
     pub global_functions: Vec<vgi_client::dtos::FunctionInfo>,
 }
@@ -152,6 +153,10 @@ pub struct VgiRuntime {
     /// live exchange. This avoids row-by-row IPC hashing for ordinary scalars
     /// that never opted into that cache tier.
     per_value_opt_ins: Mutex<HashSet<Vec<u8>>>,
+    /// Snapshot of DataFusion's `vgi.*` configuration at the start of the
+    /// current adapter SQL call. Bind requests encode this snapshot as typed
+    /// IPC rather than consulting process-global state.
+    session_settings: Mutex<crate::VgiSettings>,
     catalog_metadata: Mutex<HashMap<String, VgiCatalogMetadata>>,
     event_sink: Option<Arc<dyn VgiEventSink>>,
     secret_resolver: Option<Arc<dyn VgiSecretResolver>>,
@@ -188,6 +193,7 @@ impl VgiRuntime {
             result_flights: Arc::new(ResultFlightRegistry::default()),
             exchange_cache_stats: Mutex::new(ExchangeCacheStats::default()),
             per_value_opt_ins: Mutex::new(HashSet::new()),
+            session_settings: Mutex::new(crate::VgiSettings::default()),
             catalog_metadata: Mutex::new(HashMap::new()),
             event_sink: None,
             secret_resolver: None,
@@ -304,6 +310,26 @@ impl VgiRuntime {
 
     pub(crate) fn note_per_value_opt_in(&self, identity: Vec<u8>) {
         self.per_value_opt_ins.lock().unwrap().insert(identity);
+    }
+
+    pub(crate) fn replace_session_settings(&self, settings: crate::VgiSettings) {
+        *self.session_settings.lock().unwrap() = settings;
+    }
+
+    pub(crate) fn session_settings(&self) -> crate::VgiSettings {
+        self.session_settings.lock().unwrap().clone()
+    }
+
+    pub(crate) fn session_settings_identity(&self) -> Vec<u8> {
+        let settings = self.session_settings.lock().unwrap();
+        let mut out = Vec::new();
+        for (name, value) in settings.values() {
+            out.extend_from_slice(&(name.len() as u64).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            out.extend_from_slice(value.as_bytes());
+        }
+        out
     }
 
     pub(crate) fn note_exchange_cache_hit(&self, bytes_served: usize) {
@@ -525,6 +551,7 @@ pub(crate) struct PlanCacheKey {
     pub(crate) target_partitions: usize,
     pub(crate) catalog_version: i64,
     pub(crate) at: Option<(String, String)>,
+    pub(crate) settings: Vec<u8>,
     pub(crate) attach_options: Vec<u8>,
 }
 
