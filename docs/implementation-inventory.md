@@ -11,6 +11,18 @@ DataFusion where there is no matching planning or execution seam.
 
 - Each DataFusion session owns a bounded in-memory VGI result cache. Defaults
   are 64 MiB per entry, 256 MiB total, and 131,072 entries.
+- Embedders may additionally configure a host-owned durable producer-result
+  tier. It stores complete multipart results as Arrow IPC with a configured
+  codec (Zstandard by default), survives runtime and process restarts, and
+  coordinates concurrent local processes with atomic refs plus capture/replay
+  leases. Durable admission counts committed Arrow payloads and leased orphan
+  generations, so an active reader cannot hide payload capacity from a new
+  commit. It is not a hard filesystem quota: ref/manifest/lease metadata and
+  active temporary captures are excluded, and each concurrent capture may grow
+  to the configured per-capture byte limit. Processes sharing a root should use
+  the same constructor limits because policy values are not persisted. This
+  tier is opt-in; the host must give it application-state storage rather than a
+  temporary spill path.
 - Results are cached only when both the worker opts in and the attachment has
   not disabled caching. Complete producer scans and complete split scans are
   captured; an error, cancellation, limit, or incomplete partition aborts the
@@ -29,6 +41,10 @@ DataFusion where there is no matching planning or execution seam.
   entries, and buffered whole-input results support ETag/Last-Modified
   conditional revalidation, including immediate-stale validator policies, and
   worker-authorized stale-if-error fallback.
+- Conditional revalidation and stale-if-error are memory-tier behavior. The
+  durable tier admits only complete, bounded, catalog-scoped producer results
+  with positive freshness remaining; it stores neither immediate-stale entries
+  nor validators.
 - Concurrent identical misses are coalesced per complete cache key. One query
   fills the entry while followers replay the atomic result; cancellation,
   refusal, expiry, and `no_store` wake followers to execute normally rather
@@ -56,9 +72,13 @@ DataFusion where there is no matching planning or execution seam.
   evicts the old entry instead of silently extending or retaining it.
 - SQL diagnostics expose cache statistics, entries, flushing, reaping, and plan
   cache statistics. Entry inspection reports real batch and producer-substream
-  counts, time-travel coordinates, the memory tier and retained bytes, and an
-  empty partition label for whole-result entries rather than inventing
-  unsupported disk or per-partition state. Producer scan/cache counters also
+  counts, time-travel coordinates, the memory/disk tier, tier-specific bytes,
+  and an empty partition label for whole-result entries. Memory bytes measure
+  retained Arrow memory and its substreams are executed producer streams; disk
+  bytes measure encoded Arrow payloads and its substream count is the stored
+  partition-file count. Per-entry disk hit/revalidation values are unavailable,
+  so disk rows report zero/false. Flush and reap operate on both configured
+  tiers. Producer scan/cache counters also
   appear as native DataFusion execution metrics and in `EXPLAIN ANALYZE`;
   result-cache statistics distinguish exchange hits, stores, and bytes served.
 - SQL-owned `vgi_result_cache_max_entry_bytes`,
@@ -67,9 +87,22 @@ DataFusion where there is no matching planning or execution seam.
   longer fit, constructor-supplied defaults remain visible, and `RESET`
   restores those constructor values.
 
-This is intentionally narrower than the DuckDB cache. Correlated 1:N per-value
-calls, persistent disk storage, stale-while-revalidate, compression, and
-cross-process sharing remain deferred.
+The durable tier is intentionally narrower than the memory tier: it currently
+covers bounded producer and split scans, not scalar values, streaming or
+buffered table-input exchanges, correlated 1:N calls, dynamic-filtered scans,
+unbounded scans, or secret-consuming calls. Stale-while-revalidate also remains
+deferred. Eviction recency is approximate and process-local, although bounds
+and publication are coordinated across processes. Crash-durability relies on a
+local Unix filesystem with advisory locks, atomic same-filesystem rename, and
+directory `fsync`; network filesystems with weaker semantics are unsupported.
+Cross-process locks protect storage publication, integrity, and bounds; result
+single-flight remains runtime-local, so independent cold processes may both
+invoke the worker before one committed generation wins publication.
+Disk event counters and LRU touches are instance-local and nonpersistent; only
+entry and occupancy snapshots rescan the shared root. Durable diagnostics,
+flush, and reap perform blocking filesystem work when invoked through SQL.
+Flushing removes lookup refs immediately, while an object leased by an active
+replay remains physically present until release and a later reap.
 
 ### Catalog and function fidelity
 
@@ -169,7 +202,7 @@ cross-process sharing remain deferred.
 | Global functions | Supported | Default-on/opt-out policy, collision ownership, concurrent attach linearization, replacement, and DETACH cleanup included |
 | Projection, static filters, LIMIT | Supported | Direct functions preserve exactness; lazy catalog tables recheck filters |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
-| Session result cache | Partial | Producer/split, streaming per-batch, stable scalar per-value, and unordered buffered whole-input tiers have conditional revalidation, single-flight, stale-if-error, revocation eviction, capability-aware scan identity/replay, truthful entry diagnostics, live SQL memory limits, and native scan metrics; no correlated 1:N cache, disk, or SWR |
+| Session result cache | Partial | The bounded memory tier covers producer/split scans, streaming per-batch, stable scalar per-value, and unordered buffered whole-input results with conditional revalidation, runtime-local single-flight, stale-if-error, and revocation eviction. An opt-in Arrow IPC tier (Zstandard by default) durably shares complete, positively fresh, bounded producer/split results across local processes with leases, atomic publication, restart recovery, and combined SQL diagnostics/maintenance. Durable bounds are constructor-owned; live SQL limits govern memory. Durable validators, exchange/scalar/correlated entries, and SWR remain unwired |
 | Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
@@ -186,8 +219,9 @@ cross-process sharing remain deferred.
 
 1. **Cache breadth with matching semantics.** Add correlated 1:N entries only
    where a complete deterministic key and cancellation boundary can be proved.
-   Keep disk persistence optional and add bounded stale-while-revalidate only
-   with deterministic scheduling semantics.
+   Keep durable storage opt-in, evaluate compact scalar/exchange packing, and
+   add bounded stale-while-revalidate only with deterministic scheduling
+   semantics.
 2. **Unbounded execution hardening.** Gate resume on worker advertisement and
    add checkpoint/reconnect, cancellation, backpressure, and soak coverage.
 3. **Catalog and function breadth.** Broaden view translation and keep
@@ -245,11 +279,19 @@ multi-column dynamic join-key marginals; and multi-scope secret binds. The
 reviewed aggregate window slice now executes 15/15 applicable records with all
 14 results agreeing.
 
-The release-mode adapter suite passes 249/249 tests plus two doctests. This
+The last promoted pre-durable release-mode adapter suite passed 249/249 tests
+plus two doctests. This
 includes the focused cache-identity, multi-column dynamic-filter, and transport
 hardening contracts in addition to cache-limit, table-input observability,
 scalar-null, deterministic single-flight, and the existing transport and
 integration coverage.
+The durable-cache change separately passes the full vgi-client all-feature
+suite (215 unit tests, 39 integration tests, and one doctest), including a true
+multi-process initialization/reopen test, and the four-test DataFusion durable
+producer contract over both Unix sockets and patched-transport HTTP. The final
+staged release corpus also passes over both transports with byte-identical reports:
+3,554 executed records, 580 classified compatibility gaps, zero blocked cases,
+zero timeouts, and no regressions against either promoted baseline.
 The typed static/dynamic filter-pushdown area executes 185/185 applicable
 records with every comparable result agreeing; its remaining records are
 reviewed DataFusion SQL/planning boundaries rather than failed VGI filters.

@@ -95,8 +95,9 @@ mod table_input_stream;
 pub use aggregate::VgiAggregateUdf;
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};
 pub use runtime::{
-    ExchangeCacheStats, PlanCacheStats, VgiEvent, VgiEventSink, VgiLocalityHook, VgiResolvedSecret,
-    VgiRuntime, VgiSecretResolver, VgiSessionOptions, VgiSplitLocality,
+    DiskCacheCodec, ExchangeCacheStats, PlanCacheStats, VgiDurableCacheOptions, VgiEvent,
+    VgiEventSink, VgiLocalityHook, VgiResolvedSecret, VgiRuntime, VgiSecretResolver,
+    VgiSessionOptions, VgiSplitLocality,
 };
 pub use scalar::VgiScalarUdf;
 pub use session::{sql, AttachSpec};
@@ -411,6 +412,13 @@ impl VgiConnection {
         &self.label
     }
 
+    /// Credential-safe identity of the complete endpoint or command. Cache
+    /// keys must not use `label`, which intentionally abbreviates subprocess
+    /// and launcher locations to argv[0].
+    pub(crate) fn cache_worker_identity(&self) -> String {
+        self.location.cache_fingerprint()
+    }
+
     /// Whether a worker location is local enough to nominate host filesystem
     /// paths for native format branches.
     ///
@@ -564,7 +572,7 @@ fn conform(
 ) -> DFResult<datafusion::arrow::array::RecordBatch> {
     use datafusion::arrow::array::{RecordBatch, RecordBatchOptions};
 
-    if batch.schema().fields() == schema.fields() {
+    if batch.schema().as_ref() == schema.as_ref() {
         return Ok(batch);
     }
     if schema.fields().is_empty() {
@@ -1353,7 +1361,7 @@ impl VgiTableProvider {
             return Ok(None);
         }
 
-        let plan_cache_key = (!self.uses_resolved_secrets).then(|| ()).and_then(|()| {
+        let plan_cache_key = (!self.uses_resolved_secrets).then_some(()).and_then(|()| {
             self.conn
                 .cache_identity_scope(&self.catalog)
                 .and_then(|identity_scope| {
@@ -1364,7 +1372,7 @@ impl VgiTableProvider {
                         .or_else(|| self.arguments.to_ipc().ok().map(|value| value.0))?;
                     Some(crate::runtime::PlanCacheKey {
                         identity_scope,
-                        worker_label: self.conn.label().to_string(),
+                        worker_label: self.conn.cache_worker_identity(),
                         function: format!("{}.{}", self.schema_name, self.function),
                         arguments,
                         // The caller already supplies only the projection the
@@ -1378,7 +1386,7 @@ impl VgiTableProvider {
                             .at
                             .as_ref()
                             .map(|at| (at.unit.clone(), at.value.clone())),
-                        settings: self.conn.runtime.session_settings_identity(),
+                        settings: self.conn.runtime.session_settings_identity(&self.catalog),
                         attach_options: self.conn.cache_attach_context(&self.catalog),
                     })
                 })
@@ -1825,6 +1833,12 @@ impl TableProvider for VgiTableProvider {
             // statistics assert on the index.
             Some(plan) => plan.groups.len().max(1),
         };
+        let cache_storage_schema = if self.projection_pushdown {
+            Arc::clone(&projected)
+        } else {
+            Arc::clone(&self.output_schema)
+        };
+        let cache_result_is_bounded = !split_groups.as_ref().is_some_and(|plan| plan.unbounded);
 
         Ok(Arc::new(VgiScanExec::new(
             self.conn.clone(),
@@ -1839,12 +1853,13 @@ impl TableProvider for VgiTableProvider {
             pushdown,
             limit,
             projected,
+            cache_storage_schema,
             partitions,
             split_groups,
             self.catalog_version,
             self.at.clone(),
             self.column_mapping.clone(),
-            !self.uses_resolved_secrets,
+            !self.uses_resolved_secrets && cache_result_is_bounded,
         )))
     }
 }
@@ -1871,6 +1886,10 @@ pub struct VgiScanExec {
     dynamic_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     limit: Option<usize>,
     schema: SchemaRef,
+    /// Exact remote batch schema retained by either result-cache tier. This is
+    /// the full worker output for local projections and the projected schema
+    /// when the worker opted into projection pushdown.
+    cache_storage_schema: SchemaRef,
     properties: Arc<PlanProperties>,
     /// One group of split tokens per partition, or `None` when this scan is not
     /// split-capable and keeps the pre-splits single-reader path.
@@ -1887,11 +1906,27 @@ pub struct VgiScanExec {
     cache_metrics: VgiCacheMetrics,
     cache_key: Option<vgi_client::CacheKey>,
     cache_probe: OnceLock<Option<vgi_client::CachedEntry>>,
+    disk_cache_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
+    cache_observation: Arc<OnceLock<()>>,
     cache_flight: Arc<OnceLock<crate::runtime::ResultFlightClaim>>,
     cache_flight_probe: Arc<OnceLock<Option<vgi_client::CachedEntry>>>,
+    cache_flight_disk_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
     cache_capture: Option<Arc<ScanCacheCapture>>,
     at: Option<vgi_client::At>,
     column_mapping: Option<Arc<HashMap<String, String>>>,
+}
+
+#[derive(Clone)]
+struct SharedDiskHit(Arc<vgi_client::DiskCacheHit>);
+
+impl fmt::Debug for SharedDiskHit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedDiskHit")
+            .field("rows", &self.0.rows())
+            .field("partitions", &self.0.partitions())
+            .field("stored_bytes", &self.0.stored_bytes())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1979,6 +2014,7 @@ impl VgiScanExec {
         pushdown: filters::Pushdown,
         limit: Option<usize>,
         schema: SchemaRef,
+        cache_storage_schema: SchemaRef,
         partitions: usize,
         split_groups: Option<PlannedSplits>,
         catalog_version: i64,
@@ -2055,7 +2091,7 @@ impl VgiScanExec {
                     Some(vgi_client::CacheKey {
                         catalog: catalog.clone(),
                         identity_scope,
-                        worker_label: conn.label().to_string(),
+                        worker_label: conn.cache_worker_identity(),
                         function: format!("{schema_name}.{function}"),
                         arguments,
                         // A projection changes remote bytes only when the
@@ -2070,7 +2106,7 @@ impl VgiScanExec {
                         filters: pushdown.cache_identity(),
                         catalog_version,
                         at: at.as_ref().map(|at| (at.unit.clone(), at.value.clone())),
-                        settings: conn.runtime.session_settings_identity(),
+                        settings: conn.runtime.session_settings_identity(&catalog),
                         attach_options: conn.cache_attach_context(&catalog),
                         row_limit: limit.and_then(|value| i64::try_from(value).ok()),
                         ordering: None,
@@ -2089,6 +2125,7 @@ impl VgiScanExec {
                 Arc::clone(&conn.runtime),
                 key.clone(),
                 partitions.max(1),
+                cache_storage_schema.clone(),
                 cache_metrics.clone(),
             ))
         });
@@ -2106,6 +2143,7 @@ impl VgiScanExec {
             dynamic_filters: Vec::new(),
             limit,
             schema,
+            cache_storage_schema,
             properties,
             split_groups,
             statistics,
@@ -2114,8 +2152,11 @@ impl VgiScanExec {
             cache_metrics,
             cache_key,
             cache_probe: OnceLock::new(),
+            disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
+            cache_observation: Arc::new(OnceLock::new()),
             cache_flight: Arc::new(OnceLock::new()),
             cache_flight_probe: Arc::new(OnceLock::new()),
+            cache_flight_disk_probe: Arc::new(tokio::sync::OnceCell::new()),
             cache_capture,
             at,
             column_mapping,
@@ -2139,6 +2180,7 @@ impl VgiScanExec {
             dynamic_filters,
             limit: self.limit,
             schema: self.schema.clone(),
+            cache_storage_schema: self.cache_storage_schema.clone(),
             properties: self.properties.clone(),
             split_groups: self.split_groups.clone(),
             statistics: self.statistics.clone(),
@@ -2149,8 +2191,11 @@ impl VgiScanExec {
             // by its planning-time filter must never enter the VGI result cache.
             cache_key: None,
             cache_probe: OnceLock::new(),
+            disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
+            cache_observation: Arc::new(OnceLock::new()),
             cache_flight: Arc::new(OnceLock::new()),
             cache_flight_probe: Arc::new(OnceLock::new()),
+            cache_flight_disk_probe: Arc::new(tokio::sync::OnceCell::new()),
             cache_capture: None,
             at: self.at.clone(),
             column_mapping: self.column_mapping.clone(),
@@ -2182,19 +2227,197 @@ fn dynamic_filter_generation(filters: &[Arc<DynamicFilterPhysicalExpr>]) -> u64 
 
 struct ScanCacheCapture {
     cache: Arc<vgi_client::ResultCache>,
+    disk_cache: Option<Arc<vgi_client::DiskCache>>,
     runtime: Arc<VgiRuntime>,
     key: vgi_client::CacheKey,
+    storage_schema: SchemaRef,
     metrics: VgiCacheMetrics,
     flight: Mutex<Option<Arc<crate::runtime::ResultFlightProducer>>>,
     state: Mutex<ScanCacheCaptureState>,
 }
 
 struct ScanCacheCaptureState {
-    partitions: Vec<Option<Vec<datafusion::arrow::array::RecordBatch>>>,
-    controls: Vec<Option<vgi_client::CacheControl>>,
+    partitions: Vec<Vec<datafusion::arrow::array::RecordBatch>>,
+    outcomes: Vec<Option<ScanCachePartitionOutcome>>,
     started: Vec<bool>,
+    memory_bytes: usize,
+    memory_abandoned: bool,
+    disk_capture: Option<vgi_client::DiskCapture>,
+    disk_capture_started: bool,
     aborted: bool,
     committed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScanCachePartitionOutcome {
+    /// The physical partition had no split token (or is an unused fallback
+    /// partition), so it performed no worker scan and has no cache policy.
+    NoWork,
+    /// A worker scan reached EOS. `None` means that worker result did not opt
+    /// into caching and must not be confused with `NoWork`.
+    Scanned(Option<vgi_client::CacheControl>),
+}
+
+fn completed_scan_cache_control(
+    outcomes: &[Option<ScanCachePartitionOutcome>],
+) -> Result<vgi_client::CacheControl, &'static str> {
+    let controls = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            Some(ScanCachePartitionOutcome::Scanned(control)) => Some(control),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(control) = controls.first().and_then(|control| control.as_ref()) else {
+        return Err("worker did not opt result into caching");
+    };
+    if controls
+        .iter()
+        .any(|candidate| candidate.as_ref() != Some(control))
+    {
+        return Err("split cache controls disagreed or were missing");
+    }
+    Ok(control.clone())
+}
+
+fn executed_cache_substreams(outcomes: &[Option<ScanCachePartitionOutcome>]) -> usize {
+    outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, Some(ScanCachePartitionOutcome::Scanned(_))))
+        .count()
+        .max(1)
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Contract test stays beside its private helper.
+mod scan_cache_contract_tests {
+    use super::{
+        completed_scan_cache_control, executed_cache_substreams, ScanCachePartitionOutcome,
+        VgiConnection,
+    };
+
+    #[test]
+    fn no_work_is_ignored_but_every_scanned_partition_must_opt_in_identically() {
+        let control = vgi_client::CacheControl::ttl(60);
+        assert_eq!(
+            completed_scan_cache_control(&[
+                Some(ScanCachePartitionOutcome::NoWork),
+                Some(ScanCachePartitionOutcome::Scanned(Some(control.clone()))),
+            ]),
+            Ok(control.clone())
+        );
+        assert!(completed_scan_cache_control(&[
+            Some(ScanCachePartitionOutcome::Scanned(Some(control))),
+            Some(ScanCachePartitionOutcome::Scanned(None)),
+        ])
+        .is_err());
+        assert!(completed_scan_cache_control(&[
+            Some(ScanCachePartitionOutcome::NoWork),
+            Some(ScanCachePartitionOutcome::NoWork),
+        ])
+        .is_err());
+        assert_eq!(
+            executed_cache_substreams(&[
+                Some(ScanCachePartitionOutcome::NoWork),
+                Some(ScanCachePartitionOutcome::Scanned(Some(
+                    vgi_client::CacheControl::ttl(60),
+                ))),
+                Some(ScanCachePartitionOutcome::Scanned(Some(
+                    vgi_client::CacheControl::ttl(60),
+                ))),
+            ]),
+            2,
+            "zero-row scans still count as executed producer substreams"
+        );
+    }
+
+    #[test]
+    fn same_argv0_different_tail_cannot_collide_in_one_durable_root() {
+        use datafusion::arrow::array::{Int64Array, RecordBatch};
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let cleanup = Cleanup(std::env::temp_dir().join(format!(
+            "vgi-datafusion-location-identity-{}-{unique}",
+            std::process::id()
+        )));
+        let first = VgiConnection::subprocess(["worker", "--dataset", "first"]);
+        let second = VgiConnection::subprocess(["worker", "--dataset", "second"]);
+        assert_eq!(first.label(), second.label());
+        assert_ne!(
+            first.cache_worker_identity(),
+            second.cache_worker_identity()
+        );
+
+        let options = vgi_client::DiskCacheOptions {
+            codec: vgi_client::DiskCacheCodec::None,
+            ..vgi_client::DiskCacheOptions::new(&cleanup.0)
+        };
+        let cache = vgi_client::DiskCache::open(options).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
+        let key = |worker_label: String| vgi_client::CacheKey {
+            catalog: "shared".into(),
+            identity_scope: "shared:anonymous".into(),
+            worker_label,
+            function: "main.values".into(),
+            arguments: Vec::new(),
+            projection: None,
+            filters: None,
+            catalog_version: 1,
+            at: None,
+            settings: Vec::new(),
+            attach_options: Vec::new(),
+            row_limit: None,
+            ordering: None,
+            sample: None,
+            plan: None,
+        };
+        let first_key = key(first.cache_worker_identity());
+        let second_key = key(second.cache_worker_identity());
+        for (cache_key, value) in [(&first_key, 1_i64), (&second_key, 2_i64)] {
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(Int64Array::from(vec![value]))],
+            )
+            .unwrap();
+            let mut capture = cache.begin_capture(Arc::clone(&schema), 1).unwrap();
+            capture.push_batch(0, &batch).unwrap();
+            assert!(cache
+                .commit(
+                    cache_key.clone(),
+                    capture,
+                    std::time::Duration::from_secs(60),
+                    Some(&vgi_client::CacheControl::ttl(60)),
+                )
+                .unwrap()
+                .is_stored());
+        }
+        assert_eq!(cache.entries().unwrap().len(), 2);
+        for (cache_key, expected) in [(&first_key, 1_i64), (&second_key, 2_i64)] {
+            let hit = cache.lookup(cache_key).unwrap().unwrap();
+            let batch = hit.open_partition(0).unwrap().next().unwrap().unwrap();
+            assert_eq!(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(0),
+                expected
+            );
+        }
+    }
 }
 
 impl fmt::Debug for ScanCacheCapture {
@@ -2211,18 +2434,26 @@ impl ScanCacheCapture {
         runtime: Arc<VgiRuntime>,
         key: vgi_client::CacheKey,
         partitions: usize,
+        storage_schema: SchemaRef,
         metrics: VgiCacheMetrics,
     ) -> Self {
+        let disk_cache = runtime.durable_result_cache().cloned();
         Self {
             cache,
+            disk_cache,
             runtime,
             key,
+            storage_schema,
             metrics,
             flight: Mutex::new(None),
             state: Mutex::new(ScanCacheCaptureState {
-                partitions: vec![None; partitions],
-                controls: vec![None; partitions],
+                partitions: vec![Vec::new(); partitions],
+                outcomes: vec![None; partitions],
                 started: vec![false; partitions],
+                memory_bytes: 0,
+                memory_abandoned: false,
+                disk_capture: None,
+                disk_capture_started: false,
                 aborted: false,
                 committed: false,
             }),
@@ -2233,7 +2464,16 @@ impl ScanCacheCapture {
         let mut state = self.state.lock().unwrap();
         if !state.aborted && !state.committed {
             state.aborted = true;
-            state.partitions.iter_mut().for_each(|slot| *slot = None);
+            state.partitions.iter_mut().for_each(Vec::clear);
+            if let Some(capture) = state.disk_capture.take() {
+                if let Err(error) = capture.abort() {
+                    let mut event = VgiEvent::new("cache.disk_error");
+                    event.catalog = Some(self.key.catalog.clone());
+                    event.function = Some(self.key.function.clone());
+                    event.message = Some(format!("could not abort durable capture: {error}"));
+                    self.runtime.emit(event);
+                }
+            }
             self.cache.record_capture_abort();
             self.metrics.capture_aborts.add(1);
             let mut event = VgiEvent::new("cache.capture_aborted");
@@ -2259,100 +2499,151 @@ impl ScanCacheCapture {
         if state.aborted || state.committed {
             return;
         }
+        if let Some(capture) = state.disk_capture.take() {
+            let _ = capture.abort();
+        }
         state.committed = true;
         if let Some(flight) = self.flight.lock().unwrap().as_ref() {
             flight.stored();
         }
     }
 
+    /// Discard the speculative producer capture when an existing cache tier
+    /// satisfied this plan before any worker partition started.
+    fn discard_unstarted(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.aborted || state.committed || state.started.iter().any(|started| *started) {
+            return;
+        }
+        state.aborted = true;
+        state.partitions.iter_mut().for_each(Vec::clear);
+        if let Some(capture) = state.disk_capture.take() {
+            let _ = capture.abort();
+        }
+    }
+
     fn start(&self, partition: usize) {
         let mut state = self.state.lock().unwrap();
+        if !state.disk_capture_started && !state.aborted && !state.committed {
+            state.disk_capture_started = true;
+            let partitions = state.partitions.len();
+            let capture = self.disk_cache.as_ref().and_then(|cache| {
+                match cache.begin_capture(Arc::clone(&self.storage_schema), partitions) {
+                    Ok(capture) => Some(capture),
+                    Err(error) => {
+                        let mut event = VgiEvent::new("cache.disk_error");
+                        event.catalog = Some(self.key.catalog.clone());
+                        event.function = Some(self.key.function.clone());
+                        event.message = Some(format!("could not begin durable capture: {error}"));
+                        self.runtime.emit(event);
+                        None
+                    }
+                }
+            });
+            state.disk_capture = capture;
+        }
         if let Some(started) = state.started.get_mut(partition) {
             *started = true;
         }
     }
 
-    fn complete(
-        &self,
-        partition: usize,
-        batches: Vec<datafusion::arrow::array::RecordBatch>,
-        control: Option<vgi_client::CacheControl>,
-    ) {
+    /// Incrementally retain one complete worker batch. Disk capture is written
+    /// as batches arrive; L1 buffering is abandoned once the live entry cap is
+    /// crossed so a large eligible result can remain disk-only.
+    fn push_batch(&self, partition: usize, batch: datafusion::arrow::array::RecordBatch) {
         let mut state = self.state.lock().unwrap();
         if state.aborted || state.committed || partition >= state.partitions.len() {
             return;
         }
-        state.partitions[partition] = Some(batches);
-        state.controls[partition] = control;
-        if state.partitions.iter().any(Option::is_none) {
-            return;
-        }
-        let Some(control) = state.controls.iter().flatten().next().cloned() else {
-            state.aborted = true;
-            self.cache.remove(&self.key);
-            if let Some(flight) = self.flight.lock().unwrap().as_ref() {
-                flight.abort("worker did not opt result into caching");
-            }
-            return;
-        };
-        if state
-            .controls
-            .iter()
-            .flatten()
-            .any(|candidate| candidate != &control)
-        {
-            state.aborted = true;
-            self.cache.remove(&self.key);
-            self.cache.record_capture_abort();
-            self.metrics.capture_aborts.add(1);
-            if let Some(flight) = self.flight.lock().unwrap().as_ref() {
-                flight.abort("split cache controls disagreed");
-            }
-            return;
-        }
-        let batches = state
-            .partitions
-            .iter()
-            .flatten()
-            .flat_map(|batches| batches.iter().cloned())
-            .collect::<Vec<_>>();
-        let bytes = batches
-            .iter()
-            .flat_map(|batch| batch.columns())
-            .map(|array| array.get_array_memory_size())
-            .sum();
-        match self
-            .cache
-            .eligibility(Some(&control), Some(&self.key.identity_scope), bytes)
-        {
-            Ok(ttl) => {
-                let num_substreams = state
-                    .partitions
-                    .iter()
-                    .flatten()
-                    .filter(|batches| !batches.is_empty())
-                    .count()
-                    .max(1);
-                self.cache.insert_with_substreams(
-                    self.key.clone(),
-                    batches,
-                    num_substreams,
-                    ttl,
-                    Some(&control),
-                );
-                state.committed = true;
-                self.metrics.stores.add(1);
-                let mut event = VgiEvent::new("cache.store");
+        if let Some(capture) = state.disk_capture.as_mut() {
+            if let Err(error) = capture.push_batch(partition, &batch) {
+                let capture = state.disk_capture.take();
+                if let Some(capture) = capture {
+                    let _ = capture.abort();
+                }
+                let mut event = VgiEvent::new("cache.disk_error");
                 event.catalog = Some(self.key.catalog.clone());
                 event.function = Some(self.key.function.clone());
+                event.message = Some(format!("durable capture write failed: {error}"));
                 self.runtime.emit(event);
-                if let Some(flight) = self.flight.lock().unwrap().as_ref() {
-                    flight.stored();
-                }
             }
+        }
+        if state.memory_abandoned {
+            return;
+        }
+        let bytes = batch
+            .columns()
+            .iter()
+            .map(|array| array.get_array_memory_size())
+            .sum::<usize>();
+        state.memory_bytes = state.memory_bytes.saturating_add(bytes);
+        if state.memory_bytes > self.cache.limits().max_entry_bytes {
+            state.partitions.iter_mut().for_each(Vec::clear);
+            state.memory_abandoned = true;
+            return;
+        }
+        state.partitions[partition].push(batch);
+    }
+
+    fn no_work(&self, partition: usize) {
+        self.complete(partition, ScanCachePartitionOutcome::NoWork);
+    }
+
+    fn scanned(&self, partition: usize, control: Option<vgi_client::CacheControl>) {
+        self.complete(partition, ScanCachePartitionOutcome::Scanned(control));
+    }
+
+    fn refuse_completed(&self, state: &mut ScanCacheCaptureState, reason: &'static str) {
+        state.aborted = true;
+        state.partitions.iter_mut().for_each(Vec::clear);
+        self.cache.remove(&self.key);
+        if let Some(capture) = state.disk_capture.take() {
+            let _ = capture.abort();
+        }
+        self.cache.record_capture_abort();
+        self.metrics.capture_aborts.add(1);
+        let mut event = VgiEvent::new("cache.capture_aborted");
+        event.catalog = Some(self.key.catalog.clone());
+        event.function = Some(self.key.function.clone());
+        event.message = Some(reason.to_string());
+        self.runtime.emit(event);
+        if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+            flight.abort(reason);
+        }
+    }
+
+    fn complete(&self, partition: usize, outcome: ScanCachePartitionOutcome) {
+        let mut state = self.state.lock().unwrap();
+        if state.aborted || state.committed || partition >= state.partitions.len() {
+            return;
+        }
+        if state.outcomes[partition].is_some() {
+            return;
+        }
+        state.outcomes[partition] = Some(outcome);
+        if state.outcomes.iter().any(Option::is_none) {
+            return;
+        }
+        let control = match completed_scan_cache_control(&state.outcomes) {
+            Ok(control) => control,
+            Err(reason) => {
+                self.refuse_completed(&mut state, reason);
+                return;
+            }
+        };
+        let received_at_wall = std::time::SystemTime::now();
+        let freshness = match self.cache.freshness_deadline(
+            Some(&control),
+            Some(&self.key.identity_scope),
+            received_at_wall,
+        ) {
+            Ok(freshness) => freshness,
             Err(reason) => {
                 state.aborted = true;
                 self.cache.remove(&self.key);
+                if let Some(capture) = state.disk_capture.take() {
+                    let _ = capture.abort();
+                }
                 self.metrics.refusals.add(1);
                 let mut event = VgiEvent::new("cache.refused");
                 event.catalog = Some(self.key.catalog.clone());
@@ -2362,6 +2653,100 @@ impl ScanCacheCapture {
                 if let Some(flight) = self.flight.lock().unwrap().as_ref() {
                     flight.abort(format!("cache refused result: {reason:?}"));
                 }
+                return;
+            }
+        };
+        let immediate_revalidation = freshness.expires_at() <= received_at_wall;
+        let batches = state
+            .partitions
+            .iter()
+            .flat_map(|batches| batches.iter().cloned())
+            .collect::<Vec<_>>();
+        let num_substreams = executed_cache_substreams(&state.outcomes);
+        let mut disk_stored = match (self.disk_cache.as_ref(), state.disk_capture.take()) {
+            (Some(cache), Some(capture)) => {
+                match cache.commit_freshness(self.key.clone(), capture, freshness, Some(&control)) {
+                    Ok(vgi_client::DiskCacheCommit::Stored { .. }) => true,
+                    Ok(vgi_client::DiskCacheCommit::Skipped(reason)) => {
+                        let mut event = VgiEvent::new("cache.disk_refused");
+                        event.catalog = Some(self.key.catalog.clone());
+                        event.function = Some(self.key.function.clone());
+                        event.message = Some(format!("{reason:?}"));
+                        self.runtime.emit(event);
+                        false
+                    }
+                    Err(error) => {
+                        let mut event = VgiEvent::new("cache.disk_error");
+                        event.catalog = Some(self.key.catalog.clone());
+                        event.function = Some(self.key.function.clone());
+                        event.message = Some(format!("durable commit failed: {error}"));
+                        self.runtime.emit(event);
+                        false
+                    }
+                }
+            }
+            _ => false,
+        };
+        let remaining = freshness.remaining();
+        if !immediate_revalidation && freshness.is_expired() {
+            // `commit_until` refuses an already-expired publication. If the
+            // deadline crosses immediately after it returns, reap the now-
+            // stale generation rather than advertising a stored cache unit.
+            if disk_stored {
+                if let Some(cache) = &self.disk_cache {
+                    let _ = cache.reap();
+                }
+                disk_stored = false;
+            }
+        }
+        let limits = self.cache.limits();
+        let memory_stored = (immediate_revalidation || !remaining.is_zero())
+            && !state.memory_abandoned
+            && limits.max_entries > 0
+            && state.memory_bytes <= limits.max_entry_bytes
+            && state.memory_bytes <= limits.max_total_bytes;
+        if memory_stored {
+            self.cache.insert_with_substreams(
+                self.key.clone(),
+                batches,
+                num_substreams,
+                if immediate_revalidation {
+                    std::time::Duration::ZERO
+                } else {
+                    remaining
+                },
+                Some(&control),
+            );
+        }
+        if memory_stored || disk_stored {
+            state.committed = true;
+            self.metrics.stores.add(1);
+            let mut event = VgiEvent::new("cache.store");
+            event.catalog = Some(self.key.catalog.clone());
+            event.function = Some(self.key.function.clone());
+            event.message = Some(format!(
+                "tier={}",
+                match (memory_stored, disk_stored) {
+                    (true, true) => "memory+disk",
+                    (true, false) => "memory",
+                    (false, true) => "disk",
+                    (false, false) => unreachable!("store requires at least one tier"),
+                }
+            ));
+            self.runtime.emit(event);
+            if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+                flight.stored();
+            }
+        } else {
+            state.aborted = true;
+            self.metrics.refusals.add(1);
+            let mut event = VgiEvent::new("cache.refused");
+            event.catalog = Some(self.key.catalog.clone());
+            event.function = Some(self.key.function.clone());
+            event.message = Some("result fit neither configured cache tier".to_string());
+            self.runtime.emit(event);
+            if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+                flight.abort("result fit neither configured cache tier");
             }
         }
     }
@@ -2372,6 +2757,9 @@ impl Drop for ScanCacheCapture {
         let Ok(state) = self.state.get_mut() else {
             return;
         };
+        if let Some(capture) = state.disk_capture.take() {
+            let _ = capture.abort();
+        }
         if !state.aborted && !state.committed && state.started.iter().any(|started| *started) {
             self.cache.record_capture_abort();
             self.metrics.capture_aborts.add(1);
@@ -2390,6 +2778,86 @@ impl Drop for ScanCacheCapture {
             }
         }
     }
+}
+
+fn durable_cache_lookup(
+    runtime: &VgiRuntime,
+    key: &vgi_client::CacheKey,
+    expected_schema: &SchemaRef,
+) -> Option<SharedDiskHit> {
+    let cache = runtime.durable_result_cache()?;
+    match cache.lookup_expected_schema(key, expected_schema) {
+        Ok(Some(hit)) => Some(SharedDiskHit(Arc::new(hit))),
+        Ok(None) => None,
+        Err(error) => {
+            let mut event = VgiEvent::new("cache.disk_error");
+            event.catalog = Some(key.catalog.clone());
+            event.function = Some(key.function.clone());
+            event.message = Some(format!("durable lookup failed: {error}"));
+            runtime.emit(event);
+            None
+        }
+    }
+}
+
+async fn durable_cache_lookup_async(
+    runtime: Arc<VgiRuntime>,
+    key: vgi_client::CacheKey,
+    expected_schema: SchemaRef,
+) -> Option<SharedDiskHit> {
+    let runtime_for_lookup = Arc::clone(&runtime);
+    match tokio::task::spawn_blocking(move || {
+        durable_cache_lookup(&runtime_for_lookup, &key, &expected_schema)
+    })
+    .await
+    {
+        Ok(hit) => hit,
+        Err(error) => {
+            let mut event = VgiEvent::new("cache.disk_error");
+            event.message = Some(format!("durable lookup task failed: {error}"));
+            runtime.emit(event);
+            None
+        }
+    }
+}
+
+fn spawn_durable_replay(
+    hit: SharedDiskHit,
+    tx: tokio::sync::mpsc::Sender<DFResult<datafusion::arrow::array::RecordBatch>>,
+    schema: SchemaRef,
+    column_mapping: Option<Arc<HashMap<String, String>>>,
+    partition: usize,
+) {
+    tokio::task::spawn_blocking(move || {
+        // Cache keys intentionally omit a DataFusion target partition count.
+        // Flatten every stored producer part through current partition zero so
+        // a differently configured later session cannot skip or duplicate rows.
+        if partition != 0 {
+            return;
+        }
+        for stored_partition in 0..hit.0.partitions() {
+            let reader = match hit.0.open_partition(stored_partition) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    let _ = tx.blocking_send(Err(DataFusionError::Execution(format!(
+                        "VGI durable cache replay failed: {error}"
+                    ))));
+                    return;
+                }
+            };
+            for batch in reader {
+                let batch = match batch {
+                    Ok(batch) => conform(batch, &schema, column_mapping.as_deref()),
+                    Err(error) => Err(DataFusionError::ArrowError(Box::new(error), None)),
+                };
+                if tx.blocking_send(batch).is_err() {
+                    // Receiver cancellation supplies replay backpressure and
+                    // releases the durable object lease promptly.
+                    return;
+                }
+            }
+        }
+    });
 }
 
 fn split_ordering(schema: &SchemaRef, planned: &PlannedSplits) -> Option<Vec<PhysicalSortExpr>> {
@@ -2846,27 +3314,22 @@ impl ExecutionPlan for VgiScanExec {
     ) -> DFResult<SendableRecordBatchStream> {
         let partition_metrics = VgiPartitionMetrics::new(&self.metrics, partition);
         if let Some(key) = &self.cache_key {
-            let first_probe = self.cache_probe.get().is_none();
             let cached = self
                 .cache_probe
                 .get_or_init(|| self.conn.runtime.result_cache().get(key))
                 .clone();
-            if first_probe {
-                if cached.is_some() {
-                    self.cache_metrics.hits.add(1);
-                } else {
-                    self.cache_metrics.misses.add(1);
-                }
-                let mut event = VgiEvent::new(if cached.is_some() {
-                    "cache.hit"
-                } else {
-                    "cache.miss"
-                });
+            if cached.is_some() && self.cache_observation.set(()).is_ok() {
+                self.cache_metrics.hits.add(1);
+                let mut event = VgiEvent::new("cache.hit");
                 event.catalog = Some(self.catalog.clone());
                 event.function = Some(format!("{}.{}", self.schema_name, self.function));
+                event.message = Some("tier=memory".to_string());
                 self.conn.runtime.emit(event);
             }
             if let Some(entry) = cached {
+                if let Some(capture) = &self.cache_capture {
+                    capture.discard_unstarted();
+                }
                 let out_schema = self.schema.clone();
                 let batches = if partition == 0 {
                     entry
@@ -2911,6 +3374,7 @@ impl ExecutionPlan for VgiScanExec {
             .map(|planned| planned.plan.clone());
         // One handle for the blocking scan, one for the stream adapter.
         let scan_schema = self.schema.clone();
+        let cache_storage_schema = self.cache_storage_schema.clone();
         let column_mapping = self.column_mapping.clone();
         let cache_capture = self.cache_capture.clone();
         let revalidation = if self.split_groups.is_none() {
@@ -2929,6 +3393,7 @@ impl ExecutionPlan for VgiScanExec {
         // worker rather than letting batches pile up in memory.
         let (tx, rx) =
             tokio::sync::mpsc::channel::<DFResult<datafusion::arrow::array::RecordBatch>>(2);
+        let durable_replay_tx = tx.clone();
 
         let job = move || {
             if let Some(capture) = &cache_capture {
@@ -2996,13 +3461,13 @@ impl ExecutionPlan for VgiScanExec {
                 if let Some(tokens) = &split_tokens {
                     if tokens.is_empty() {
                         if let Some(capture) = &cache_capture {
-                            capture.complete(partition, Vec::new(), None);
+                            capture.no_work(partition);
                         }
                         return Ok(());
                     }
                 } else if partition > 0 {
                     if let Some(capture) = &cache_capture {
-                        capture.complete(partition, Vec::new(), None);
+                        capture.no_work(partition);
                     }
                     return Ok(());
                 }
@@ -3054,7 +3519,6 @@ impl ExecutionPlan for VgiScanExec {
                 worker_metrics.worker_scans.add(1);
 
                 let mut emitted = 0usize;
-                let mut captured = Vec::new();
                 let mut tick_pushdown: Option<filters::Pushdown> = None;
                 loop {
                     let generation = dynamic_filter_generation(&dynamic_filters);
@@ -3118,7 +3582,16 @@ impl ExecutionPlan for VgiScanExec {
                     // Retain the worker's full batch so every local projection
                     // shares one cache entry; projection-capable functions keep
                     // capturing only the remote shape they requested.
-                    let full_cache_batch = (!projection_pushdown).then(|| batch.clone());
+                    let cache_batch = cache_capture
+                        .as_ref()
+                        .map(|_| {
+                            conform(
+                                batch.clone(),
+                                &cache_storage_schema,
+                                column_mapping.as_deref(),
+                            )
+                        })
+                        .transpose()?;
                     // DataFusion requires every batch to match the declared
                     // schema exactly, so conform rather than trusting the
                     // worker to have honoured the projection.
@@ -3130,11 +3603,13 @@ impl ExecutionPlan for VgiScanExec {
                         _ => batch,
                     };
                     emitted += batch.num_rows();
-                    if cache_capture.is_some() {
-                        captured.push(match full_cache_batch {
-                            Some(full) => full.slice(0, batch.num_rows()),
-                            None => batch.clone(),
-                        });
+                    if let Some(capture) = &cache_capture {
+                        capture.push_batch(
+                            partition,
+                            cache_batch
+                                .expect("cache batch exists when capture exists")
+                                .slice(0, batch.num_rows()),
+                        );
                     }
                     if tx.blocking_send(Ok(batch)).is_err() {
                         // Receiver dropped: the query was cancelled.
@@ -3214,7 +3689,7 @@ impl ExecutionPlan for VgiScanExec {
                         return Ok(());
                     }
                     if let Some(capture) = &cache_capture {
-                        capture.complete(partition, captured, control);
+                        capture.scanned(partition, control);
                     }
                 }
                 Ok(())
@@ -3252,7 +3727,10 @@ impl ExecutionPlan for VgiScanExec {
                 Arc::clone(&self.cache_flight),
                 key,
                 Arc::clone(self.conn.runtime.result_cache()),
+                Arc::clone(&self.disk_cache_probe),
+                Arc::clone(&self.cache_observation),
                 Arc::clone(&self.cache_flight_probe),
+                Arc::clone(&self.cache_flight_disk_probe),
                 Arc::clone(&self.conn.runtime),
                 self.conn.rpc_timeout(),
                 self.catalog.clone(),
@@ -3260,7 +3738,9 @@ impl ExecutionPlan for VgiScanExec {
                 self.cache_metrics.clone(),
                 self.cache_capture.clone(),
                 self.schema.clone(),
+                self.cache_storage_schema.clone(),
                 self.column_mapping.clone(),
+                durable_replay_tx,
             )
         });
         let stream = futures::stream::unfold(
@@ -3270,7 +3750,10 @@ impl ExecutionPlan for VgiScanExec {
                     flight,
                     key,
                     cache,
+                    plan_disk_probe,
+                    cache_observation,
                     probe,
+                    disk_probe,
                     runtime,
                     rpc_timeout,
                     catalog,
@@ -3278,35 +3761,74 @@ impl ExecutionPlan for VgiScanExec {
                     cache_metrics,
                     capture,
                     replay_schema,
+                    storage_schema,
                     column_mapping,
+                    durable_replay_tx,
                 )) = flight_context
                 {
-                    match flight.get_or_init(|| runtime.acquire_result_flight(&key)) {
-                        crate::runtime::ResultFlightClaim::Producer(producer) => {
-                            if let Some(capture) = &capture {
-                                capture.set_flight(Arc::clone(producer));
-                            }
-                            if let Some(job) = job.take() {
-                                tokio::task::spawn_blocking(job);
-                            }
+                    let durable = plan_disk_probe
+                        .get_or_init(|| {
+                            durable_cache_lookup_async(
+                                Arc::clone(&runtime),
+                                key.clone(),
+                                Arc::clone(&storage_schema),
+                            )
+                        })
+                        .await
+                        .clone();
+                    if let Some(hit) = durable {
+                        if cache_observation.set(()).is_ok() {
+                            cache_metrics.hits.add(1);
+                            let mut event = VgiEvent::new("cache.hit");
+                            event.catalog = Some(catalog.clone());
+                            event.function = Some(function.clone());
+                            event.message = Some("tier=disk".to_string());
+                            runtime.emit(event);
                         }
-                        crate::runtime::ResultFlightClaim::Follower(waiter) => {
-                            cache_metrics.waits.add(1);
-                            let mut event = VgiEvent::new("cache.wait");
+                        drop(job.take());
+                        if let Some(capture) = &capture {
+                            capture.discard_unstarted();
+                        }
+                        spawn_durable_replay(
+                            hit,
+                            durable_replay_tx,
+                            replay_schema,
+                            column_mapping,
+                            partition,
+                        );
+                    } else {
+                        if cache_observation.set(()).is_ok() {
+                            cache_metrics.misses.add(1);
+                            let mut event = VgiEvent::new("cache.miss");
                             event.catalog = Some(catalog.clone());
                             event.function = Some(function.clone());
                             runtime.emit(event);
-                            match waiter.clone().wait_timeout(rpc_timeout).await {
-                                crate::runtime::ResultFlightOutcome::Stored => {
-                                    match probe
-                                        .get_or_init(|| {
-                                            cache
-                                                .get(&key)
-                                                .or_else(|| cache.get_for_revalidation(&key))
-                                        })
-                                        .clone()
-                                    {
-                                        Some(entry) => {
+                        }
+                        match flight.get_or_init(|| runtime.acquire_result_flight(&key)) {
+                            crate::runtime::ResultFlightClaim::Producer(producer) => {
+                                if let Some(capture) = &capture {
+                                    capture.set_flight(Arc::clone(producer));
+                                }
+                                if let Some(job) = job.take() {
+                                    tokio::task::spawn_blocking(job);
+                                }
+                            }
+                            crate::runtime::ResultFlightClaim::Follower(waiter) => {
+                                cache_metrics.waits.add(1);
+                                let mut event = VgiEvent::new("cache.wait");
+                                event.catalog = Some(catalog.clone());
+                                event.function = Some(function.clone());
+                                runtime.emit(event);
+                                match waiter.clone().wait_timeout(rpc_timeout).await {
+                                    crate::runtime::ResultFlightOutcome::Stored => {
+                                        let memory_entry = probe
+                                            .get_or_init(|| {
+                                                cache
+                                                    .get(&key)
+                                                    .or_else(|| cache.get_for_revalidation(&key))
+                                            })
+                                            .clone();
+                                        if let Some(entry) = memory_entry {
                                             // Dropping the unstarted fallback job also
                                             // drops its sender, so replay closes normally.
                                             drop(job.take());
@@ -3327,34 +3849,62 @@ impl ExecutionPlan for VgiScanExec {
                                                 event.function = Some(function);
                                                 runtime.emit(event);
                                             }
-                                        }
-                                        None => {
-                                            // A zero-TTL revalidatable entry, short
-                                            // expiry, or intervening eviction can make
-                                            // a successful fill unavailable by the
-                                            // time this follower wakes. Cache policy
-                                            // must never turn that race into a query
-                                            // failure: execute this plan normally.
-                                            cache_metrics.coalesced_retries.add(1);
-                                            let mut event = VgiEvent::new("cache.coalesced_retry");
-                                            event.catalog = Some(catalog);
-                                            event.function = Some(function);
-                                            runtime.emit(event);
-                                            if let Some(job) = job.take() {
-                                                tokio::task::spawn_blocking(job);
+                                        } else {
+                                            let durable_entry = disk_probe
+                                                .get_or_init(|| {
+                                                    durable_cache_lookup_async(
+                                                        Arc::clone(&runtime),
+                                                        key.clone(),
+                                                        Arc::clone(&storage_schema),
+                                                    )
+                                                })
+                                                .await
+                                                .clone();
+                                            if let Some(hit) = durable_entry {
+                                                drop(job.take());
+                                                spawn_durable_replay(
+                                                    hit,
+                                                    durable_replay_tx,
+                                                    replay_schema,
+                                                    column_mapping,
+                                                    partition,
+                                                );
+                                                cache_metrics.coalesced_hits.add(1);
+                                                let mut event =
+                                                    VgiEvent::new("cache.coalesced_hit");
+                                                event.catalog = Some(catalog);
+                                                event.function = Some(function);
+                                                event.message = Some("tier=disk".to_string());
+                                                runtime.emit(event);
+                                            } else {
+                                                // A zero-TTL revalidatable entry, short
+                                                // expiry, or intervening eviction can make
+                                                // a successful fill unavailable by the
+                                                // time this follower wakes. Cache policy
+                                                // must never turn that race into a query
+                                                // failure: execute this plan normally.
+                                                cache_metrics.coalesced_retries.add(1);
+                                                let mut event =
+                                                    VgiEvent::new("cache.coalesced_retry");
+                                                event.catalog = Some(catalog);
+                                                event.function = Some(function);
+                                                runtime.emit(event);
+                                                if let Some(job) = job.take() {
+                                                    tokio::task::spawn_blocking(job);
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                crate::runtime::ResultFlightOutcome::Aborted(reason) => {
-                                    cache_metrics.coalesced_aborts.add(1);
-                                    let mut event = VgiEvent::new("cache.coalesced_abort");
-                                    event.catalog = Some(catalog);
-                                    event.function = Some(function);
-                                    event.message = Some(reason);
-                                    runtime.emit(event);
-                                    if let Some(job) = job.take() {
-                                        tokio::task::spawn_blocking(job);
+                                    crate::runtime::ResultFlightOutcome::Aborted(reason) => {
+                                        cache_metrics.coalesced_aborts.add(1);
+                                        let mut event = VgiEvent::new("cache.coalesced_abort");
+                                        event.catalog = Some(catalog);
+                                        event.function = Some(function);
+                                        event.message = Some(reason);
+                                        runtime.emit(event);
+                                        if let Some(job) = job.take() {
+                                            tokio::task::spawn_blocking(job);
+                                        }
                                     }
                                 }
                             }

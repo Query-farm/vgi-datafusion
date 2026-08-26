@@ -32,7 +32,7 @@ ctx.sql("SELECT count(*) FROM orders").await?.show().await?;
 | Filter pushdown | `supports_filters_pushdown` | ✅, exact for directly bound functions |
 | Dynamic filters and join keys | physical filter pushdown + continuation metadata | ◐ |
 | Split planning | physical scan partitions + plan cache | ✅ |
-| Worker-opted result cache | bounded session memory + revalidation | ◐ |
+| Worker-opted result cache | bounded memory + opt-in durable producer tier | ◐ |
 | Typed session settings | DataFusion `ConfigExtension` + `SET` / `RESET` | ✅ |
 | Worker secrets | host `VgiSecretResolver` | ✅ |
 | Structured diagnostics | SQL functions + host event sink | ✅ |
@@ -204,6 +204,18 @@ runtime can carry a secret resolver, non-blocking event sink, and split-locality
 hook. If no extension is supplied, the SQL adapter creates one shared runtime
 for all VGI attachments in that session.
 
+Enable the optional durable result-cache tier with a host-owned directory. The
+constructor supplies conservative byte/count bounds and Zstandard compression;
+its public fields can be overridden before creating the runtime.
+
+```rust
+use vgi_datafusion::{VgiDurableCacheOptions, VgiRuntime, VgiSessionOptions};
+
+let mut options = VgiSessionOptions::default();
+options.durable_cache = Some(VgiDurableCacheOptions::new("/var/cache/my-app/vgi"));
+let runtime = VgiRuntime::try_new(options).expect("open durable VGI cache");
+```
+
 Run the complete Open-Meteo example with a labelled 30-second timeout around
 each interaction:
 
@@ -263,9 +275,19 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   successful finalize. Their keys preserve duplicate multiplicity while being
   independent of row order and physical batch boundaries; ordered sinks,
   secrets, cancellation, failed lifecycle phases, inconsistent policy, and
-  over-cap results never commit. Correlated 1:N per-value calls, disk
-  persistence, stale-while-revalidate, compression, persistent cross-process
-  sharing, and worker-log forwarding remain unimplemented.
+  over-cap results never commit. An optional host-owned durable tier persists
+  complete, positively fresh, bounded producer and split results as Arrow IPC
+  using the configured codec (Zstandard by default) and shares them safely
+  between local processes. It does not persist validators and is not used for
+  exchange, scalar, correlated 1:N, dynamic-filtered, unbounded,
+  ordered-split, secret-consuming, or non-catalog-scoped calls. Its recency
+  ordering is approximate per process, and its crash-safety contract requires
+  a local Unix filesystem with advisory locks, atomic rename, and directory
+  `fsync`. Constructor limits govern committed Arrow payload admission rather
+  than forming a hard filesystem quota, are separate from live SQL memory
+  limits, and should agree across processes sharing one root. Storage locks do
+  not coalesce worker calls across processes. Stale-while-revalidate and
+  worker-log forwarding remain unimplemented.
 - **Dynamic filters and join keys.** DataFusion 55 hash-join filters are linked
   to VGI scans. Completed single-column `IN` sets use `join_keys` side IPC at
   init (`vgi_join_keys_version=2`), while later range/constant refinements ride

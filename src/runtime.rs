@@ -4,12 +4,55 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use datafusion::common::ScalarValue;
+use vgi_client::disk_cache::{DiskCache, DiskCacheOptions};
 use vgi_client::{CacheLimits, ResultCache};
+
+pub use vgi_client::DiskCacheCodec;
+
+fn disk_cache_error(error: vgi_client::DiskCacheError) -> datafusion::common::DataFusionError {
+    datafusion::common::DataFusionError::Execution(format!(
+        "VGI durable cache operation failed: {error}"
+    ))
+}
+
+/// Host-owned configuration for the optional durable VGI result-cache tier.
+///
+/// This state is deliberately not exposed as a worker setting and never enters
+/// a VGI result cache key. Multiple runtimes may point at the same root; the
+/// client cache's atomic refs and leases coordinate those processes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VgiDurableCacheOptions {
+    /// Directory containing durable objects, refs, temporary captures, and
+    /// cache bookkeeping.
+    pub root: PathBuf,
+    /// Admission bound for committed and replay-leased encoded Arrow payloads;
+    /// metadata and active captures are excluded.
+    pub max_bytes: u64,
+    /// Admission bound for committed references plus leased orphan objects.
+    pub max_entries: usize,
+    /// Arrow IPC payload codec.
+    pub codec: DiskCacheCodec,
+}
+
+impl VgiDurableCacheOptions {
+    /// Create durable-cache options with the client's conservative byte,
+    /// entry-count, and Zstandard defaults rooted at a host-owned directory.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        let options = DiskCacheOptions::new(root);
+        Self {
+            root: options.root,
+            max_bytes: options.max_bytes,
+            max_entries: options.max_entries,
+            codec: options.codec,
+        }
+    }
+}
 
 /// Discovery metadata retained for SQL inspection after a VGI catalog is
 /// attached. Execution registration and diagnostics consume the same worker
@@ -49,6 +92,8 @@ pub struct VgiSessionOptions {
     pub cache_enabled: bool,
     /// Bounds for the in-memory result cache.
     pub cache_limits: CacheLimits,
+    /// Optional host-owned durable result-cache tier.
+    pub durable_cache: Option<VgiDurableCacheOptions>,
     /// Maximum number of structured events retained for SQL/API inspection.
     pub event_history_capacity: usize,
     /// Optional timeout applied to an individual blocking RPC.
@@ -63,6 +108,7 @@ impl Default for VgiSessionOptions {
         Self {
             cache_enabled: true,
             cache_limits: CacheLimits::default(),
+            durable_cache: None,
             event_history_capacity: 10_000,
             rpc_timeout: None,
         }
@@ -148,6 +194,7 @@ pub trait VgiLocalityHook: Send + Sync + 'static {
 pub struct VgiRuntime {
     options: VgiSessionOptions,
     cache: Arc<ResultCache>,
+    disk_cache: Option<Arc<DiskCache>>,
     events: Mutex<VecDeque<VgiEvent>>,
     plan_cache: Mutex<HashMap<PlanCacheKey, CachedPlan>>,
     plan_cache_stats: Mutex<PlanCacheStats>,
@@ -172,6 +219,7 @@ impl fmt::Debug for VgiRuntime {
         f.debug_struct("VgiRuntime")
             .field("options", &self.options)
             .field("cache_stats", &self.cache.stats())
+            .field("disk_cache", &self.disk_cache.is_some())
             .field("event_sink", &self.event_sink.is_some())
             .field("secret_resolver", &self.secret_resolver.is_some())
             .field("locality_hook", &self.locality_hook.is_some())
@@ -188,9 +236,35 @@ impl Default for VgiRuntime {
 impl VgiRuntime {
     /// Create a session runtime with bounded memory and no external callbacks.
     pub fn new(options: VgiSessionOptions) -> Self {
+        Self::try_new(options).expect("invalid VGI durable-cache configuration")
+    }
+
+    /// Create a session runtime, returning durable-cache configuration and I/O
+    /// failures to hosts that opt into the disk tier.
+    pub fn try_new(options: VgiSessionOptions) -> datafusion::common::Result<Self> {
         let session_settings = crate::VgiSettings::with_cache_limits(options.cache_limits);
-        Self {
+        let disk_cache = options
+            .durable_cache
+            .as_ref()
+            .map(|options| {
+                DiskCache::open(DiskCacheOptions {
+                    root: options.root.clone(),
+                    max_bytes: options.max_bytes,
+                    max_entries: options.max_entries,
+                    codec: options.codec,
+                })
+                .map(Arc::new)
+                .map_err(|error| {
+                    datafusion::common::DataFusionError::Configuration(format!(
+                        "could not open VGI durable cache at {}: {error}",
+                        options.root.display()
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok(Self {
             cache: Arc::new(ResultCache::new(options.cache_limits)),
+            disk_cache,
             options,
             events: Mutex::new(VecDeque::new()),
             plan_cache: Mutex::new(HashMap::new()),
@@ -203,7 +277,7 @@ impl VgiRuntime {
             event_sink: None,
             secret_resolver: None,
             locality_hook: None,
-        }
+        })
     }
 
     pub(crate) fn set_table_branches(
@@ -252,6 +326,29 @@ impl VgiRuntime {
     /// The session's bounded memory cache.
     pub fn result_cache(&self) -> &Arc<ResultCache> {
         &self.cache
+    }
+
+    /// The optional durable result-cache tier.
+    pub fn durable_result_cache(&self) -> Option<&Arc<DiskCache>> {
+        self.disk_cache.as_ref()
+    }
+
+    /// Flush both result-cache tiers and return the number of removed entries.
+    pub fn flush_result_cache(&self) -> datafusion::common::Result<usize> {
+        let mut removed = self.cache.flush_all();
+        if let Some(cache) = &self.disk_cache {
+            removed = removed.saturating_add(cache.flush_all().map_err(disk_cache_error)?);
+        }
+        Ok(removed)
+    }
+
+    /// Reap expired or over-budget entries from both result-cache tiers.
+    pub fn reap_result_cache(&self) -> datafusion::common::Result<usize> {
+        let mut removed = self.cache.reap();
+        if let Some(cache) = &self.disk_cache {
+            removed = removed.saturating_add(cache.reap().map_err(disk_cache_error)?);
+        }
+        Ok(removed)
     }
 
     /// A snapshot of retained events, oldest first.
@@ -333,10 +430,33 @@ impl VgiRuntime {
         self.session_settings.lock().unwrap().adapter_settings()
     }
 
-    pub(crate) fn session_settings_identity(&self) -> Vec<u8> {
+    pub(crate) fn session_settings_identity(&self, catalog: &str) -> Vec<u8> {
+        let declared_adapter_settings = self
+            .catalog_metadata
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(alias, metadata)| {
+                alias.eq_ignore_ascii_case(catalog)
+                    || metadata.worker_catalog.eq_ignore_ascii_case(catalog)
+            })
+            .flat_map(|(_, metadata)| metadata.settings.iter())
+            .filter(|setting| crate::settings::is_adapter_setting(&setting.name))
+            .map(|setting| setting.name.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
         let settings = self.session_settings.lock().unwrap();
         let mut out = Vec::new();
         for (name, value) in settings.values() {
+            // These settings control only local admission and execution shape.
+            // They cannot change worker result bytes and therefore must not
+            // fragment either cache tier. A worker may independently declare
+            // the same name, however; in that catalog the value is forwarded
+            // and remains part of result identity.
+            if crate::settings::is_adapter_setting(name)
+                && !declared_adapter_settings.contains(name)
+            {
+                continue;
+            }
             out.extend_from_slice(&(name.len() as u64).to_le_bytes());
             out.extend_from_slice(name.as_bytes());
             out.extend_from_slice(&(value.len() as u64).to_le_bytes());
@@ -663,6 +783,16 @@ pub struct ExchangeCacheStats {
 #[cfg(test)]
 mod result_flight_tests {
     use super::*;
+
+    #[test]
+    fn durable_options_follow_client_defaults() {
+        let options = VgiDurableCacheOptions::new("durable-cache");
+        let client = DiskCacheOptions::new("durable-cache");
+        assert_eq!(options.root, client.root);
+        assert_eq!(options.max_bytes, client.max_bytes);
+        assert_eq!(options.max_entries, client.max_entries);
+        assert_eq!(options.codec, client.codec);
+    }
 
     #[test]
     fn exchange_cache_counters_are_session_scoped_and_cumulative() {

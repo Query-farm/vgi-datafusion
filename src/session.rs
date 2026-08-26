@@ -111,7 +111,7 @@ fn sql_macro_kind(value: &str) -> Result<SqlMacroKind, String> {
 
 #[derive(Debug, Clone)]
 enum SqlMacroBody {
-    Scalar(Expr),
+    Scalar(Box<Expr>),
     Table(Box<Query>),
     Invalid(String),
 }
@@ -181,7 +181,7 @@ fn parse_macro_body(kind: SqlMacroKind, definition: &str) -> SqlMacroBody {
             "scalar definition must contain only one expression".to_string(),
         );
     }
-    SqlMacroBody::Scalar(expression.clone())
+    SqlMacroBody::Scalar(Box::new(expression.clone()))
 }
 
 struct CatalogSqlQualifier<'a> {
@@ -346,7 +346,7 @@ fn qualify_macro_body(
 ) {
     match body {
         SqlMacroBody::Scalar(expression) => {
-            qualify_catalog_sql(expression, catalog, schema, namespace);
+            qualify_catalog_sql(expression.as_mut(), catalog, schema, namespace);
         }
         SqlMacroBody::Table(query) => {
             qualify_catalog_sql(query.as_mut(), catalog, schema, namespace);
@@ -573,7 +573,7 @@ fn expand_scalar_macro(
         );
     }
     active.push(key);
-    let mut expanded = template.clone();
+    let mut expanded = template.as_ref().clone();
     substitute_macro(&mut expanded, &info.parameters, &actual);
 
     // sqlparser does not revisit an expression installed by a post-visit hook,
@@ -1719,12 +1719,12 @@ fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResul
                 // This preserves names and ordering without changing DataFusion.
                 for argument in &mut args.args {
                     let named = match argument {
-                        FunctionArg::Named { name, arg, .. } => match arg {
-                            FunctionArgExpr::Expr(value) => {
-                                Some((name.value.clone(), value.clone()))
-                            }
-                            _ => None,
-                        },
+                        FunctionArg::Named {
+                            name,
+                            arg: FunctionArgExpr::Expr(value),
+                            ..
+                        } => Some((name.value.clone(), value.clone())),
+                        FunctionArg::Named { .. } => None,
                         FunctionArg::ExprNamed {
                             name: SQLExpr::Identifier(name),
                             arg: FunctionArgExpr::Expr(value),

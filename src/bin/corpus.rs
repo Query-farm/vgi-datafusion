@@ -329,6 +329,7 @@ fn explain_rows_agree(expected: &[String], got: &[String]) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Rendering tests stay beside their adapter seam.
 mod rendering_tests {
     use super::{adapt_duckdb_binary_sql, agrees_modulo_rendering, cells_agree};
 
@@ -1617,14 +1618,14 @@ fn compare_reports(
             ("/failed", "failed records", true),
             ("/timed_out", "timeouts", true),
         ] {
-            let old = number(&before, pointer);
+            let old = number(before, pointer);
             let new = number(after, pointer);
             if (higher_is_bad && new > old) || (!higher_is_bad && new < old) {
                 regressions.push(format!("{path}: {label} changed from {old} to {new}"));
             }
         }
         let old_agree =
-            number(&before, "/values/exact") + number(&before, "/values/rendering_equivalent");
+            number(before, "/values/exact") + number(before, "/values/rendering_equivalent");
         let new_agree =
             number(after, "/values/exact") + number(after, "/values/rendering_equivalent");
         if new_agree < old_agree {
@@ -1632,7 +1633,7 @@ fn compare_reports(
                 "{path}: agreeing value checks changed from {old_agree} to {new_agree}"
             ));
         }
-        let old_different = number(&before, "/values/different");
+        let old_different = number(before, "/values/different");
         let new_different = number(after, "/values/different");
         let old_compared = old_agree + old_different;
         let new_compared = new_agree + new_different;

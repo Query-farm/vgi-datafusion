@@ -48,6 +48,7 @@ async fn string_value(ctx: &SessionContext, query: &str) -> datafusion::common::
         .to_string())
 }
 
+#[allow(clippy::redundant_pattern_matching)] // Preserve the DataFrame temporary's drop point.
 async fn assert_planning_error(ctx: &SessionContext, query: &str) {
     if let Ok(_) = vgi_datafusion::sql(ctx, query).await {
         panic!("expected planning to fail: {query}");

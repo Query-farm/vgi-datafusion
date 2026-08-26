@@ -514,10 +514,10 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::LogStats => log_stats(&self.runtime)?,
             DiagnosticsKind::CacheFlush => operation_result(
                 "flushed",
-                (self.runtime.result_cache().flush_all() + self.runtime.flush_plan_cache()) as u64,
+                (self.runtime.flush_result_cache()? + self.runtime.flush_plan_cache()) as u64,
             )?,
             DiagnosticsKind::CacheReap => {
-                operation_result("removed", self.runtime.result_cache().reap() as u64)?
+                operation_result("removed", self.runtime.reap_result_cache()? as u64)?
             }
         };
         Ok(Arc::new(MemTable::try_new(
@@ -669,6 +669,12 @@ fn plan_cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
 fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let stats = runtime.result_cache().stats();
     let exchange = runtime.exchange_cache_stats();
+    let disk = runtime
+        .durable_result_cache()
+        .map(|cache| cache.stats())
+        .transpose()
+        .map_err(vgi_error)?
+        .unwrap_or_default();
     let schema = Arc::new(Schema::new(vec![
         Field::new("hits", DataType::UInt64, false),
         Field::new("misses", DataType::UInt64, false),
@@ -684,6 +690,16 @@ fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         Field::new("exchange_hits", DataType::UInt64, false),
         Field::new("exchange_stores", DataType::UInt64, false),
         Field::new("exchange_bytes_served", DataType::UInt64, false),
+        Field::new("disk_hits", DataType::UInt64, false),
+        Field::new("disk_misses", DataType::UInt64, false),
+        Field::new("disk_inserts", DataType::UInt64, false),
+        Field::new("disk_evictions_lru", DataType::UInt64, false),
+        Field::new("disk_evictions_ttl", DataType::UInt64, false),
+        Field::new("disk_refusals", DataType::UInt64, false),
+        Field::new("disk_corruptions", DataType::UInt64, false),
+        Field::new("disk_capture_aborts", DataType::UInt64, false),
+        Field::new("disk_entries", DataType::UInt64, false),
+        Field::new("disk_total_bytes", DataType::UInt64, false),
     ]));
     let values = [
         stats.hits,
@@ -700,6 +716,16 @@ fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         exchange.hits,
         exchange.stores,
         exchange.bytes_served,
+        disk.hits,
+        disk.misses,
+        disk.inserts,
+        disk.evictions_lru,
+        disk.evictions_ttl,
+        disk.refusals,
+        disk.corruptions,
+        disk.capture_aborts,
+        disk.entries as u64,
+        disk.total_bytes,
     ];
     Ok(RecordBatch::try_new(
         schema,
@@ -712,6 +738,16 @@ fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
 
 fn cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let entries = runtime.result_cache().entries();
+    let disk_entries = runtime
+        .durable_result_cache()
+        .map(|cache| cache.entries())
+        .transpose()
+        .map_err(vgi_error)?
+        .unwrap_or_default();
+    let disk_codecs = disk_entries
+        .iter()
+        .map(|entry| format!("{:?}", entry.codec).to_ascii_lowercase())
+        .collect::<Vec<_>>();
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new("catalog", DataType::Utf8, false),
@@ -722,39 +758,106 @@ fn cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         Field::new("stale", DataType::Boolean, false),
         Field::new("hits", DataType::UInt64, false),
         Field::new("revalidatable", DataType::Boolean, false),
+        Field::new("tier", DataType::Utf8, false),
+        Field::new("codec", DataType::Utf8, false),
+        Field::new("partitions", DataType::UInt64, false),
+        Field::new("freshness_remaining_ms", DataType::UInt64, false),
     ]));
     Ok(RecordBatch::try_new(
         schema,
         vec![
             Arc::new(StringArray::from_iter_values(
-                entries.iter().map(|entry| entry.key_fingerprint.as_str()),
+                entries
+                    .iter()
+                    .map(|entry| entry.key_fingerprint.as_str())
+                    .chain(
+                        disk_entries
+                            .iter()
+                            .map(|entry| entry.key_fingerprint.as_str()),
+                    ),
             )),
             Arc::new(StringArray::from_iter_values(
-                entries.iter().map(|entry| entry.catalog.as_str()),
+                entries
+                    .iter()
+                    .map(|entry| entry.catalog.as_str())
+                    .chain(disk_entries.iter().map(|entry| entry.catalog.as_str())),
             )),
             Arc::new(StringArray::from_iter_values(
-                entries.iter().map(|entry| entry.function.as_str()),
+                entries
+                    .iter()
+                    .map(|entry| entry.function.as_str())
+                    .chain(disk_entries.iter().map(|entry| entry.function.as_str())),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.rows as u64),
+                entries
+                    .iter()
+                    .map(|entry| entry.rows as u64)
+                    .chain(disk_entries.iter().map(|entry| entry.rows)),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.bytes as u64),
+                entries
+                    .iter()
+                    .map(|entry| entry.bytes as u64)
+                    .chain(disk_entries.iter().map(|entry| entry.stored_bytes)),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.age.as_millis() as u64),
+                entries
+                    .iter()
+                    .map(|entry| entry.age.as_millis() as u64)
+                    .chain(
+                        disk_entries
+                            .iter()
+                            .map(|entry| entry.age.as_millis() as u64),
+                    ),
             )),
             Arc::new(BooleanArray::from(
-                entries.iter().map(|entry| entry.stale).collect::<Vec<_>>(),
+                entries
+                    .iter()
+                    .map(|entry| entry.stale)
+                    .chain(
+                        disk_entries
+                            .iter()
+                            .map(|entry| entry.freshness_remaining.is_zero()),
+                    )
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.hits),
+                entries
+                    .iter()
+                    .map(|entry| entry.hits)
+                    .chain(disk_entries.iter().map(|_| 0)),
             )),
             Arc::new(BooleanArray::from(
                 entries
                     .iter()
                     .map(|entry| entry.revalidatable)
+                    .chain(disk_entries.iter().map(|_| false))
                     .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                entries
+                    .iter()
+                    .map(|_| "memory")
+                    .chain(disk_entries.iter().map(|_| "disk")),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                entries
+                    .iter()
+                    .map(|_| "")
+                    .chain(disk_codecs.iter().map(String::as_str)),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries
+                    .iter()
+                    .map(|entry| entry.num_substreams as u64)
+                    .chain(disk_entries.iter().map(|entry| entry.partitions as u64)),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries.iter().map(|_| 0).chain(
+                    disk_entries
+                        .iter()
+                        .map(|entry| entry.freshness_remaining.as_millis() as u64),
+                ),
             )),
         ],
     )?)
@@ -763,11 +866,16 @@ fn cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
 /// Compatibility shape for the DuckDB extension's `vgi_result_cache()`.
 ///
 /// Keep the DataFusion-native diagnostic above stable and expose only fields
-/// this cache actually owns. Disk-tier fields are not invented here: the tier
-/// is truthfully `memory`, while batch/substream layout and time-travel identity
-/// come from the actual captured entry and key.
+/// each cache tier actually owns. Durable entries intentionally leave the
+/// memory-only validator and per-entry hit count empty.
 fn duckdb_cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let entries = runtime.result_cache().entries();
+    let disk_entries = runtime
+        .durable_result_cache()
+        .map(|cache| cache.entries())
+        .transpose()
+        .map_err(vgi_error)?
+        .unwrap_or_default();
     let schema = Arc::new(Schema::new(vec![
         Field::new("key_hash", DataType::Utf8, false),
         Field::new("catalog", DataType::Utf8, false),
@@ -790,69 +898,154 @@ fn duckdb_cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         schema,
         vec![
             Arc::new(StringArray::from_iter_values(
-                entries.iter().map(|entry| entry.key_fingerprint.as_str()),
+                entries
+                    .iter()
+                    .map(|entry| entry.key_fingerprint.as_str())
+                    .chain(
+                        disk_entries
+                            .iter()
+                            .map(|entry| entry.key_fingerprint.as_str()),
+                    ),
             )),
             Arc::new(StringArray::from_iter_values(
-                entries.iter().map(|entry| entry.catalog.as_str()),
+                entries
+                    .iter()
+                    .map(|entry| entry.catalog.as_str())
+                    .chain(disk_entries.iter().map(|entry| entry.catalog.as_str())),
             )),
-            Arc::new(StringArray::from_iter_values(entries.iter().map(|entry| {
-                entry
-                    .function
-                    .rsplit_once('.')
-                    .map(|(_, name)| name)
-                    .unwrap_or(&entry.function)
-            }))),
-            Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.rows as u64),
+            Arc::new(StringArray::from_iter_values(
+                entries
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .function
+                            .rsplit_once('.')
+                            .map(|(_, name)| name)
+                            .unwrap_or(&entry.function)
+                    })
+                    .chain(disk_entries.iter().map(|entry| {
+                        entry
+                            .function
+                            .rsplit_once('.')
+                            .map(|(_, name)| name)
+                            .unwrap_or(&entry.function)
+                    })),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.bytes as u64),
+                entries
+                    .iter()
+                    .map(|entry| entry.rows as u64)
+                    .chain(disk_entries.iter().map(|entry| entry.rows)),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.age.as_millis() as u64),
+                entries
+                    .iter()
+                    .map(|entry| entry.bytes as u64)
+                    .chain(disk_entries.iter().map(|entry| entry.stored_bytes)),
+            )),
+            Arc::new(UInt64Array::from_iter_values(
+                entries
+                    .iter()
+                    .map(|entry| entry.age.as_millis() as u64)
+                    .chain(
+                        disk_entries
+                            .iter()
+                            .map(|entry| entry.age.as_millis() as u64),
+                    ),
             )),
             Arc::new(BooleanArray::from(
-                entries.iter().map(|entry| entry.stale).collect::<Vec<_>>(),
+                entries
+                    .iter()
+                    .map(|entry| entry.stale)
+                    .chain(
+                        disk_entries
+                            .iter()
+                            .map(|entry| entry.freshness_remaining.is_zero()),
+                    )
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.hits),
+                entries
+                    .iter()
+                    .map(|entry| entry.hits)
+                    .chain(disk_entries.iter().map(|_| 0)),
             )),
             Arc::new(BooleanArray::from(
                 entries
                     .iter()
                     .map(|entry| entry.revalidatable)
+                    .chain(disk_entries.iter().map(|_| false))
                     .collect::<Vec<_>>(),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.num_batches as u64),
+                entries
+                    .iter()
+                    .map(|entry| entry.num_batches as u64)
+                    .chain(disk_entries.iter().map(|entry| entry.batches)),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.num_substreams as u64),
+                entries
+                    .iter()
+                    .map(|entry| entry.num_substreams as u64)
+                    .chain(disk_entries.iter().map(|entry| entry.partitions as u64)),
             )),
-            Arc::new(StringArray::from_iter_values(entries.iter().map(|entry| {
-                entry
-                    .at
-                    .as_ref()
-                    .map(|(unit, _)| unit.as_str())
-                    .unwrap_or("")
-            }))),
-            Arc::new(StringArray::from_iter_values(entries.iter().map(|entry| {
-                entry
-                    .at
-                    .as_ref()
-                    .map(|(_, value)| value.as_str())
-                    .unwrap_or("")
-            }))),
             Arc::new(StringArray::from_iter_values(
-                entries.iter().map(|_| "memory"),
+                entries
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .at
+                            .as_ref()
+                            .map(|(unit, _)| unit.as_str())
+                            .unwrap_or("")
+                    })
+                    .chain(disk_entries.iter().map(|entry| {
+                        entry
+                            .at
+                            .as_ref()
+                            .map(|(unit, _)| unit.as_str())
+                            .unwrap_or("")
+                    })),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                entries
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .at
+                            .as_ref()
+                            .map(|(_, value)| value.as_str())
+                            .unwrap_or("")
+                    })
+                    .chain(disk_entries.iter().map(|entry| {
+                        entry
+                            .at
+                            .as_ref()
+                            .map(|(_, value)| value.as_str())
+                            .unwrap_or("")
+                    })),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                entries
+                    .iter()
+                    .map(|_| "memory")
+                    .chain(disk_entries.iter().map(|_| "disk")),
             )),
             Arc::new(UInt64Array::from_iter_values(
-                entries.iter().map(|entry| entry.bytes as u64),
+                entries
+                    .iter()
+                    .map(|entry| entry.bytes as u64)
+                    .chain(disk_entries.iter().map(|entry| entry.stored_bytes)),
             )),
             // The bounded DataFusion cache currently stores whole results, not
             // per-partition entries. Empty is the DuckDB diagnostic's truthful
             // label for such an entry and does not claim partition-cache support.
-            Arc::new(StringArray::from_iter_values(entries.iter().map(|_| ""))),
+            Arc::new(StringArray::from_iter_values(
+                entries
+                    .iter()
+                    .map(|_| "")
+                    .chain(disk_entries.iter().map(|_| "")),
+            )),
         ],
     )?)
 }
@@ -948,7 +1141,12 @@ fn duckdb_log_message(event: &crate::VgiEvent) -> String {
         other => other,
     };
     let mut fields = vec![kind.to_string()];
-    if event.kind == "cache.hit" || event.kind == "cache.store" {
+    let has_explicit_tier = event.message.as_ref().is_some_and(|message| {
+        message
+            .split_ascii_whitespace()
+            .any(|field| field.starts_with("tier="))
+    });
+    if (event.kind == "cache.hit" || event.kind == "cache.store") && !has_explicit_tier {
         fields.push("tier=memory".to_string());
     }
     if event.kind == "cache.revalidated" {
@@ -1703,38 +1901,39 @@ fn duckdb_constraints(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     for (alias, metadata) in runtime.catalog_metadata() {
         for table in metadata.tables {
             let schema = vgi_protocol::ipc::read_schema(&table.columns.0).map_err(vgi_error)?;
-            let mut push = |kind: &str, text: String, columns: Vec<String>| {
-                rows.push(DuckDbConstraintRow {
-                    database_name: alias.clone(),
-                    schema_name: table.schema_name.clone(),
-                    table_name: table.name.clone(),
-                    constraint_type: kind.to_string(),
-                    constraint_text: text,
-                    columns,
-                    referenced_table: None,
-                    referenced_columns: None,
-                });
-            };
-            for index in &table.not_null_constraints {
-                let columns = column_names(&schema, &[*index])?;
-                push("NOT NULL", "NOT NULL".to_string(), columns);
+            {
+                let mut push = |kind: &str, text: String, columns: Vec<String>| {
+                    rows.push(DuckDbConstraintRow {
+                        database_name: alias.clone(),
+                        schema_name: table.schema_name.clone(),
+                        table_name: table.name.clone(),
+                        constraint_type: kind.to_string(),
+                        constraint_text: text,
+                        columns,
+                        referenced_table: None,
+                        referenced_columns: None,
+                    });
+                };
+                for index in &table.not_null_constraints {
+                    let columns = column_names(&schema, &[*index])?;
+                    push("NOT NULL", "NOT NULL".to_string(), columns);
+                }
+                for indices in &table.primary_key_constraints {
+                    let columns = column_names(&schema, indices)?;
+                    push(
+                        "PRIMARY KEY",
+                        format!("PRIMARY KEY({})", columns.join(", ")),
+                        columns,
+                    );
+                }
+                for indices in &table.unique_constraints {
+                    let columns = column_names(&schema, indices)?;
+                    push("UNIQUE", format!("UNIQUE({})", columns.join(", ")), columns);
+                }
+                for expression in &table.check_constraints {
+                    push("CHECK", format!("CHECK(({expression}))"), Vec::new());
+                }
             }
-            for indices in &table.primary_key_constraints {
-                let columns = column_names(&schema, indices)?;
-                push(
-                    "PRIMARY KEY",
-                    format!("PRIMARY KEY({})", columns.join(", ")),
-                    columns,
-                );
-            }
-            for indices in &table.unique_constraints {
-                let columns = column_names(&schema, indices)?;
-                push("UNIQUE", format!("UNIQUE({})", columns.join(", ")), columns);
-            }
-            for expression in &table.check_constraints {
-                push("CHECK", format!("CHECK(({expression}))"), Vec::new());
-            }
-            drop(push);
             for bytes in &table.foreign_key_constraints {
                 let (columns, referenced_table, referenced_columns) = foreign_key(&bytes.0)?;
                 rows.push(DuckDbConstraintRow {
@@ -2199,11 +2398,18 @@ fn zero_arg_u64(
     name: &str,
     operation: impl Fn() -> u64 + Send + Sync + 'static,
 ) -> datafusion::logical_expr::ScalarUDF {
+    zero_arg_u64_result(name, move || Ok(operation()))
+}
+
+fn zero_arg_u64_result(
+    name: &str,
+    operation: impl Fn() -> DFResult<u64> + Send + Sync + 'static,
+) -> datafusion::logical_expr::ScalarUDF {
     let operation = Arc::new(operation);
     let fun: ScalarFunctionImplementation = Arc::new(move |_args| {
-        Ok(ColumnarValue::Scalar(ScalarValue::UInt64(
-            Some(operation()),
-        )))
+        Ok(ColumnarValue::Scalar(ScalarValue::UInt64(Some(
+            operation()?
+        ))))
     });
     create_udf(name, vec![], DataType::UInt64, Volatility::Volatile, fun)
 }
@@ -2272,15 +2478,19 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
     }
 
     if !state.scalar_functions().contains_key("vgi_cache_flush") {
-        let cache = Arc::clone(runtime.result_cache());
         let runtime_for_flush = Arc::clone(&runtime);
-        ctx.register_udf(zero_arg_u64("vgi_cache_flush", move || {
-            (cache.flush_all() + runtime_for_flush.flush_plan_cache()) as u64
+        ctx.register_udf(zero_arg_u64_result("vgi_cache_flush", move || {
+            Ok(
+                (runtime_for_flush.flush_result_cache()? + runtime_for_flush.flush_plan_cache())
+                    as u64,
+            )
         }));
     }
     if !state.scalar_functions().contains_key("vgi_cache_reap") {
-        let cache = Arc::clone(runtime.result_cache());
-        ctx.register_udf(zero_arg_u64("vgi_cache_reap", move || cache.reap() as u64));
+        let runtime_for_reap = Arc::clone(&runtime);
+        ctx.register_udf(zero_arg_u64_result("vgi_cache_reap", move || {
+            Ok(runtime_for_reap.reap_result_cache()? as u64)
+        }));
     }
     if !state.scalar_functions().contains_key("vgi_logs_clear") {
         ctx.register_udf(zero_arg_u64("vgi_logs_clear", move || {
@@ -2293,6 +2503,26 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
 mod tests {
     use super::*;
     use datafusion::arrow::array::StringArray;
+
+    struct TestDirectory(std::path::PathBuf);
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn test_directory(label: &str) -> TestDirectory {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        TestDirectory(std::env::temp_dir().join(format!(
+            "vgi-datafusion-{label}-{}-{unique}",
+            std::process::id()
+        )))
+    }
 
     #[tokio::test]
     async fn duckdb_typeof_names_use_the_existing_scalar_udf_surface() -> DFResult<()> {
@@ -2426,6 +2656,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_cache_is_visible_and_maintained_through_sql() -> DFResult<()> {
+        let directory = test_directory("durable-diagnostics");
+        let options = crate::VgiSessionOptions {
+            durable_cache: Some(crate::VgiDurableCacheOptions {
+                root: directory.0.clone(),
+                max_bytes: 16 * 1024 * 1024,
+                max_entries: 16,
+                codec: vgi_client::DiskCacheCodec::None,
+            }),
+            ..Default::default()
+        };
+        let runtime = Arc::new(VgiRuntime::try_new(options)?);
+        let ctx = SessionContext::new();
+        register(&ctx, Arc::clone(&runtime));
+
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![1_i64, 2, 3]))],
+        )?;
+        let key = vgi_client::CacheKey {
+            catalog: "durable".to_string(),
+            identity_scope: "durable:anonymous".to_string(),
+            worker_label: "fixture".to_string(),
+            function: "data.numbers".to_string(),
+            arguments: Vec::new(),
+            projection: None,
+            filters: None,
+            catalog_version: 1,
+            at: Some(("VERSION".to_string(), "7".to_string())),
+            settings: Vec::new(),
+            attach_options: Vec::new(),
+            row_limit: None,
+            ordering: None,
+            sample: None,
+            plan: None,
+        };
+        let control = vgi_client::CacheControl::ttl(60);
+        runtime.result_cache().insert(
+            key.clone(),
+            vec![batch.clone()],
+            std::time::Duration::from_secs(60),
+            Some(&control),
+        );
+        let disk = runtime
+            .durable_result_cache()
+            .expect("durable cache configured");
+        let mut capture = disk
+            .begin_capture(Arc::clone(&schema), 1)
+            .map_err(vgi_error)?;
+        capture.push_batch(0, &batch).map_err(vgi_error)?;
+        assert!(disk
+            .commit(
+                key,
+                capture,
+                std::time::Duration::from_secs(60),
+                Some(&control),
+            )
+            .map_err(vgi_error)?
+            .is_stored());
+
+        let stats = ctx
+            .sql(
+                "SELECT disk_inserts, disk_entries, disk_total_bytes \
+                 FROM vgi_cache_stats()",
+            )
+            .await?
+            .collect()
+            .await?;
+        for column in 0..2 {
+            assert_eq!(
+                stats[0]
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .value(0),
+                1
+            );
+        }
+        assert!(
+            stats[0]
+                .column(2)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0)
+                > 0
+        );
+
+        let disk_rows = ctx
+            .sql(
+                "SELECT COUNT(*) FROM vgi_cache_entries() \
+                 WHERE tier = 'disk' AND codec = 'none' AND partitions = 1",
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(
+            disk_rows[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            1
+        );
+        let compatible_rows = ctx
+            .sql(
+                "SELECT COUNT(*) FROM vgi_result_cache() \
+                 WHERE tier = 'disk' AND num_batches = 1 AND num_substreams = 1 \
+                   AND at_unit = 'VERSION' AND at_value = '7'",
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(
+            compatible_rows[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            1
+        );
+
+        let reaped = ctx.sql("SELECT vgi_cache_reap()").await?.collect().await?;
+        assert_eq!(
+            reaped[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0),
+            0
+        );
+        let flushed = ctx
+            .sql("SELECT flushed FROM vgi_result_cache_flush()")
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(
+            flushed[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_durable_root_is_not_silently_disabled() {
+        let directory = test_directory("invalid-durable-root");
+        std::fs::write(&directory.0, b"not a directory").unwrap();
+        let options = crate::VgiSessionOptions {
+            durable_cache: Some(crate::VgiDurableCacheOptions {
+                root: directory.0.clone(),
+                max_bytes: 1024,
+                max_entries: 1,
+                codec: vgi_client::DiskCacheCodec::None,
+            }),
+            ..Default::default()
+        };
+        assert!(VgiRuntime::try_new(options).is_err());
+    }
+
+    #[tokio::test]
     async fn duckdb_logs_serializes_real_adapter_events() -> DFResult<()> {
         let ctx = SessionContext::new();
         let runtime = Arc::new(VgiRuntime::default());
@@ -2435,6 +2835,12 @@ mod tests {
         event.catalog = Some("weather".to_string());
         event.function = Some("main.forecast".to_string());
         runtime.emit(event);
+
+        let mut disk_event = crate::VgiEvent::new("cache.store");
+        disk_event.catalog = Some("weather".to_string());
+        disk_event.function = Some("main.forecast".to_string());
+        disk_event.message = Some("tier=disk".to_string());
+        runtime.emit(disk_event);
 
         let batches = ctx
             .sql(
@@ -2446,6 +2852,18 @@ mod tests {
             .collect()
             .await?;
         assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+
+        let disk = ctx
+            .sql(
+                "SELECT message FROM duckdb_logs() \
+                 WHERE message LIKE '%result_cache.store%' \
+                   AND message LIKE '%tier=disk%' \
+                   AND message NOT LIKE '%tier=memory%'",
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(disk.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
         Ok(())
     }
 }

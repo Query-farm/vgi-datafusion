@@ -441,7 +441,7 @@ impl VgiScalarUdf {
         // bind-derived type across different session-setting snapshots.
         let key = format!(
             "{arg_types:?}|{values:?}|{:?}",
-            self.conn.runtime().session_settings_identity()
+            self.conn.runtime().session_settings_identity(&self.catalog)
         );
         if let Ok(cache) = self.resolved.lock() {
             if let Some(t) = cache.get(&key) {
@@ -550,12 +550,10 @@ fn scalar_type_score(actual: &DataType, expected: &DataType) -> Option<i64> {
         // VGI groups floating-point and decimal values together, but does not
         // consider an integer column compatible with a floating-point column.
         Some(2)
-    } else if matches!(actual, Utf8 | LargeUtf8 | Utf8View)
-        && matches!(expected, Utf8 | LargeUtf8 | Utf8View)
-    {
-        Some(3)
-    } else if matches!(actual, Binary | LargeBinary | BinaryView)
-        && matches!(expected, Binary | LargeBinary | BinaryView)
+    } else if (matches!(actual, Utf8 | LargeUtf8 | Utf8View)
+        && matches!(expected, Utf8 | LargeUtf8 | Utf8View))
+        || (matches!(actual, Binary | LargeBinary | BinaryView)
+            && matches!(expected, Binary | LargeBinary | BinaryView))
     {
         Some(3)
     } else {
@@ -806,10 +804,11 @@ fn per_value_opt_in_identity(
     use sha2::{Digest, Sha256};
 
     let attach = conn.cache_attach_context(catalog);
+    let worker_identity = conn.cache_worker_identity();
     let mut digest = Sha256::new();
     for field in [
         b"scalar_per_value_opt_in_v1".as_slice(),
-        conn.label().as_bytes(),
+        worker_identity.as_bytes(),
         catalog.as_bytes(),
         schema_name.as_bytes(),
         function.as_bytes(),
@@ -1630,5 +1629,23 @@ mod overload_tests {
             "one cached row should not retain the full RPC response"
         );
         assert_eq!(PER_VALUE_MAX_NEW_STORES_PER_CALL, 256);
+    }
+
+    #[test]
+    fn per_value_opt_in_registry_isolated_by_full_worker_command() {
+        let runtime = Arc::new(crate::VgiRuntime::default());
+        let first = VgiConnection::subprocess(["worker", "--dataset", "first"])
+            .with_runtime(Arc::clone(&runtime));
+        let second = VgiConnection::subprocess(["worker", "--dataset", "second"])
+            .with_runtime(Arc::clone(&runtime));
+
+        assert_eq!(first.label(), second.label());
+        let first_identity = per_value_opt_in_identity(&first, "example", "main", "cached", 1);
+        let second_identity = per_value_opt_in_identity(&second, "example", "main", "cached", 1);
+        assert_ne!(first_identity, second_identity);
+
+        runtime.note_per_value_opt_in(first_identity.clone());
+        assert!(runtime.has_per_value_opt_in(&first_identity));
+        assert!(!runtime.has_per_value_opt_in(&second_identity));
     }
 }

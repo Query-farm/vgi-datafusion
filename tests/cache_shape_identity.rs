@@ -179,7 +179,7 @@ async fn filter_identity_is_retained_only_when_the_worker_can_apply_it(
         );
     }
     assert_eq!(entries_for(&ctx, "cache_filtered").await?, 2);
-    assert!(cache_hits(&ctx).await? >= hits_before + 1);
+    assert!(cache_hits(&ctx).await? > hits_before);
     Ok(())
 }
 
@@ -204,6 +204,6 @@ async fn pushed_projections_keep_distinct_cache_identities() -> datafusion::comm
         [1, 2, 3]
     );
     assert_eq!(entries_for(&ctx, "cache_projection").await?, 2);
-    assert!(cache_hits(&ctx).await? >= hits_before + 1);
+    assert!(cache_hits(&ctx).await? > hits_before);
     Ok(())
 }

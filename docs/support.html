@@ -453,22 +453,22 @@
       <aside class="readiness">
         <div class="readiness-label">Overall status</div>
         <div class="readiness-value"><span class="pulse"></span>Integration candidate</div>
-        <p>The DataFusion 55 adapter suite and shared VGI corpus complete over Unix and HTTP with identical classifications and zero timeouts. Bounded result caching, structured diagnostics, secrets, views, globals, and split-plan reuse are wired; publishing, long-lived failure coverage, and the explicit compatibility gaps below remain.</p>
+        <p>The DataFusion 55 shared VGI corpus completes over Unix and patched-transport HTTP with byte-identical reports, zero blocked cases, zero timeouts, and no baseline regressions. The durable-cache client suite and four-test DataFusion contract are also green on both transports. Bounded result caching, structured diagnostics, secrets, views, globals, and split-plan reuse are wired; publishing, long-lived failure coverage, and the explicit compatibility gaps below remain.</p>
       </aside>
     </section>
 
     <section class="summary-grid" aria-label="At a glance">
       <article class="stat"><div class="number">55</div><div class="label">DataFusion release</div><div class="detail">Arrow 59.2 · debug CLI built</div></article>
       <article class="stat"><div class="number">5</div><div class="label">Transport forms</div><div class="detail">subprocess · HTTP · Unix · TCP · launch</div></article>
-      <article class="stat"><div class="number">249</div><div class="label">Adapter tests green</div><div class="detail">plus two doctests; release-mode cache, dynamic-filter, nested-input, and transport contracts included</div></article>
-      <article class="stat"><div class="number">107</div><div class="label">Promoted CLI baseline</div><div class="detail">plus live debug-binary HTTP smoke test</div></article>
+      <article class="stat"><div class="number">3,554</div><div class="label">Corpus records executed</div><div class="detail">2,278 exact · 128 rendering-equivalent · zero regressions, blocks, or timeouts</div></article>
+      <article class="stat"><div class="number">4 + 4</div><div class="label">Durable contracts</div><div class="detail">exact producer persistence, restart, split, cancellation, and corruption behavior over Unix and HTTP</div></article>
     </section>
 
     <section class="answer-grid" aria-label="Direct answers">
       <article class="answer cache">
         <span class="badge partial">Partial</span>
         <h2>Table caching</h2>
-        <p>Worker-opted-in producer, streaming exchange, stable scalar, and unordered buffered whole-input results use a bounded, session-local memory cache.</p>
+        <p>Worker-opted-in results use a bounded session-memory cache, and embedders may add a host-owned durable tier for complete bounded producer and split scans.</p>
         <ul class="plain-list">
           <li>Worker connections, attach handles, table binds, and scalar return types are reused.</li>
           <li>Complete ordinary and split scans commit atomically; errors, cancellation, abandoned LIMITs, and incomplete partitions never store partial rows.</li>
@@ -477,9 +477,13 @@
           <li>ETag/Last-Modified revalidation, stale-if-error, and per-key single-flight work for producer entries, stateless table-input batches, stable scalar per-value entries, and buffered whole-input results.</li>
           <li>Immediate-stale validators revalidate instead of bypassing. If the worker withdraws eligibility with <code>no_store</code>, transaction scope, or per-value revocation, stale bytes are evicted rather than replayed.</li>
           <li>Buffered keys are duplicate-preserving input multisets, so row order and physical batch boundaries do not cause false misses. Ordered sinks, cancellation, lifecycle errors, and over-cap captures never commit.</li>
-          <li>Secret-dependent calls bypass caches. Live SQL limits bound per-entry bytes, total bytes, and entry count; reductions evict entries that no longer fit and <code>RESET</code> restores constructor values.</li>
-          <li>Correlated 1:N tiers, disk, compression, stale-while-revalidate, and cross-process sharing remain future work.</li>
-          <li>Inspect with <code>vgi_cache_stats()</code>, <code>vgi_cache_entries()</code>, and <code>vgi_plan_cache_stats()</code>. Entry rows report real batch/substream counts, time-travel identity, memory tier/bytes, and truthful whole-result partition labels; maintain with <code>vgi_cache_flush()</code> and <code>vgi_cache_reap()</code>.</li>
+          <li>Secret-dependent calls bypass caches. Live SQL limits bound memory-tier per-entry bytes, total bytes, and entry count; reductions evict entries that no longer fit and <code>RESET</code> restores constructor values.</li>
+          <li>The optional durable tier stores complete, positively fresh, catalog-scoped multipart producer results as Arrow IPC using a host-selected codec (Zstandard by default). Ordered split plans are excluded. Atomic refs, capture/replay leases, corruption-as-miss recovery, restart reconciliation, and constructor-owned committed-payload admission limits support concurrent local processes.</li>
+          <li>Durable limits are not a hard filesystem quota: metadata and active temporary captures are excluded, each concurrent capture has its own byte cap, and processes sharing a root should use the same options.</li>
+          <li>Conditional revalidation, stale-if-error, and single-flight remain memory/runtime-local. Durable locks protect publication and integrity; separate cold processes may both invoke the worker before one generation wins.</li>
+          <li>Durable exchange, scalar, correlated 1:N, dynamic-filtered, unbounded, and secret-consuming entries remain unwired, as does stale-while-revalidate. Durable recency is approximate per process, and crash safety requires a local Unix filesystem with advisory locks, atomic rename, and directory <code>fsync</code>.</li>
+          <li>Inspect with <code>vgi_cache_stats()</code>, <code>vgi_cache_entries()</code>, and <code>vgi_plan_cache_stats()</code>. Disk counters/LRU touches are instance-local; occupancy scans the shared root. Disk entry hits/revalidation are unavailable and report zero/false, disk bytes are encoded payload, and disk substreams are stored partition files. Durable SQL inspection and maintenance perform blocking filesystem work.</li>
+          <li>Maintain both configured tiers with <code>vgi_cache_flush()</code> and <code>vgi_cache_reap()</code>. Flush removes lookup refs immediately; leased replay objects disappear after release and a later reap.</li>
           <li><a href="implementation-inventory.md">Read the code-backed cache phases and full implementation inventory →</a></li>
         </ul>
       </article>
@@ -506,10 +510,10 @@
       </div>
 
       <div class="filters" role="group" aria-label="Filter capabilities by status">
-        <button class="filter active" data-filter="all">All capabilities</button>
-        <button class="filter" data-filter="supported">Supported</button>
-        <button class="filter" data-filter="partial">Partial</button>
-        <button class="filter" data-filter="missing">Not wired</button>
+        <button type="button" class="filter active" data-filter="all" aria-pressed="true">All capabilities</button>
+        <button type="button" class="filter" data-filter="supported" aria-pressed="false">Supported</button>
+        <button type="button" class="filter" data-filter="partial" aria-pressed="false">Partial</button>
+        <button type="button" class="filter" data-filter="missing" aria-pressed="false">Not wired</button>
       </div>
 
       <div class="matrix">
@@ -554,7 +558,7 @@
 
         <div class="group-title">Caching, observability & mutation</div>
         <div class="capability" data-status="supported"><div class="cap-name">Planning / metadata cache</div><span class="badge supported">Supported</span><div class="cap-detail">Attach handles, binds, return types, and connections are memoized. Catalog-scoped split plans reuse the worker's advertised maximum age and catalog-version identity.</div></div>
-        <div class="capability" data-status="partial"><div class="cap-name">VGI result cache</div><span class="badge partial">Partial</span><div class="cap-detail">Bounded session-memory caching covers producer/split scans, stateless streaming input batches, worker-opted stable scalar values, and unordered buffered whole-input results. All four shapes have conditional revalidation, per-key single-flight, stale-if-error, and revocation eviction where applicable. Buffered capture commits only after successful finalize and uses a duplicate-preserving multiset key. Scan identity follows advertised pushdown capabilities, full cached results are conformed for local projections, secrets bypass reuse, and native DataFusion metrics appear in <code>EXPLAIN ANALYZE</code>. SQL diagnostics report exchange hits, stores, bytes served, capture aborts, real batch/substream layout, time-travel identity, and memory tier/bytes. SQL can change per-entry, total-byte, and entry-count limits live. Correlated 1:N entries, detailed ineligibility-reason logs, persistent disk, compression, and stale-while-revalidate are not wired.</div></div>
+        <div class="capability" data-status="partial"><div class="cap-name">VGI result cache</div><span class="badge partial">Partial</span><div class="cap-detail">Bounded session memory covers producer/split scans, stateless streaming input batches, worker-opted stable scalar values, and unordered buffered whole-input results with validators, stale-if-error, and runtime-local single-flight. An optional host-owned tier persists complete, positively fresh, bounded producer/split results as Arrow IPC with a configured codec (Zstandard by default) and shares them across local processes using atomic refs, leases, restart reconciliation, corruption-as-miss recovery, and constructor-owned limits. Exact tier events and combined SQL diagnostics, flush, and reap are exposed. Durable validators, exchange/scalar/correlated, dynamic-filtered, unbounded, and secret-consuming entries plus stale-while-revalidate remain unwired; cross-process locks do not coalesce worker calls, recency is approximate per process, and crash safety requires local Unix filesystem semantics.</div></div>
         <div class="capability" data-status="supported"><div class="cap-name">Structured logs</div><span class="badge supported">Supported</span><div class="cap-detail">Worker text uses <code>vgi::worker</code>; bounded SQL-visible lifecycle/cache history, grouped stats, clear, and an embedder event sink are available.</div></div>
         <div class="capability" data-status="missing"><div class="cap-name">Writes, DDL & COPY</div><span class="badge missing">Not wired</span><div class="cap-detail">INSERT, UPDATE, DELETE, writable branches, catalog DDL, custom COPY formats, and SQL <code>CREATE SECRET</code> integration are not wired.</div></div>
       </div>
@@ -567,7 +571,7 @@
       </div>
       <div class="roadmap">
         <article class="roadmap-card ship"><div class="priority">01 · Ship</div><h3>Publish and distribute</h3><p>Turn the working local integration into a reproducible artifact rather than a sibling-checkout build.</p><ul><li>Publish <code>vgi-datafusion</code> against DataFusion 55.</li><li>Upstream or maintain the small DataFusion CLI integration patch.</li><li>Add release CI and packaged CLI artifacts.</li></ul></article>
-        <article class="roadmap-card next"><div class="priority">02 · Cache</div><h3>Extend the result cache</h3><p>Producer, streaming per-batch, stable scalar per-value, and buffered whole-input memory tiers now share conditional policy handling and live SQL bounds; add breadth only where VGI and DataFusion have matching semantics.</p><ul><li>Design bounded stale-while-revalidate with deterministic scheduling and cancellation.</li><li>Add correlated 1:N entries only with complete keys and explicit cancellation boundaries.</li><li>Consider a persistent Arrow IPC tier only after transport-parity failure tests.</li></ul></article>
+        <article class="roadmap-card next"><div class="priority">02 · Cache</div><h3>Extend the result cache</h3><p>Memory tiers share conditional policy handling, while complete bounded producer results can use the new durable Arrow IPC tier; add breadth only where VGI and DataFusion have matching semantics.</p><ul><li>Design bounded stale-while-revalidate with deterministic scheduling and cancellation.</li><li>Add correlated 1:N entries only with complete keys and explicit cancellation boundaries.</li><li>Evaluate durable scalar and exchange entries only after defining compact per-value packing and cancellation-safe whole-input keys.</li></ul></article>
         <article class="roadmap-card next"><div class="priority">03 · Operate</div><h3>Finish observability edges</h3><p>Lifecycle/cache events are queryable; worker text and host tracing can be joined more tightly.</p><ul><li>Forward structured worker extras into the event sink without duplicating credentials.</li><li>Add query/execution IDs supplied by embedders.</li><li>Add deadline and stalled-worker coverage for every transport.</li></ul></article>
         <article class="roadmap-card"><div class="priority">04 · Boundary</div><h3>Keep correlated LATERAL explicit</h3><p>DataFusion does not expose an outer row to its table-function bind seam, so the one-statement geocode-to-forecast form remains outside this adapter's no-new-engine-work scope.</p><ul><li>Use a two-step query or host orchestration today.</li><li>Revisit only if upstream DataFusion exposes an execution-time table-function API.</li><li>Do not add an adapter-owned query operator solely for this syntax.</li></ul></article>
         <article class="roadmap-card"><div class="priority">05 · Secure</div><h3>CLI secret mappings</h3><p>The embedder resolver and VGI bind protocol are wired; the stock CLI still needs an explicit environment-to-secret mapping surface.</p><ul><li>Map named environment variables to typed secret fields without reading arbitrary process environment.</li><li>Keep refresh-token persistence an explicit opt-in.</li><li>Add scoped multi-secret CLI tests.</li></ul></article>
@@ -608,8 +612,12 @@
 
     buttons.forEach((button) => {
       button.addEventListener('click', () => {
-        buttons.forEach((candidate) => candidate.classList.remove('active'));
+        buttons.forEach((candidate) => {
+          candidate.classList.remove('active');
+          candidate.setAttribute('aria-pressed', 'false');
+        });
         button.classList.add('active');
+        button.setAttribute('aria-pressed', 'true');
         applyFilter(button.dataset.filter);
       });
     });

@@ -121,6 +121,7 @@ impl TableArgument {
 /// `spawn_blocking`. Batches are pushed one at a time and every answer is kept;
 /// a worker may answer a batch with nothing (a filter) or with more rows than it
 /// received (a generator), so the output is not positionally tied to the input.
+#[allow(clippy::too_many_arguments)] // Mirrors the protocol call boundary.
 pub(crate) fn run_exchange(
     conn: &VgiConnection,
     catalog: &str,
@@ -191,12 +192,9 @@ pub(crate) fn run_exchange(
         let state = if let Some(cached) = cached {
             emit_exchange_cache_event(conn, catalog, schema_name, function, "cache.hit", None);
             UnitState::Hit(cached)
-        } else if cache_key.is_some() {
+        } else if let Some(cache_key) = cache_key.as_ref() {
             emit_exchange_cache_event(conn, catalog, schema_name, function, "cache.miss", None);
-            match conn
-                .runtime
-                .acquire_result_flight(cache_key.as_ref().expect("checked above"))
-            {
+            match conn.runtime.acquire_result_flight(cache_key) {
                 crate::runtime::ResultFlightClaim::Producer(producer) => {
                     UnitState::Producer(producer)
                 }
@@ -433,11 +431,11 @@ pub(crate) fn run_exchange(
     // Followers wake only after the producer has stored or aborted. On abort,
     // run once without another cache claim so a worker refusing cache remains
     // correct and cannot form a retry loop.
-    for index in 0..units.len() {
-        let UnitState::Follower(waiter) = &units[index].state else {
+    for unit in &mut units {
+        let UnitState::Follower(waiter) = &unit.state else {
             continue;
         };
-        let key = units[index].key.as_ref().expect("follower has key");
+        let key = unit.key.as_ref().expect("follower has key");
         if matches!(
             waiter.wait_blocking_timeout(conn.rpc_timeout()),
             crate::runtime::ResultFlightOutcome::Stored
@@ -449,22 +447,16 @@ pub(crate) fn run_exchange(
                 .or_else(|| conn.runtime.result_cache().get_for_revalidation(key))
             {
                 conn.runtime.note_exchange_cache_hit(entry.bytes());
-                units[index].output = Some(entry.batches().to_vec());
+                unit.output = Some(entry.batches().to_vec());
                 continue;
             }
         }
         let mut exchange = client
             .open_exchange(&bound, &ScanOptions::default())
             .map_err(to_df)?;
-        let answer = exchange.send(&units[index].input).map_err(to_df)?;
-        emit_table_input_write(
-            conn,
-            catalog,
-            schema_name,
-            function,
-            units[index].input.num_rows(),
-        );
-        units[index].output = Some(answer.into_iter().collect());
+        let answer = exchange.send(&unit.input).map_err(to_df)?;
+        emit_table_input_write(conn, catalog, schema_name, function, unit.input.num_rows());
+        unit.output = Some(answer.into_iter().collect());
         exchange.close().map_err(to_df)?;
     }
 
@@ -613,14 +605,14 @@ pub(crate) fn exchange_cache_key_template(
     hash_exchange_field(&mut digest, arguments);
     hash_exchange_field(&mut digest, &catalog_version.to_le_bytes());
     hash_exchange_field(&mut digest, &conn.cache_attach_context(catalog));
-    let settings = conn.runtime().session_settings_identity();
+    let settings = conn.runtime().session_settings_identity(catalog);
     hash_exchange_field(&mut digest, &settings);
     let output_schema = vgi_protocol::ipc::write_schema(output_schema).map_err(to_df)?;
     hash_exchange_field(&mut digest, &output_schema);
     Ok(Some(ExchangeCacheKeyTemplate {
         catalog: catalog.to_string(),
         identity_scope,
-        worker_label: conn.label().to_string(),
+        worker_label: conn.cache_worker_identity(),
         function: format!("{schema_name}.{function}"),
         catalog_version,
         settings,
@@ -863,6 +855,7 @@ impl datafusion::catalog::TableProvider for VgiLiteralInputProvider {
 /// 4. `buffering_finalize` drains each in producer mode.
 ///
 /// The state ids are the worker's own — this only round-trips them.
+#[allow(clippy::too_many_arguments)] // Mirrors the buffering protocol boundary.
 pub(crate) fn run_buffered(
     conn: &VgiConnection,
     catalog: &str,
@@ -1207,6 +1200,7 @@ pub struct VgiTableInputProvider {
 
 impl VgiTableInputProvider {
     /// Bind the call, resolving its output schema from the table's schema.
+    #[allow(clippy::too_many_arguments)] // Keeps discovery facts explicit at the bind boundary.
     pub(crate) fn bind_blocking(
         conn: VgiConnection,
         catalog: &str,
