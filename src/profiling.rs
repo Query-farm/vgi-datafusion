@@ -120,7 +120,9 @@ impl PhysicalOptimizerRule for VgiExplainAnalyzeProfiling {
 
 #[cfg(test)]
 mod tests {
-    use crate::{DynamicProfile, DynamicProfilePartition};
+    use crate::{
+        sanitize_dynamic_profile_text, DynamicProfile, DynamicProfilePartition, DynamicProfileValue,
+    };
 
     #[test]
     fn partition_profiles_merge_in_partition_order() {
@@ -167,12 +169,43 @@ mod tests {
         assert_eq!(snapshot.min_bytes, Some(20));
         assert_eq!(snapshot.max_bytes, Some(40));
         assert_eq!(
-            snapshot.values.into_iter().collect::<Vec<_>>(),
+            snapshot.values,
             [
-                ("a".to_string(), "first".to_string()),
-                ("shared".to_string(), "partition-1".to_string()),
-                ("z".to_string(), "last".to_string()),
+                DynamicProfileValue {
+                    partition: 0,
+                    key: "a".to_string(),
+                    value: "first".to_string(),
+                },
+                DynamicProfileValue {
+                    partition: 0,
+                    key: "shared".to_string(),
+                    value: "partition-0".to_string(),
+                },
+                DynamicProfileValue {
+                    partition: 1,
+                    key: "shared".to_string(),
+                    value: "partition-1".to_string(),
+                },
+                DynamicProfileValue {
+                    partition: 1,
+                    key: "z".to_string(),
+                    value: "last".to_string(),
+                },
             ]
+        );
+        assert_eq!(snapshot.partition_count, 2);
+    }
+
+    #[test]
+    fn worker_profile_text_is_escaped_and_bounded() {
+        assert_eq!(
+            sanitize_dynamic_profile_text("key:\nvalue,\\tail", 128),
+            "key\\:\\nvalue\\,\\\\tail"
+        );
+        assert_eq!(
+            sanitize_dynamic_profile_text("abcdef", 3),
+            "abc…",
+            "truncated values have an explicit marker"
         );
     }
 }

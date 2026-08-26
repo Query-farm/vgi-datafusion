@@ -86,6 +86,53 @@ async fn profiling_is_analyze_only_and_skips_limit_and_cache_replay(
     assert_eq!(callback_events(&runtime), 1, "completed scan callback");
 
     context.register_table(
+        "remote_profile_cacheable",
+        VgiTableProvider::bind_with_arguments(
+            connection.clone(),
+            "example",
+            "main",
+            "profiling_demo",
+            Arguments::new()
+                .positional(32_i64)
+                .named("cache_ttl", 300_i64),
+        )
+        .await?,
+    )?;
+    runtime.clear_events();
+    let cacheable = rendered(
+        &context,
+        "EXPLAIN ANALYZE SELECT sum(n) FROM remote_profile_cacheable",
+    )
+    .await?;
+    assert!(cacheable.contains("rows_produced: 32"), "{cacheable}");
+    let events = runtime.events();
+    let stored = events
+        .iter()
+        .position(|event| event.kind == "cache.store")
+        .expect("completed profile result was cached");
+    let profiled = events
+        .iter()
+        .position(|event| event.kind == "table_function.dynamic_to_string")
+        .expect("completed profile callback was observed");
+    assert!(
+        stored < profiled,
+        "cache publication must precede optional profiling callback: {events:?}"
+    );
+
+    runtime.clear_events();
+    let cached_profile = rendered(
+        &context,
+        "EXPLAIN ANALYZE SELECT sum(n) FROM remote_profile_cacheable",
+    )
+    .await?;
+    assert!(cached_profile.contains("cache_hits=1"), "{cached_profile}");
+    assert_eq!(
+        callback_events(&runtime),
+        0,
+        "profile cache replay callback"
+    );
+
+    context.register_table(
         "remote_profile_large",
         VgiTableProvider::bind_with_arguments(
             connection.clone(),

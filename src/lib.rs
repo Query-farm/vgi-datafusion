@@ -2096,7 +2096,8 @@ struct DynamicProfilePartition {
 
 #[derive(Debug, Default)]
 struct DynamicProfileSnapshot {
-    values: BTreeMap<String, String>,
+    values: Vec<DynamicProfileValue>,
+    partition_count: usize,
     batches: usize,
     rows: usize,
     bytes: usize,
@@ -2106,6 +2107,18 @@ struct DynamicProfileSnapshot {
     max_bytes: Option<usize>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DynamicProfileValue {
+    partition: usize,
+    key: String,
+    value: String,
+}
+
+const MAX_DYNAMIC_PROFILE_FIELDS: usize = 64;
+const MAX_DYNAMIC_PROFILE_KEY_CHARS: usize = 128;
+const MAX_DYNAMIC_PROFILE_VALUE_CHARS: usize = 1024;
+const MAX_DYNAMIC_PROFILE_ERROR_CHARS: usize = 512;
+
 impl DynamicProfile {
     fn record(&self, partition: usize, profile: DynamicProfilePartition) {
         self.partitions.lock().unwrap().insert(partition, profile);
@@ -2113,7 +2126,8 @@ impl DynamicProfile {
 
     fn snapshot(&self) -> DynamicProfileSnapshot {
         let mut snapshot = DynamicProfileSnapshot::default();
-        for profile in self.partitions.lock().unwrap().values() {
+        for (partition, profile) in self.partitions.lock().unwrap().iter() {
+            snapshot.partition_count += 1;
             snapshot.batches += profile.batches;
             snapshot.rows += profile.rows;
             snapshot.bytes += profile.bytes;
@@ -2122,11 +2136,43 @@ impl DynamicProfile {
             snapshot.min_bytes = min_option(snapshot.min_bytes, profile.min_bytes);
             snapshot.max_bytes = max_option(snapshot.max_bytes, profile.max_bytes);
             for (key, value) in &profile.values {
-                snapshot.values.insert(key.clone(), value.clone());
+                snapshot.values.push(DynamicProfileValue {
+                    partition: *partition,
+                    key: key.clone(),
+                    value: value.clone(),
+                });
             }
         }
         snapshot
     }
+}
+
+fn sanitize_dynamic_profile_text(value: &str, max_chars: usize) -> String {
+    use std::fmt::Write;
+
+    let mut sanitized = String::with_capacity(value.len().min(max_chars));
+    let mut chars = value.chars();
+    for _ in 0..max_chars {
+        let Some(character) = chars.next() else {
+            return sanitized;
+        };
+        match character {
+            '\\' => sanitized.push_str("\\\\"),
+            ',' => sanitized.push_str("\\,"),
+            ':' => sanitized.push_str("\\:"),
+            '\n' => sanitized.push_str("\\n"),
+            '\r' => sanitized.push_str("\\r"),
+            '\t' => sanitized.push_str("\\t"),
+            character if character.is_control() => {
+                let _ = write!(sanitized, "\\u{{{:x}}}", character as u32);
+            }
+            character => sanitized.push(character),
+        }
+    }
+    if chars.next().is_some() {
+        sanitized.push('…');
+    }
+    sanitized
 }
 
 fn min_option(left: Option<usize>, right: Option<usize>) -> Option<usize> {
@@ -2870,6 +2916,8 @@ impl VgiScanExec {
             pushdown: self.pushdown.clone(),
             dynamic_filters: self.dynamic_filters.clone(),
             limit: self.limit,
+            filter_schema: self.filter_schema.clone(),
+            remote_bind_schema: self.remote_bind_schema.clone(),
             schema: self.schema.clone(),
             cache_storage_schema: self.cache_storage_schema.clone(),
             properties: self.properties.clone(),
@@ -4135,8 +4183,16 @@ impl DisplayAs for VgiScanExec {
                     snapshot.bytes
                 )?;
             }
-            for (key, value) in snapshot.values {
-                write!(f, ", {key}: {value}")?;
+            for value in snapshot.values {
+                if snapshot.partition_count > 1 {
+                    write!(
+                        f,
+                        ", partition_{}.{}: {}",
+                        value.partition, value.key, value.value
+                    )?;
+                } else {
+                    write!(f, ", {}: {}", value.key, value.value)?;
+                }
             }
         }
         Ok(())
@@ -4767,17 +4823,45 @@ impl ExecutionPlan for VgiScanExec {
                     let control = scan.cache_control().cloned();
                     drop(scan);
                     if !control.as_ref().is_some_and(|control| control.not_modified) {
+                        // Full result receipt is the cache freshness boundary.
+                        // Publish/complete the capture before the optional
+                        // diagnostics RPC so callback latency cannot extend the
+                        // worker's TTL or hold cache-flight followers.
+                        if let Some(capture) = &cache_capture {
+                            capture.scanned(partition, control.clone());
+                        }
                         if let Some(profile) = &dynamic_profile {
                             match client.table_function_dynamic_to_string(&bound, execution_id) {
                                 Ok(response) if response.keys.len() == response.values.len() => {
+                                    let reported_fields = response.keys.len();
                                     let mut event =
                                         VgiEvent::new("table_function.dynamic_to_string");
                                     event.catalog = Some(catalog.clone());
                                     event.function = Some(format!("{schema_name}.{function}"));
-                                    event.message = Some(format!("keys={}", response.keys.len()));
+                                    event.message = Some(format!(
+                                        "keys={} retained={}",
+                                        reported_fields,
+                                        reported_fields.min(MAX_DYNAMIC_PROFILE_FIELDS)
+                                    ));
                                     conn.runtime.emit(event);
-                                    completed_profile.values =
-                                        response.keys.into_iter().zip(response.values).collect();
+                                    completed_profile.values = response
+                                        .keys
+                                        .into_iter()
+                                        .zip(response.values)
+                                        .take(MAX_DYNAMIC_PROFILE_FIELDS)
+                                        .map(|(key, value)| {
+                                            (
+                                                sanitize_dynamic_profile_text(
+                                                    &key,
+                                                    MAX_DYNAMIC_PROFILE_KEY_CHARS,
+                                                ),
+                                                sanitize_dynamic_profile_text(
+                                                    &value,
+                                                    MAX_DYNAMIC_PROFILE_VALUE_CHARS,
+                                                ),
+                                            )
+                                        })
+                                        .collect();
                                 }
                                 Ok(response) => {
                                     let mut event =
@@ -4796,7 +4880,10 @@ impl ExecutionPlan for VgiScanExec {
                                         VgiEvent::new("table_function.dynamic_to_string_error");
                                     event.catalog = Some(catalog.clone());
                                     event.function = Some(format!("{schema_name}.{function}"));
-                                    event.message = Some(error.to_string());
+                                    event.message = Some(sanitize_dynamic_profile_text(
+                                        &error.to_string(),
+                                        MAX_DYNAMIC_PROFILE_ERROR_CHARS,
+                                    ));
                                     conn.runtime.emit(event);
                                 }
                             }
@@ -4943,9 +5030,6 @@ impl ExecutionPlan for VgiScanExec {
                         }
                         conn.runtime.emit(event);
                         return Ok(());
-                    }
-                    if let Some(capture) = &cache_capture {
-                        capture.scanned(partition, control);
                     }
                 }
                 Ok(())
