@@ -41,7 +41,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
 use datafusion::arrow::array::{Array, BooleanArray, Int64Array, StringArray, UnionArray};
@@ -124,6 +124,8 @@ pub struct VgiConnection {
     auth: Option<Arc<dyn vgi_client::auth::CatalogAuth>>,
     /// Session services shared by every clone and scan partition.
     runtime: Arc<VgiRuntime>,
+    /// Cycle-free destination for in-band worker logs.
+    worker_log_runtime: Weak<VgiRuntime>,
     /// Attachment-level veto for worker-opted-in result caching.
     cache_enabled: bool,
     /// Explicit opt-in for remote workers to nominate client-local format paths.
@@ -183,13 +185,16 @@ impl VgiConnection {
                 Box::new(vgi_client::auth::StderrInteraction),
             )) as Arc<dyn vgi_client::auth::CatalogAuth>
         });
+        let runtime = Arc::new(VgiRuntime::default());
+        let worker_log_runtime = Arc::downgrade(&runtime);
         Self {
             label: location.label(),
             location,
             pool,
             connection_options: vgi_client::ConnectionOptions::default(),
             auth,
-            runtime: Arc::new(VgiRuntime::default()),
+            runtime,
+            worker_log_runtime,
             cache_enabled: true,
             allow_local_format_paths: false,
             attach_options: Arc::new(HashMap::new()),
@@ -216,6 +221,7 @@ impl VgiConnection {
     #[must_use]
     pub fn with_runtime(mut self, runtime: Arc<VgiRuntime>) -> Self {
         self.connection_options.rpc_timeout = runtime.options().rpc_timeout;
+        self.worker_log_runtime = Arc::downgrade(&runtime);
         self.runtime = runtime;
         self
     }
@@ -254,6 +260,16 @@ impl VgiConnection {
         let mut connection = self.clone();
         connection.runtime = Arc::new(VgiRuntime::default());
         connection
+    }
+
+    fn worker_log_sink(&self) -> vgi_client::WorkerLogSink {
+        let runtime = self.worker_log_runtime.clone();
+        Arc::new(move |message| {
+            let Some(runtime) = runtime.upgrade() else {
+                return;
+            };
+            runtime.emit(worker_log_event(&message));
+        })
     }
 
     fn cache_identity_scope(&self, catalog: &str) -> Option<String> {
@@ -417,13 +433,7 @@ impl VgiConnection {
                 .acquire_with_options(&self.location, self.connection_options.clone())
                 .map_err(to_df),
         }?;
-        let runtime = Arc::downgrade(&self.runtime);
-        client.set_worker_log_sink(Arc::new(move |message| {
-            let Some(runtime) = runtime.upgrade() else {
-                return;
-            };
-            runtime.emit(worker_log_event(&message));
-        }));
+        client.set_worker_log_sink(self.worker_log_sink());
         Ok(client)
     }
 
@@ -1968,7 +1978,7 @@ pub struct VgiScanExec {
     disk_cache_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
     disk_cache_revalidation_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
     cache_revalidation_probe: Arc<OnceLock<Option<ScanCacheRevalidation>>>,
-    cache_observation: Arc<OnceLock<()>>,
+    cache_observation: Arc<ExecutionObservation>,
     cache_flight: Arc<OnceLock<crate::runtime::ResultFlightClaim>>,
     cache_flight_probe: Arc<OnceLock<Option<vgi_client::CachedEntry>>>,
     cache_flight_disk_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
@@ -1987,6 +1997,39 @@ enum ScanCacheRevalidation {
         disk_companion: Option<SharedDiskHit>,
     },
     Disk(SharedDiskHit),
+}
+
+/// Deduplicates a cache diagnostic across partitions that share one
+/// [`TaskContext`], as DataFusion's standard execution helpers do. Custom
+/// physical-plan callers determine the observation boundary through their own
+/// task-context reuse. A weak key avoids retaining completed queries.
+#[derive(Debug, Default)]
+struct ExecutionObservation {
+    active: Mutex<Vec<ExecutionObservationEntry>>,
+}
+
+#[derive(Debug)]
+struct ExecutionObservationEntry {
+    context: Weak<TaskContext>,
+    emitted: Arc<OnceLock<()>>,
+}
+
+impl ExecutionObservation {
+    fn for_context(&self, context: &Arc<TaskContext>) -> Arc<OnceLock<()>> {
+        let context = Arc::downgrade(context);
+        let mut active = self.active.lock().unwrap();
+        active.retain(|entry| entry.context.strong_count() > 0);
+        if let Some(entry) = active.iter().find(|entry| entry.context.ptr_eq(&context)) {
+            return Arc::clone(&entry.emitted);
+        }
+
+        let observation = Arc::new(OnceLock::new());
+        active.push(ExecutionObservationEntry {
+            context,
+            emitted: Arc::clone(&observation),
+        });
+        observation
+    }
 }
 
 impl fmt::Debug for SharedDiskHit {
@@ -2319,7 +2362,7 @@ impl VgiScanExec {
             disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
             disk_cache_revalidation_probe: Arc::new(tokio::sync::OnceCell::new()),
             cache_revalidation_probe: Arc::new(OnceLock::new()),
-            cache_observation: Arc::new(OnceLock::new()),
+            cache_observation: Arc::new(ExecutionObservation::default()),
             cache_flight: Arc::new(OnceLock::new()),
             cache_flight_probe: Arc::new(OnceLock::new()),
             cache_flight_disk_probe: Arc::new(tokio::sync::OnceCell::new()),
@@ -2364,7 +2407,7 @@ impl VgiScanExec {
             disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
             disk_cache_revalidation_probe: Arc::new(tokio::sync::OnceCell::new()),
             cache_revalidation_probe: Arc::new(OnceLock::new()),
-            cache_observation: Arc::new(OnceLock::new()),
+            cache_observation: Arc::new(ExecutionObservation::default()),
             cache_flight: Arc::new(OnceLock::new()),
             cache_flight_probe: Arc::new(OnceLock::new()),
             cache_flight_disk_probe: Arc::new(tokio::sync::OnceCell::new()),
@@ -2481,8 +2524,11 @@ fn scan_cache_storage_control(
 mod scan_cache_contract_tests {
     use super::{
         completed_scan_cache_control, declared_secret_dependency, executed_cache_substreams,
-        scan_cache_storage_control, worker_log_event, ScanCachePartitionOutcome, VgiConnection,
+        scan_cache_storage_control, worker_log_event, ExecutionObservation,
+        ScanCachePartitionOutcome, VgiConnection,
     };
+    use datafusion::execution::TaskContext;
+    use std::sync::Arc;
 
     #[test]
     fn declared_secret_request_is_a_dependency_even_without_resolved_rows() {
@@ -2503,6 +2549,61 @@ mod scan_cache_contract_tests {
         );
         assert!(event.catalog.is_none());
         assert!(event.function.is_none());
+    }
+
+    #[test]
+    fn metadata_worker_logs_route_to_the_owning_session() {
+        let owner = std::sync::Arc::new(crate::VgiRuntime::default());
+        let connection = VgiConnection::subprocess(["unused"]).with_runtime(owner.clone());
+        let metadata = connection.metadata_connection();
+        assert!(!std::sync::Arc::ptr_eq(&owner, &metadata.runtime));
+
+        (metadata.worker_log_sink())(vgi_client::WorkerLogMessage::new(
+            vgi_client::WorkerLogLevel::Info,
+            "metadata lookup",
+        ));
+
+        let events = owner.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "worker.log.info");
+        assert_eq!(events[0].message.as_deref(), Some("metadata lookup"));
+        assert!(metadata.runtime.events().is_empty());
+    }
+
+    #[test]
+    fn metadata_worker_log_target_does_not_retain_the_session() {
+        let owner = std::sync::Arc::new(crate::VgiRuntime::default());
+        let weak_owner = std::sync::Arc::downgrade(&owner);
+        let metadata = {
+            let connection = VgiConnection::subprocess(["unused"]).with_runtime(owner.clone());
+            connection.metadata_connection()
+        };
+        drop(owner);
+        assert!(weak_owner.upgrade().is_none());
+
+        // A late callback after session teardown is safely ignored rather than
+        // falling back to the metadata connection's private service runtime.
+        (metadata.worker_log_sink())(vgi_client::WorkerLogMessage::new(
+            vgi_client::WorkerLogLevel::Warn,
+            "late metadata log",
+        ));
+        assert!(metadata.runtime.events().is_empty());
+    }
+
+    #[test]
+    fn cache_observation_follows_task_context_identity() {
+        let observations = ExecutionObservation::default();
+        let first_context = Arc::new(TaskContext::default());
+        let first_partition = observations.for_context(&first_context);
+        let second_partition = observations.for_context(&first_context);
+        assert!(Arc::ptr_eq(&first_partition, &second_partition));
+        assert!(first_partition.set(()).is_ok());
+        assert!(second_partition.set(()).is_err());
+
+        let second_context = Arc::new(TaskContext::default());
+        let second_execution = observations.for_context(&second_context);
+        assert!(!Arc::ptr_eq(&first_partition, &second_execution));
+        assert!(second_execution.set(()).is_ok());
     }
 
     #[test]
@@ -3615,11 +3716,12 @@ impl ExecutionPlan for VgiScanExec {
     fn execute(
         &self,
         partition: usize,
-        _ctx: Arc<TaskContext>,
+        ctx: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let partition_metrics = VgiPartitionMetrics::new(&self.metrics, partition);
+        let cache_observation = self.cache_observation.for_context(&ctx);
         if let Some(reason) = self.cache_ineligible_reason {
-            if self.cache_observation.set(()).is_ok() {
+            if cache_observation.set(()).is_ok() {
                 self.conn.runtime.emit_cache_ineligible(
                     &self.catalog,
                     &format!("{}.{}", self.schema_name, self.function),
@@ -3632,7 +3734,7 @@ impl ExecutionPlan for VgiScanExec {
                 .cache_probe
                 .get_or_init(|| self.conn.runtime.result_cache().get(key))
                 .clone();
-            if cached.is_some() && self.cache_observation.set(()).is_ok() {
+            if cached.is_some() && cache_observation.set(()).is_ok() {
                 self.cache_metrics.hits.add(1);
                 let mut event = VgiEvent::new("cache.hit");
                 event.catalog = Some(self.catalog.clone());
@@ -4136,7 +4238,7 @@ impl ExecutionPlan for VgiScanExec {
                 Arc::clone(&self.cache_revalidation_probe),
                 memory_revalidation.clone(),
                 self.split_groups.is_none(),
-                Arc::clone(&self.cache_observation),
+                Arc::clone(&cache_observation),
                 Arc::clone(&self.cache_flight_probe),
                 Arc::clone(&self.cache_flight_disk_probe),
                 Arc::clone(&self.conn.runtime),

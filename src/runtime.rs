@@ -177,8 +177,9 @@ pub struct VgiEvent {
     pub split: Option<String>,
     /// Operation duration, when the event finishes an operation.
     pub duration: Option<Duration>,
-    /// Human-readable detail. Adapter-generated details never contain
-    /// credentials; `worker.log.*` text and extras are worker-controlled.
+    /// Human-readable detail. Adapter-constructed structural details never
+    /// contain credentials. Worker-originated log, RPC, exception, and error
+    /// text is untrusted and may be retained verbatim.
     pub message: Option<String>,
 }
 
@@ -219,7 +220,9 @@ pub trait VgiSecretResolver: Send + Sync + 'static {
 pub struct VgiResolvedSecret {
     /// Unique secret name used as the outer VGI secrets-batch field.
     pub name: String,
-    /// Secret properties. Credentials are never copied to logs or diagnostics.
+    /// Secret properties. The adapter never renders credentials in its
+    /// constructed structural details. Verbatim worker-originated log, RPC,
+    /// exception, and error text is outside that guarantee.
     pub fields: std::collections::BTreeMap<String, ScalarValue>,
 }
 

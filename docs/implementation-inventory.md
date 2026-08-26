@@ -59,7 +59,7 @@ DataFusion where there is no matching planning or execution seam.
   Version-scoped and transaction-scoped plans are not reused.
 - Stateless parallel streaming table-in/out calls can memoize each complete
   input batch after the worker advertises cache control. Stateful FINALIZE,
-  serial, literal-single-row, and secret-consuming calls are excluded.
+  serial, literal-single-row, and secret-dependent calls are excluded.
 - Unordered buffering functions can memoize their complete input multiset.
   Canonical row digests make the key independent of input order and DataFusion
   batch boundaries while preserving duplicates; `sink_order_dependent`
@@ -69,7 +69,7 @@ DataFusion where there is no matching planning or execution seam.
 - Stable scalar functions can opt into per-value memoization. Distinct tuples
   are sent once, partial hits send only misses, and outputs are gathered back in
   caller order. Table-input and scalar exchange misses use the same per-key
-  single-flight discipline as producers. Volatile and secret-consuming calls
+  single-flight discipline as producers. Volatile and secret-dependent calls
   take the direct path. Adapter-owned `vgi_exchange_input_dedup` and
   `vgi_result_cache_per_value` settings default on and support `SET`/`RESET`.
 - Conditional exchange failures may serve stale bytes only within the worker's
@@ -89,10 +89,15 @@ DataFusion where there is no matching planning or execution seam.
   appear as native DataFusion execution metrics and in `EXPLAIN ANALYZE`;
   result-cache statistics distinguish exchange hits, stores, and bytes served.
 - Cache admission vetoes use one credential-free reason vocabulary across
-  producer, scalar, streaming exchange, and buffered exchange execution. One
-  `cache.ineligible` event is emitted per execution rather than per producer
-  partition; values, filter contents, split tokens, identities, and secrets are
-  never included.
+  producer, scalar, streaming exchange, and buffered exchange execution.
+  Producer reporting emits one `cache.ineligible` event per standard
+  DataFrame/`execute_stream_partitioned` run, deduplicated across partitions
+  sharing its `TaskContext`; custom physical-plan callers determine that
+  boundary through task-context reuse. Scalar and table-input reporting is per
+  UDF worker batch or exchange invocation because DataFusion's async scalar API
+  exposes no SQL-query execution identity. Values, filter contents, split
+  tokens, identities, and secrets are never included in these adapter-generated
+  veto events.
 - SQL-owned `vgi_result_cache_max_entry_bytes`,
   `vgi_result_cache_max_bytes`, and `vgi_result_cache_max_entries` settings
   update the live session cache immediately. Reductions evict entries that no
@@ -102,7 +107,7 @@ DataFusion where there is no matching planning or execution seam.
 The durable tier is intentionally narrower than the memory tier: it currently
 covers bounded producer and split scans, not scalar values, streaming or
 buffered table-input exchanges, correlated 1:N calls, dynamic-filtered scans,
-unbounded scans, or secret-consuming calls. Stale-while-revalidate also remains
+unbounded scans, or secret-dependent calls. Stale-while-revalidate also remains
 deferred. Eviction recency is approximate and process-local, although bounds
 and publication are coordinated across processes. Crash-durability relies on a
 local Unix filesystem with advisory locks, atomic same-filesystem rename, and
@@ -166,10 +171,13 @@ replay remains physically present until release and a later reap.
 - An embedder can install an asynchronous `VgiSecretResolver`. Producer,
   table, scalar, and input binds resolve typed, scoped secret requests and
   retry the bind once. Aggregate declarations resolve their static secrets.
-- Secret values stay out of SQL, cache keys, events, and diagnostic tables.
-  Secret-dependent plan, producer, exchange, and per-value results bypass
-  caches so resolver rotation cannot reuse stale credential-derived output.
-  SQL `CREATE SECRET` and raw secret values in `ATTACH` remain unsupported.
+- The adapter never copies resolved secret values into SQL, cache keys, or its
+  constructed structural event fields. Secret-dependent plan, producer,
+  exchange, and per-value results bypass caches so resolver rotation cannot
+  reuse stale credential-derived output. Worker-originated log, RPC, exception,
+  and error text is untrusted and may be retained verbatim in diagnostics; a
+  worker is responsible for not rendering secrets there. SQL `CREATE SECRET`
+  and raw secret values in `ATTACH` remain unsupported.
 - Deterministic coverage verifies multiple same-type, differently scoped
   secrets in one bind and rejects duplicate resolved names without exposing
   credential values.
@@ -183,6 +191,10 @@ replay remains physically present until release and a later reap.
   HTTP connections as severity-specific `worker.log.*` events to that same sink
   and SQL history, with structured extras retained as JSON text. A standalone
   `vgi-client` uses the Rust `log` facade when no embedding sink is installed.
+  These worker-controlled payloads are untrusted and may contain anything the
+  worker chooses to log, including sensitive values; the adapter does not redact
+  them. Worker-originated RPC, exception, and error text carried into error
+  diagnostics has the same trust boundary.
   The protocol log message does not carry request/function correlation; worker
   access logs and subprocess stderr remain separate operator-facing channels.
 - `VgiLocalityHook` exposes planned split locations to an embedding scheduler.

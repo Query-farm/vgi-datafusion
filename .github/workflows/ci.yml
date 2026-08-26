@@ -20,6 +20,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
+  # Keep the sibling source reviewable and reproducible. Update this hash only
+  # with the vgi-datafusion compatibility change that has been reviewed against it.
+  VGI_RUST_REVISION: "bf802e88bc9dc374ebe030941deb2bf19e779aa5"
+  VGI_RUST_REGISTRY_VERSION: "0.31.0"
 
 jobs:
   quality:
@@ -38,7 +42,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Query-farm/vgi-rust
-          ref: main
+          ref: bf802e88bc9dc374ebe030941deb2bf19e779aa5 # Reviewed worker-log API revision.
           path: vgi-rust
           persist-credentials: false
 
@@ -66,7 +70,9 @@ jobs:
           rustc --version
           cargo --version
           printf 'vgi-datafusion %s\n' "$(git -C vgi-datafusion rev-parse HEAD)"
-          printf 'vgi-rust       %s\n' "$(git -C vgi-rust rev-parse HEAD)"
+          vgi_rust_revision="$(git -C vgi-rust rev-parse HEAD)"
+          printf 'vgi-rust       %s (expected %s)\n' "$vgi_rust_revision" "$VGI_RUST_REVISION"
+          test "$vgi_rust_revision" = "$VGI_RUST_REVISION"
           printf 'datafusion     %s\n' "$(git -C datafusion rev-parse HEAD)"
 
       - name: Build VGI example worker fixture
@@ -83,6 +89,57 @@ jobs:
       - name: Resolve dependencies
         working-directory: vgi-datafusion
         run: cargo generate-lockfile
+
+      - name: Check package and registry reproducibility
+        working-directory: vgi-datafusion
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_files="${RUNNER_TEMP}/vgi-datafusion-package-files.txt"
+          cargo package --list >"$package_files"
+          for required in Cargo.toml Cargo.toml.orig LICENSE README.md src/lib.rs; do
+            grep -Fqx "$required" "$package_files"
+          done
+          if grep -Eq '(^|/)(target|\.git)/' "$package_files"; then
+            echo "::error::package contains build or repository internals"
+            exit 1
+          fi
+
+          registry_ready=true
+          for package in vgi-client vgi-protocol; do
+            # Query the live crates.io API rather than accepting a possibly
+            # stale local index after a failed update. Network, rate-limit, and
+            # unexpected API responses fail closed.
+            api_response="${RUNNER_TEMP}/${package}-registry.json"
+            if ! http_code="$(curl --silent --show-error --location \
+              --retry 3 --retry-delay 2 --retry-all-errors \
+              --user-agent 'Query-farm-vgi-datafusion-ci/0.1 (https://github.com/Query-farm/vgi-datafusion)' \
+              --output "$api_response" --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/${package}/${VGI_RUST_REGISTRY_VERSION}")"; then
+              echo "::error::could not query crates.io for ${package}@${VGI_RUST_REGISTRY_VERSION}"
+              exit 1
+            fi
+            if [[ "$http_code" == 200 ]]; then
+              actual_version="$(jq -er '.version.num' "$api_response")"
+              test "$actual_version" = "$VGI_RUST_REGISTRY_VERSION"
+            elif [[ "$http_code" == 404 ]]; then
+              registry_ready=false
+              echo "::notice::${package}@${VGI_RUST_REGISTRY_VERSION} is not published"
+            else
+              cat "$api_response" >&2
+              echo "::error::crates.io returned HTTP ${http_code} for ${package}@${VGI_RUST_REGISTRY_VERSION}"
+              exit 1
+            fi
+          done
+          if [[ "$registry_ready" == true ]]; then
+            # Verification occurs from Cargo's normalized package, where path
+            # dependencies are removed and the VGI crates come from crates.io.
+            cargo publish --dry-run --locked
+          else
+            # Exact-version absence was established from the live API above.
+            echo "::notice::registry-only publish dry-run deferred until both VGI ${VGI_RUST_REGISTRY_VERSION} crates are published"
+          fi
 
       - name: Check all targets
         working-directory: vgi-datafusion

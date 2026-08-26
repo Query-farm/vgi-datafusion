@@ -205,7 +205,11 @@ sink; structured extras are retained as JSON text. (`vgi-client` uses the Rust
 `log` facade when no embedding sink is installed.) The current wire message has
 no request or function identifier, so these events cannot yet be correlated to
 one call. Worker access logs and subprocess stderr are separate operator-facing
-channels and are not forwarded into DataFusion diagnostics.
+channels and are not forwarded into DataFusion diagnostics. In-band message text
+and extras are untrusted, worker-controlled payloads and are retained verbatim;
+the adapter cannot guarantee that a worker will not log sensitive values.
+Worker-originated RPC, exception, and error text may likewise be retained in
+error diagnostics and must be treated as untrusted.
 
 For an embedded application, put a configured `VgiRuntime` into the
 `SessionConfig` extensions before constructing the `SessionContext`. The same
@@ -273,13 +277,18 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   immediate-stale conditional revalidation, coalesce identical misses, and honor
   worker-authorized stale-if-error. A worker that withdraws caching with
   `no_store` or another ineligible policy evicts the stale bytes instead of
-  replaying them. A call is secret-consuming as soon as its first bind declares
+  replaying them. A call is secret-dependent as soon as its first bind declares
   a secret requirement, even when the host resolver returns no matching rows;
   those calls bypass these caches. Native
   DataFusion metrics expose producer cache/worker activity in `EXPLAIN ANALYZE`.
   Cache diagnostics distinguish exchange hits, stores, and bytes served.
-  Producer, scalar, and table-input executions that bypass caching emit one
-  credential-free `cache.ineligible` event with a stable `reason=...` value.
+  Producer cache vetoes emit one credential-free `cache.ineligible` event per
+  standard DataFrame/`execute_stream_partitioned` run, deduplicated across
+  partitions sharing its `TaskContext`. Custom physical-plan callers determine
+  that boundary through their own task-context reuse. Scalar and table-input
+  vetoes emit the same stable `reason=...` vocabulary per UDF worker batch or
+  exchange invocation; DataFusion's async scalar API exposes no SQL-query
+  execution identity on which to deduplicate multiple batches.
   `vgi_result_cache_max_entry_bytes`, `vgi_result_cache_max_bytes`, and
   `vgi_result_cache_max_entries` apply live bounded-memory limits through SQL;
   lowering a limit evicts entries that no longer fit and `RESET` restores the
@@ -298,7 +307,7 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   stale result requires an atomic all-partition agreement protocol that is not
   implemented. The durable tier is not used for exchange, scalar, correlated
   1:N, dynamic-filtered, unbounded,
-  ordered-split, secret-consuming, or non-catalog-scoped calls. Its recency
+  ordered-split, secret-dependent, or non-catalog-scoped calls. Its recency
   ordering is approximate per process, and its crash-safety contract requires
   a local Unix filesystem with advisory locks, atomic rename, and directory
   `fsync`. Constructor limits govern committed Arrow payload admission rather
