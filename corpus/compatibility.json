@@ -51,7 +51,7 @@
       "title": "Static and dynamic filter pushdown",
       "status": "partial",
       "groups": ["filter_pushdown"],
-      "remaining": ["wide and engine-specific scalar types", "large hash lookup and multi-column dynamic join filters"]
+      "remaining": ["wide and engine-specific scalar types", "continued runtime refinement after an init-time membership set", "OR membership pushdown and very large join-key state sizing"]
     },
     {
       "id": "splits",

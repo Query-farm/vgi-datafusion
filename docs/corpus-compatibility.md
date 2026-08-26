@@ -206,9 +206,12 @@ engine work to a minimum:
    mutation RPC wrappers and transaction/cache invalidation semantics and are
    currently `not_started`.
 9. **Remaining optimizer hints.** Catalog and bound-function min/max pruning
-   now use DataFusion's existing pruning builder. ORDER BY, TABLESAMPLE, late
-   materialization, large hash-lookup filters, and multi-column dynamic
-   membership remain explicit partial features.
+   now use DataFusion's existing pruning builder. Static SQL membership and the
+   initial DataFusion runtime membership snapshot use VGI v2 `join_keys`, with
+   the side IPC included in split planning, scan initialization, and cache
+   identity. ORDER BY, TABLESAMPLE, late materialization, continued refinement
+   after an init-time membership set, OR membership pushdown, and very large
+   join-key state sizing remain explicit partial features.
 
 Focused regression contracts for projection pushdown, narrow-bind mismatch,
 and unary error propagation are already marked `complete`; they establish the

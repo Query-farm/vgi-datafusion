@@ -1125,7 +1125,7 @@ impl VgiTableProvider {
                         function: format!("{}.{}", self.schema_name, self.function),
                         arguments,
                         projection: projection.clone(),
-                        filters: pushdown.blob.clone(),
+                        filters: pushdown.cache_identity(),
                         row_limit: limit.and_then(|value| i64::try_from(value).ok()),
                         target_partitions,
                         catalog_version: self.catalog_version,
@@ -1178,6 +1178,7 @@ impl VgiTableProvider {
                     let opts = PlanOptions {
                         projection,
                         pushdown_filters: pushdown.blob,
+                        join_keys: (!pushdown.join_keys.is_empty()).then_some(pushdown.join_keys),
                         // Columns the filter reads but the projection may omit. The
                         // worker keys a pushed filter by its position in what it emits,
                         // so without these a filter on an unprojected column evaluates
@@ -1726,7 +1727,7 @@ impl VgiScanExec {
                         function: format!("{schema_name}.{function}"),
                         arguments,
                         projection: projection.clone(),
-                        filters: pushdown.blob.clone(),
+                        filters: pushdown.cache_identity(),
                         catalog_version,
                         at: at.as_ref().map(|at| (at.unit.clone(), at.value.clone())),
                         settings: Vec::new(),
@@ -2516,7 +2517,12 @@ impl ExecutionPlan for VgiScanExec {
                     snapshot_dynamic_filters(&dynamic_filters)?;
                 let initial_dynamic =
                     filters::serialize_physical(&dynamic_snapshot, &scan_schema, true)?;
-                let initial_pushdown = filters::merge(&pushdown, &initial_dynamic.pushdown)?;
+                let initial_pushdown = filters::merge(&pushdown, &initial_dynamic)?;
+                // Join-key side IPC is init-only. If either the SQL predicate
+                // or the first runtime snapshot contains membership keys, keep
+                // that complete initial predicate active rather than replacing
+                // it with continuation metadata that cannot carry the keys.
+                let can_refine_on_continuation = initial_pushdown.join_keys.is_empty();
 
                 // An EMPTY projection is `count(*)`: DataFusion wants row counts
                 // and no columns. `[]` cannot be sent as-is — "no columns" reads
@@ -2556,8 +2562,8 @@ impl ExecutionPlan for VgiScanExec {
                 let opts = ScanOptions {
                     projection: push,
                     pushdown_filters: initial_pushdown.blob.clone(),
-                    join_keys: (!initial_dynamic.join_keys.is_empty())
-                        .then_some(initial_dynamic.join_keys),
+                    join_keys: (!initial_pushdown.join_keys.is_empty())
+                        .then_some(initial_pushdown.join_keys.clone()),
                     // See PlanOptions above: the filter's columns must be
                     // requested even when the projection omits them, or the
                     // worker evaluates the predicate against the wrong column.
@@ -2583,8 +2589,13 @@ impl ExecutionPlan for VgiScanExec {
                     if generation != dynamic_generation {
                         let (stable_generation, snapshots) =
                             snapshot_dynamic_filters(&dynamic_filters)?;
-                        let dynamic = filters::serialize_physical(&snapshots, &scan_schema, false)?;
-                        tick_pushdown = Some(filters::merge(&pushdown, &dynamic.pushdown)?);
+                        if can_refine_on_continuation {
+                            let dynamic =
+                                filters::serialize_physical(&snapshots, &scan_schema, false)?;
+                            tick_pushdown = Some(filters::merge(&pushdown, &dynamic)?);
+                        } else {
+                            tick_pushdown = None;
+                        }
                         dynamic_generation = stable_generation;
                     }
                     let next = match scan.next_batch_with_pushdown_filters(

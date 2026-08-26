@@ -7,7 +7,8 @@
 //! An Arrow IPC batch where column 0 is a one-row string holding a JSON array of
 //! filter specs — its field carries `vgi_filter_version` metadata — and columns
 //! 1.. carry the constants, so a spec's `value_ref: N` names column `N + 1` and
-//! reads row 0. Top-level specs combine with AND.
+//! reads row 0. IN sets travel as VGI v2 side join-key batches, referenced by a
+//! `join_keys` spec. Top-level specs combine with AND.
 //!
 //! # Why every filter is reported `Inexact`
 //!
@@ -98,6 +99,20 @@ impl<'a> Builder<'a> {
         self.constants.len() - 1
     }
 
+    fn checkpoint(&self) -> (usize, usize, usize) {
+        (
+            self.constants.len(),
+            self.referenced_columns.len(),
+            self.join_keys.len(),
+        )
+    }
+
+    fn rollback(&mut self, checkpoint: (usize, usize, usize)) {
+        self.constants.truncate(checkpoint.0);
+        self.referenced_columns.truncate(checkpoint.1);
+        self.join_keys.truncate(checkpoint.2);
+    }
+
     /// The column's position in the table's bind-time schema.
     ///
     /// Reported alongside the name because the wire spec carries both; the
@@ -146,23 +161,22 @@ impl<'a> Builder<'a> {
                 }
                 let name = column_name(&list.expr)?;
                 let index = self.column_index(&name)?;
-                // Every element becomes its own constant column, mirroring how
-                // the C++ extension emits an IN set.
-                let mut refs = Vec::with_capacity(list.list.len());
+                let mut values = Vec::with_capacity(list.list.len());
                 for item in &list.list {
                     let Expr::Literal(v, _) = item else {
                         return None;
                     };
-                    refs.push(self.add_constant(Constant::from_scalar(v)?));
+                    // Keep the same supported scalar set as ordinary
+                    // comparisons, including its deliberate NULL rejection.
+                    Constant::from_scalar(v)?;
+                    values.push(v.clone());
                 }
-                if refs.is_empty() {
-                    return None;
-                }
+                self.join_keys.push(join_keys_ipc(&name, values).ok()?);
                 Some(serde_json::json!({
-                    "type": "in",
+                    "type": "join_keys",
                     "column_name": name,
                     "column_index": index,
-                    "value_refs": refs,
+                    "keys_column": name,
                 }))
             }
             _ => None,
@@ -216,16 +230,11 @@ impl<'a> Builder<'a> {
                     "keys_column": name,
                 }));
             }
-            let mut refs = Vec::with_capacity(values.len());
-            for value in &values {
-                refs.push(self.add_constant(Constant::from_scalar(value)?));
-            }
-            return Some(serde_json::json!({
-                "type": "in",
-                "column_name": name,
-                "column_index": index,
-                "value_refs": refs,
-            }));
+            // Join-key side batches cannot ride continuation metadata. The
+            // initial snapshot uses the side batch above; later snapshots keep
+            // any accompanying range predicates but omit membership rather
+            // than emitting the obsolete inline IN shape.
+            return None;
         }
         None
     }
@@ -260,17 +269,28 @@ impl<'a> Builder<'a> {
     ) -> Option<serde_json::Value> {
         let op = *binary.op();
         if op == Operator::And || op == Operator::Or {
+            let checkpoint = self.checkpoint();
             let left = self.build_physical(binary.left().as_ref(), side_join_keys);
             let right = self.build_physical(binary.right().as_ref(), side_join_keys);
-            return match op {
+            let combined = match op {
                 Operator::And => match (left, right) {
                     (Some(left), Some(right)) => self.conjunction("and", left, right),
                     (Some(one), None) | (None, Some(one)) => Some(one),
                     (None, None) => None,
                 },
-                Operator::Or => self.conjunction("or", left?, right?),
+                Operator::Or => match (left, right) {
+                    (Some(left), Some(right)) => self.conjunction("or", left, right),
+                    _ => None,
+                },
                 _ => unreachable!(),
             };
+            if combined.is_none()
+                || (op == Operator::Or && combined.as_ref().is_some_and(contains_join_keys))
+            {
+                self.rollback(checkpoint);
+                return None;
+            }
+            return combined;
         }
         let (name, value, op) = match (
             physical_column_name(binary.left().as_ref()),
@@ -351,9 +371,16 @@ impl<'a> Builder<'a> {
         // result — the worker would omit rows the predicate accepts, and no
         // amount of re-filtering above the scan brings them back.
         if op == Operator::Or {
-            let l = self.build(left)?;
-            let r = self.build(right)?;
-            return self.conjunction("or", l, r);
+            let checkpoint = self.checkpoint();
+            let combined = self
+                .build(left)
+                .zip(self.build(right))
+                .and_then(|(left, right)| self.conjunction("or", left, right));
+            if combined.is_none() || combined.as_ref().is_some_and(contains_join_keys) {
+                self.rollback(checkpoint);
+                return None;
+            }
+            return combined;
         }
 
         // `col <op> literal`, or `literal <op> col` with the operator flipped.
@@ -374,6 +401,17 @@ impl<'a> Builder<'a> {
             "op": token,
             "value_ref": value_ref,
         }))
+    }
+}
+
+fn contains_join_keys(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.get("type").and_then(serde_json::Value::as_str) == Some("join_keys")
+                || object.values().any(contains_join_keys)
+        }
+        serde_json::Value::Array(values) => values.iter().any(contains_join_keys),
+        _ => false,
     }
 }
 
@@ -466,14 +504,31 @@ pub(crate) struct Pushdown {
     pub blob: Option<Vec<u8>>,
     /// Bind-schema positions the specs referenced, first-seen order.
     pub columns: Vec<i64>,
+    /// VGI v2 single-column IPC batches referenced by `join_keys` specs.
+    pub join_keys: Vec<Vec<u8>>,
 }
 
-/// A runtime physical-expression pushdown and any side batches referenced by
-/// its `join_keys` specs.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DynamicPushdown {
-    pub pushdown: Pushdown,
-    pub join_keys: Vec<Vec<u8>>,
+impl Pushdown {
+    /// Stable cache identity for both the filter AST and its out-of-line IN
+    /// values. The wire blob alone no longer identifies a scan once the same
+    /// `join_keys` spec can name different side batches.
+    pub(crate) fn cache_identity(&self) -> Option<Vec<u8>> {
+        let blob = self.blob.as_ref()?;
+        if self.join_keys.is_empty() {
+            return Some(blob.clone());
+        }
+        let mut identity = b"vgi-pushdown-cache-v2".to_vec();
+        append_identity_part(&mut identity, blob);
+        for keys in &self.join_keys {
+            append_identity_part(&mut identity, keys);
+        }
+        Some(identity)
+    }
+}
+
+fn append_identity_part(identity: &mut Vec<u8>, part: &[u8]) {
+    identity.extend_from_slice(&(part.len() as u64).to_le_bytes());
+    identity.extend_from_slice(part);
 }
 
 pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown> {
@@ -487,19 +542,22 @@ pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown
     if specs.is_empty() {
         return Ok(Pushdown::default());
     }
-    finish_pushdown(specs, b.constants, b.referenced_columns)
+    let mut pushdown = finish_pushdown(specs, b.constants, b.referenced_columns)?;
+    pushdown.join_keys = b.join_keys;
+    Ok(pushdown)
 }
 
 /// Serialize snapshots of DataFusion runtime filters.
 ///
 /// With `side_join_keys`, physical `IN` lists use VGI's `join_keys` side IPC
 /// batches (schema metadata `vgi_join_keys_version=2`). Continuation ticks do
-/// not carry those side batches, so callers use `false` there to inline values.
+/// not carry those side batches, so callers use `false` there to retain only
+/// the independently expressible constant/range parts of a snapshot.
 pub(crate) fn serialize_physical(
     exprs: &[Arc<dyn PhysicalExpr>],
     schema: &SchemaRef,
     side_join_keys: bool,
-) -> DFResult<DynamicPushdown> {
+) -> DFResult<Pushdown> {
     let mut b = Builder {
         schema,
         constants: Vec::new(),
@@ -510,11 +568,9 @@ pub(crate) fn serialize_physical(
     for expr in exprs {
         b.build_physical_top(expr.as_ref(), side_join_keys, &mut specs);
     }
-    let pushdown = finish_pushdown(specs, b.constants, b.referenced_columns)?;
-    Ok(DynamicPushdown {
-        pushdown,
-        join_keys: b.join_keys,
-    })
+    let mut pushdown = finish_pushdown(specs, b.constants, b.referenced_columns)?;
+    pushdown.join_keys = b.join_keys;
+    Ok(pushdown)
 }
 
 fn finish_pushdown(
@@ -558,6 +614,7 @@ fn finish_pushdown(
     Ok(Pushdown {
         blob: Some(buf),
         columns: referenced_columns,
+        join_keys: Vec::new(),
     })
 }
 
@@ -636,6 +693,12 @@ pub(crate) fn merge(left: &Pushdown, right: &Pushdown) -> DFResult<Pushdown> {
     Ok(Pushdown {
         blob: Some(out),
         columns: referenced_columns,
+        join_keys: left
+            .join_keys
+            .iter()
+            .chain(&right.join_keys)
+            .cloned()
+            .collect(),
     })
 }
 
@@ -802,19 +865,59 @@ mod tests {
     }
 
     #[test]
-    fn an_in_list_hoists_every_element() {
+    fn a_static_in_list_uses_v2_join_key_side_ipc() {
         let e = col("n").in_list(vec![lit(1i64), lit(2i64), lit(3i64)], false);
-        let bytes = serialize(&[e], &schema()).unwrap().blob.unwrap();
+        let pushdown = serialize(&[e], &schema()).unwrap();
+        let bytes = pushdown.blob.unwrap();
         let (specs, batch) = decode(&bytes);
-        assert_eq!(specs[0]["type"], "in");
-        assert_eq!(specs[0]["value_refs"].as_array().unwrap().len(), 3);
-        assert_eq!(batch.num_columns(), 4, "spec column plus three constants");
+        assert_eq!(specs[0]["type"], "join_keys");
+        assert_eq!(specs[0]["keys_column"], "n");
+        assert!(specs[0].get("value_ref").is_none());
+        assert_eq!(batch.num_columns(), 1, "values ride in the side batch");
+        assert_eq!(pushdown.join_keys.len(), 1);
+        let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&pushdown.join_keys[0]),
+            None,
+        )
+        .unwrap();
+        let keys = reader.next().unwrap().unwrap();
+        assert_eq!(keys.num_rows(), 3);
+        assert_eq!(
+            keys.schema().metadata().get("vgi_join_keys_version"),
+            Some(&"2".to_string())
+        );
     }
 
     #[test]
     fn a_negated_in_list_is_left_to_datafusion() {
         let e = col("n").in_list(vec![lit(1i64)], true);
         assert!(serialize(&[e], &schema()).unwrap().blob.is_none());
+    }
+
+    #[test]
+    fn an_or_containing_join_keys_is_left_to_datafusion() {
+        let left = col("n").in_list(vec![lit(1_i64), lit(2_i64)], false);
+        let right = col("n").eq(lit(9_i64));
+        let pushdown = serialize(&[left.or(right)], &schema()).unwrap();
+        assert!(pushdown.blob.is_none());
+        assert!(pushdown.columns.is_empty());
+        assert!(pushdown.join_keys.is_empty());
+    }
+
+    #[test]
+    fn join_key_values_participate_in_cache_identity() {
+        let one = serialize(
+            &[col("n").in_list(vec![lit(1_i64), lit(2_i64)], false)],
+            &schema(),
+        )
+        .unwrap();
+        let two = serialize(
+            &[col("n").in_list(vec![lit(3_i64), lit(4_i64)], false)],
+            &schema(),
+        )
+        .unwrap();
+        assert_eq!(one.blob, two.blob, "the filter AST names the side batch");
+        assert_ne!(one.cache_identity(), two.cache_identity());
     }
 
     #[test]
@@ -959,7 +1062,7 @@ mod tests {
         let dynamic =
             serialize_physical(&[Arc::new(list) as Arc<dyn PhysicalExpr>], &schema(), true)
                 .unwrap();
-        let (specs, batch) = decode(dynamic.pushdown.blob.as_deref().unwrap());
+        let (specs, batch) = decode(dynamic.blob.as_deref().unwrap());
         assert_eq!(specs[0]["type"], "join_keys");
         assert_eq!(specs[0]["keys_column"], "n");
         assert_eq!(batch.num_columns(), 1, "values ride in the side batch");
@@ -979,17 +1082,35 @@ mod tests {
     }
 
     #[test]
-    fn physical_runtime_filter_can_inline_values_for_continuation_ticks() {
+    fn physical_runtime_range_filter_can_ride_continuation_ticks() {
         let expression = Arc::new(PhysicalBinaryExpr::new(
             physical_col("n", &schema()).unwrap(),
             Operator::Gt,
             physical_lit(10_i64),
         )) as Arc<dyn PhysicalExpr>;
         let dynamic = serialize_physical(&[expression], &schema(), false).unwrap();
-        let (specs, batch) = decode(dynamic.pushdown.blob.as_deref().unwrap());
+        let (specs, batch) = decode(dynamic.blob.as_deref().unwrap());
         assert_eq!(specs[0]["type"], "constant");
         assert_eq!(specs[0]["op"], "gt");
         assert_eq!(batch.num_columns(), 2);
+        assert!(dynamic.join_keys.is_empty());
+    }
+
+    #[test]
+    fn physical_in_filter_is_omitted_from_continuation_metadata() {
+        let needle = physical_col("n", &schema()).unwrap();
+        let list = InListExpr::try_new(
+            needle,
+            vec![physical_lit(2_i64), physical_lit(4_i64)],
+            false,
+            &schema(),
+        )
+        .unwrap();
+        let dynamic =
+            serialize_physical(&[Arc::new(list) as Arc<dyn PhysicalExpr>], &schema(), false)
+                .unwrap();
+        assert!(dynamic.blob.is_none());
+        assert!(dynamic.columns.is_empty());
         assert!(dynamic.join_keys.is_empty());
     }
 
@@ -1002,11 +1123,26 @@ mod tests {
             physical_lit(10_i64),
         )) as Arc<dyn PhysicalExpr>;
         let runtime = serialize_physical(&[expression], &schema(), false).unwrap();
-        let merged = merge(&static_filter, &runtime.pushdown).unwrap();
+        let merged = merge(&static_filter, &runtime).unwrap();
         let (specs, batch) = decode(merged.blob.as_deref().unwrap());
         assert_eq!(specs.as_array().unwrap().len(), 2);
         assert_eq!(specs[0]["value_ref"], 0);
         assert_eq!(specs[1]["value_ref"], 1);
         assert_eq!(batch.num_columns(), 3);
+    }
+
+    #[test]
+    fn merging_pushdowns_preserves_join_key_side_batches() {
+        let membership = serialize(
+            &[col("n").in_list(vec![lit(1_i64), lit(3_i64)], false)],
+            &schema(),
+        )
+        .unwrap();
+        let bound = serialize(&[col("n").lt(lit(10_i64))], &schema()).unwrap();
+        let merged = merge(&membership, &bound).unwrap();
+        assert_eq!(merged.join_keys.len(), 1);
+        let (specs, _) = decode(merged.blob.as_deref().unwrap());
+        assert_eq!(specs[0]["type"], "join_keys");
+        assert_eq!(specs[1]["type"], "constant");
     }
 }
