@@ -112,7 +112,12 @@ fn supported_dictionary_value_type(data_type: &DataType) -> bool {
 
 /// Accumulates specs and their constants while walking the expression tree.
 struct Builder<'a> {
+    /// Full DataFusion-facing table schema. Physical column indexes may be
+    /// relative to a projected scan, so runtime filters resolve by name here.
     schema: &'a SchemaRef,
+    /// Full worker bind schema. VGI column names, indexes, and
+    /// `filter_columns` are expressed in this coordinate system.
+    remote_schema: &'a SchemaRef,
     constants: Vec<Constant>,
     /// Bind-schema positions of every column a spec referenced, in first-seen
     /// order.
@@ -155,35 +160,41 @@ impl<'a> Builder<'a> {
         if values.is_empty() || values.iter().any(|v| Constant::from_scalar(v).is_none()) {
             return None;
         }
-        let keys = join_keys_ipc(&name, values).ok()?;
-        let index = self.column_index(&name)?;
+        let (remote_name, index) = self.remote_column(&name)?;
+        let keys = join_keys_ipc(&remote_name, values).ok()?;
         self.join_keys.push(keys);
         Some(serde_json::json!({
             "type": "join_keys",
-            "column_name": name,
+            "column_name": remote_name,
             "column_index": index,
-            "keys_column": name,
+            "keys_column": remote_name,
         }))
     }
 
-    /// The column's position in the table's bind-time schema.
+    /// Resolve a DataFusion-facing column name to the worker's full bind schema.
     ///
     /// Reported alongside the name because the wire spec carries both; the
     /// worker matches on the name, and the index is relative to the *unprojected*
     /// schema the worker itself bound.
-    fn column_index(&mut self, name: &str) -> Option<i64> {
+    fn remote_column(&mut self, name: &str) -> Option<(String, i64)> {
         let idx = self
             .schema
             .index_of(name)
             .ok()
             .map(|i| i64::try_from(i).unwrap_or(0))?;
+        let remote_name = self
+            .remote_schema
+            .fields()
+            .get(usize::try_from(idx).ok()?)?
+            .name()
+            .clone();
         // Recorded on the way through, so a column can only be referenced by a
         // spec if it also reaches `filter_columns`. Deriving the two separately
         // is what lets them drift.
         if !self.referenced_columns.contains(&idx) {
             self.referenced_columns.push(idx);
         }
-        Some(idx)
+        Some((remote_name, idx))
     }
 
     /// Translate one predicate, or `None` if it is not expressible.
@@ -191,19 +202,21 @@ impl<'a> Builder<'a> {
         match expr {
             Expr::BinaryExpr(BinaryExpr { left, op, right }) => self.binary(left, *op, right),
             Expr::IsNull(inner) => {
-                let name = column_name(inner)?;
+                let name = column_name(inner, self.schema)?;
+                let (remote_name, index) = self.remote_column(&name)?;
                 Some(serde_json::json!({
                     "type": "is_null",
-                    "column_name": name,
-                    "column_index": self.column_index(&name)?,
+                    "column_name": remote_name,
+                    "column_index": index,
                 }))
             }
             Expr::IsNotNull(inner) => {
-                let name = column_name(inner)?;
+                let name = column_name(inner, self.schema)?;
+                let (remote_name, index) = self.remote_column(&name)?;
                 Some(serde_json::json!({
                     "type": "is_not_null",
-                    "column_name": name,
-                    "column_index": self.column_index(&name)?,
+                    "column_name": remote_name,
+                    "column_index": index,
                 }))
             }
             Expr::InList(list) => {
@@ -212,7 +225,7 @@ impl<'a> Builder<'a> {
                 if list.negated {
                     return None;
                 }
-                let name = column_name(&list.expr)?;
+                let name = column_name(&list.expr, self.schema)?;
                 let mut values = Vec::with_capacity(list.list.len());
                 for item in &list.list {
                     values.push(literal(item)?);
@@ -235,26 +248,28 @@ impl<'a> Builder<'a> {
             return self.physical_binary(binary, side_join_keys);
         }
         if let Some(is_null) = expr.downcast_ref::<IsNullExpr>() {
-            let name = physical_column_name(is_null.arg().as_ref())?;
+            let name = physical_column_name(is_null.arg().as_ref(), self.schema)?;
+            let (remote_name, index) = self.remote_column(&name)?;
             return Some(serde_json::json!({
                 "type": "is_null",
-                "column_name": name,
-                "column_index": self.column_index(&name)?,
+                "column_name": remote_name,
+                "column_index": index,
             }));
         }
         if let Some(is_not_null) = expr.downcast_ref::<IsNotNullExpr>() {
-            let name = physical_column_name(is_not_null.arg().as_ref())?;
+            let name = physical_column_name(is_not_null.arg().as_ref(), self.schema)?;
+            let (remote_name, index) = self.remote_column(&name)?;
             return Some(serde_json::json!({
                 "type": "is_not_null",
-                "column_name": name,
-                "column_index": self.column_index(&name)?,
+                "column_name": remote_name,
+                "column_index": index,
             }));
         }
         if let Some(list) = expr.downcast_ref::<InListExpr>() {
             if list.negated() || list.is_empty() {
                 return None;
             }
-            let name = physical_column_name(list.expr().as_ref())?;
+            let name = physical_column_name(list.expr().as_ref(), self.schema)?;
             let values = list
                 .list()
                 .iter()
@@ -321,7 +336,7 @@ impl<'a> Builder<'a> {
         if list.negated() || list.is_empty() {
             return None;
         }
-        let columns = physical_struct_columns(list.expr().as_ref())?;
+        let columns = physical_struct_columns(list.expr().as_ref(), self.schema)?;
         if columns.len() < 2
             || columns
                 .iter()
@@ -363,7 +378,7 @@ impl<'a> Builder<'a> {
     ) -> Option<serde_json::Value> {
         let op = *binary.op();
         if op == Operator::Or && side_join_keys {
-            if let Some((name, values)) = physical_or_equalities(binary) {
+            if let Some((name, values)) = physical_or_equalities(binary, self.schema) {
                 return self.membership(name, values);
             }
         }
@@ -392,24 +407,24 @@ impl<'a> Builder<'a> {
             return combined;
         }
         let (name, value, op) = match (
-            physical_column_name(binary.left().as_ref()),
+            physical_column_name(binary.left().as_ref(), self.schema),
             physical_literal(binary.right().as_ref()),
         ) {
             (Some(name), Some(value)) => (name, value, op),
             _ => match (
                 physical_literal(binary.left().as_ref()),
-                physical_column_name(binary.right().as_ref()),
+                physical_column_name(binary.right().as_ref(), self.schema),
             ) {
                 (Some(value), Some(name)) => (name, value, flip(op)?),
                 _ => return None,
             },
         };
-        let index = self.column_index(&name)?;
+        let (remote_name, index) = self.remote_column(&name)?;
         let token = op_token(op)?;
         let value_ref = self.add_constant(Constant::from_scalar(&value)?);
         Some(serde_json::json!({
             "type": "constant",
-            "column_name": name,
+            "column_name": remote_name,
             "column_index": index,
             "op": token,
             "value_ref": value_ref,
@@ -446,10 +461,14 @@ impl<'a> Builder<'a> {
         if right.get("column_name")?.as_str()? != name {
             return None;
         }
+        let index = left.get("column_index")?.as_i64()?;
+        if right.get("column_index")?.as_i64()? != index {
+            return None;
+        }
         Some(serde_json::json!({
             "type": kind,
             "column_name": name,
-            "column_index": self.column_index(&name)?,
+            "column_index": index,
             "children": [left, right],
         }))
     }
@@ -470,7 +489,7 @@ impl<'a> Builder<'a> {
         // result — the worker would omit rows the predicate accepts, and no
         // amount of re-filtering above the scan brings them back.
         if op == Operator::Or {
-            if let Some((name, values)) = logical_or_equalities(left, right) {
+            if let Some((name, values)) = logical_or_equalities(left, right, self.schema) {
                 return self.membership(name, values);
             }
             let checkpoint = self.checkpoint();
@@ -486,19 +505,19 @@ impl<'a> Builder<'a> {
         }
 
         // `col <op> literal`, or `literal <op> col` with the operator flipped.
-        let (name, value, op) = match (column_name(left), literal(right)) {
+        let (name, value, op) = match (column_name(left, self.schema), literal(right)) {
             (Some(n), Some(v)) => (n, v, op),
-            _ => match (literal(left), column_name(right)) {
+            _ => match (literal(left), column_name(right, self.schema)) {
                 (Some(v), Some(n)) => (n, v, flip(op)?),
                 _ => return None,
             },
         };
-        let index = self.column_index(&name)?;
+        let (remote_name, index) = self.remote_column(&name)?;
         let token = op_token(op)?;
         let value_ref = self.add_constant(Constant::from_scalar(&value)?);
         Some(serde_json::json!({
             "type": "constant",
-            "column_name": name,
+            "column_name": remote_name,
             "column_index": index,
             "op": token,
             "value_ref": value_ref,
@@ -517,13 +536,16 @@ fn contains_join_keys(value: &serde_json::Value) -> bool {
     }
 }
 
-fn column_name(e: &Expr) -> Option<String> {
+fn column_name(e: &Expr, schema: &SchemaRef) -> Option<String> {
     match e {
         Expr::Column(c) => Some(c.name.clone()),
-        // A cast wrapping a column still names that column; the worker compares
-        // against the constant we send, and `Inexact` covers any coercion
-        // difference.
-        Expr::Cast(c) => column_name(&c.expr),
+        // VGI filters target remote columns, not arbitrary expressions. Only a
+        // no-op cast can be removed without changing comparison semantics.
+        // DataFusion retains every rejected predicate locally.
+        Expr::Cast(c) => {
+            let name = column_name(&c.expr, schema)?;
+            (schema.field_with_name(&name).ok()?.data_type() == c.field.data_type()).then_some(name)
+        }
         _ => None,
     }
 }
@@ -536,12 +558,13 @@ fn literal(e: &Expr) -> Option<ScalarValue> {
     }
 }
 
-fn physical_column_name(expr: &dyn PhysicalExpr) -> Option<String> {
+fn physical_column_name(expr: &dyn PhysicalExpr, schema: &SchemaRef) -> Option<String> {
     if let Some(column) = expr.downcast_ref::<PhysicalColumn>() {
         return Some(column.name().to_string());
     }
-    expr.downcast_ref::<CastExpr>()
-        .and_then(|cast| physical_column_name(cast.expr.as_ref()))
+    let cast = expr.downcast_ref::<CastExpr>()?;
+    let name = physical_column_name(cast.expr.as_ref(), schema)?;
+    (schema.field_with_name(&name).ok()?.data_type() == cast.cast_type()).then_some(name)
 }
 
 fn physical_literal(expr: &dyn PhysicalExpr) -> Option<ScalarValue> {
@@ -555,7 +578,7 @@ fn physical_literal(expr: &dyn PhysicalExpr) -> Option<ScalarValue> {
 
 /// Return the scan columns assembled by DataFusion's physical `struct`
 /// function, if every struct field is a direct (optionally cast) column.
-fn physical_struct_columns(expr: &dyn PhysicalExpr) -> Option<Vec<String>> {
+fn physical_struct_columns(expr: &dyn PhysicalExpr, schema: &SchemaRef) -> Option<Vec<String>> {
     let function = expr.downcast_ref::<ScalarFunctionExpr>()?;
     if function.name() != "struct" {
         return None;
@@ -563,7 +586,7 @@ fn physical_struct_columns(expr: &dyn PhysicalExpr) -> Option<Vec<String>> {
     function
         .args()
         .iter()
-        .map(|argument| physical_column_name(argument.as_ref()))
+        .map(|argument| physical_column_name(argument.as_ref(), schema))
         .collect()
 }
 
@@ -571,28 +594,36 @@ fn physical_struct_columns(expr: &dyn PhysicalExpr) -> Option<Vec<String>> {
 /// set. This is the only disjunction shape that VGI's existing `join_keys`
 /// representation can express without inventing tuple or expression-filter
 /// protocol semantics.
-fn logical_or_equalities(left: &Expr, right: &Expr) -> Option<(String, Vec<ScalarValue>)> {
+fn logical_or_equalities(
+    left: &Expr,
+    right: &Expr,
+    schema: &SchemaRef,
+) -> Option<(String, Vec<ScalarValue>)> {
     let mut terms = Vec::new();
-    collect_logical_or_equalities(left, &mut terms)?;
-    collect_logical_or_equalities(right, &mut terms)?;
+    collect_logical_or_equalities(left, schema, &mut terms)?;
+    collect_logical_or_equalities(right, schema, &mut terms)?;
     same_column_membership(terms)
 }
 
-fn collect_logical_or_equalities(expr: &Expr, out: &mut Vec<(String, ScalarValue)>) -> Option<()> {
+fn collect_logical_or_equalities(
+    expr: &Expr,
+    schema: &SchemaRef,
+    out: &mut Vec<(String, ScalarValue)>,
+) -> Option<()> {
     let Expr::BinaryExpr(binary) = expr else {
         return None;
     };
     if binary.op == Operator::Or {
-        collect_logical_or_equalities(&binary.left, out)?;
-        collect_logical_or_equalities(&binary.right, out)?;
+        collect_logical_or_equalities(&binary.left, schema, out)?;
+        collect_logical_or_equalities(&binary.right, schema, out)?;
         return Some(());
     }
     if binary.op != Operator::Eq {
         return None;
     }
-    let term = match (column_name(&binary.left), literal(&binary.right)) {
+    let term = match (column_name(&binary.left, schema), literal(&binary.right)) {
         (Some(name), Some(value)) => (name, value),
-        _ => match (literal(&binary.left), column_name(&binary.right)) {
+        _ => match (literal(&binary.left), column_name(&binary.right, schema)) {
             (Some(value), Some(name)) => (name, value),
             _ => return None,
         },
@@ -601,34 +632,38 @@ fn collect_logical_or_equalities(expr: &Expr, out: &mut Vec<(String, ScalarValue
     Some(())
 }
 
-fn physical_or_equalities(binary: &PhysicalBinaryExpr) -> Option<(String, Vec<ScalarValue>)> {
+fn physical_or_equalities(
+    binary: &PhysicalBinaryExpr,
+    schema: &SchemaRef,
+) -> Option<(String, Vec<ScalarValue>)> {
     let mut terms = Vec::new();
-    collect_physical_or_equalities(binary.left().as_ref(), &mut terms)?;
-    collect_physical_or_equalities(binary.right().as_ref(), &mut terms)?;
+    collect_physical_or_equalities(binary.left().as_ref(), schema, &mut terms)?;
+    collect_physical_or_equalities(binary.right().as_ref(), schema, &mut terms)?;
     same_column_membership(terms)
 }
 
 fn collect_physical_or_equalities(
     expr: &dyn PhysicalExpr,
+    schema: &SchemaRef,
     out: &mut Vec<(String, ScalarValue)>,
 ) -> Option<()> {
     let binary = expr.downcast_ref::<PhysicalBinaryExpr>()?;
     if *binary.op() == Operator::Or {
-        collect_physical_or_equalities(binary.left().as_ref(), out)?;
-        collect_physical_or_equalities(binary.right().as_ref(), out)?;
+        collect_physical_or_equalities(binary.left().as_ref(), schema, out)?;
+        collect_physical_or_equalities(binary.right().as_ref(), schema, out)?;
         return Some(());
     }
     if *binary.op() != Operator::Eq {
         return None;
     }
     let term = match (
-        physical_column_name(binary.left().as_ref()),
+        physical_column_name(binary.left().as_ref(), schema),
         physical_literal(binary.right().as_ref()),
     ) {
         (Some(name), Some(value)) => (name, value),
         _ => match (
             physical_literal(binary.left().as_ref()),
-            physical_column_name(binary.right().as_ref()),
+            physical_column_name(binary.right().as_ref(), schema),
         ) {
             (Some(value), Some(name)) => (name, value),
             _ => return None,
@@ -676,6 +711,7 @@ fn flip(op: Operator) -> Option<Operator> {
 pub(crate) fn is_pushable(expr: &Expr, schema: &SchemaRef) -> bool {
     let mut b = Builder {
         schema,
+        remote_schema: schema,
         constants: Vec::new(),
         referenced_columns: Vec::new(),
         join_keys: Vec::new(),
@@ -730,6 +766,7 @@ fn append_identity_part(identity: &mut Vec<u8>, part: &[u8]) {
 pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown> {
     let mut b = Builder {
         schema,
+        remote_schema: schema,
         constants: Vec::new(),
         referenced_columns: Vec::new(),
         join_keys: Vec::new(),
@@ -749,13 +786,27 @@ pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown
 /// batches (schema metadata `vgi_join_keys_version=2`). Continuation ticks do
 /// not carry those side batches, so callers use `false` there to retain only
 /// the independently expressible constant/range parts of a snapshot.
+#[cfg(test)]
 pub(crate) fn serialize_physical(
     exprs: &[Arc<dyn PhysicalExpr>],
     schema: &SchemaRef,
     side_join_keys: bool,
 ) -> DFResult<Pushdown> {
+    serialize_physical_for_remote(exprs, schema, schema, side_join_keys)
+}
+
+/// Serialize runtime filters using DataFusion's full table schema for
+/// expression resolution and the worker's full bind schema for VGI wire
+/// names, indexes, and `filter_columns`.
+pub(crate) fn serialize_physical_for_remote(
+    exprs: &[Arc<dyn PhysicalExpr>],
+    schema: &SchemaRef,
+    remote_schema: &SchemaRef,
+    side_join_keys: bool,
+) -> DFResult<Pushdown> {
     let mut b = Builder {
         schema,
+        remote_schema,
         constants: Vec::new(),
         referenced_columns: Vec::new(),
         join_keys: Vec::new(),
@@ -1088,6 +1139,83 @@ mod tests {
         let pushdown = serialize_physical(&[expression], &decimal_schema, false).unwrap();
         let (_, batch) = decode(pushdown.blob.as_deref().unwrap());
         assert_eq!(batch.column(1).data_type(), &DataType::Decimal128(18, 2));
+    }
+
+    #[test]
+    fn non_identity_column_casts_remain_local() {
+        let logical_cast = Expr::Cast(datafusion::logical_expr::expr::Cast::new(
+            Box::new(col("n")),
+            DataType::UInt64,
+        ));
+        assert!(
+            serialize(
+                &[logical_cast.eq(lit(ScalarValue::UInt64(Some(1))))],
+                &schema(),
+            )
+            .unwrap()
+            .blob
+            .is_none(),
+            "the worker cannot apply CAST(n AS UINT64) by filtering raw Int64 n"
+        );
+
+        let physical_cast = Arc::new(CastExpr::new(
+            physical_col("n", &schema()).unwrap(),
+            DataType::UInt64,
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+        let membership = InListExpr::try_new(
+            physical_cast,
+            vec![physical_lit(ScalarValue::UInt64(Some(1)))],
+            false,
+            &schema(),
+        )
+        .unwrap();
+        let pushdown = serialize_physical(
+            &[Arc::new(membership) as Arc<dyn PhysicalExpr>],
+            &schema(),
+            true,
+        )
+        .unwrap();
+        assert!(pushdown.blob.is_none());
+        assert!(pushdown.join_keys.is_empty());
+        assert!(pushdown.columns.is_empty());
+    }
+
+    #[test]
+    fn runtime_filter_uses_full_remote_bind_coordinates_after_projection() {
+        let projected = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, true)]));
+        let projected_column = physical_col("name", &projected).unwrap();
+        let membership = InListExpr::try_new(
+            projected_column,
+            vec![physical_lit("one"), physical_lit("three")],
+            false,
+            &projected,
+        )
+        .unwrap();
+        let remote_schema = Arc::new(Schema::new(vec![
+            Field::new("worker_n", DataType::Int64, true),
+            Field::new("worker_name", DataType::Utf8, true),
+        ]));
+        let pushdown = serialize_physical_for_remote(
+            &[Arc::new(membership) as Arc<dyn PhysicalExpr>],
+            &schema(),
+            &remote_schema,
+            true,
+        )
+        .unwrap();
+        let (specs, _) = decode(pushdown.blob.as_deref().unwrap());
+        assert_eq!(specs[0]["column_name"], "worker_name");
+        assert_eq!(specs[0]["column_index"], 1);
+        assert_eq!(specs[0]["keys_column"], "worker_name");
+        assert_eq!(pushdown.columns, vec![1]);
+
+        let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&pushdown.join_keys[0]),
+            None,
+        )
+        .unwrap();
+        let keys = reader.next().unwrap().unwrap();
+        assert_eq!(keys.schema().field(0).name(), "worker_name");
     }
 
     #[test]

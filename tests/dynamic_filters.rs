@@ -151,6 +151,109 @@ async fn hash_join_keys_reach_vgi_init_and_results_stay_exact() -> datafusion::e
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn projected_second_column_join_key_uses_remote_bind_position(
+) -> datafusion::error::Result<()> {
+    let Some(worker) = example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    let connection = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let Some(schema) = filter_echo_schema(&connection).await else {
+        eprintln!("skipping: filter_echo_table_scan not in this catalog");
+        return Ok(());
+    };
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(connection, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    // Only `s` and the witness are needed from the remote scan, so `s` is at
+    // projected position 0 even though its VGI bind position is 1.
+    let batches = ctx
+        .sql(
+            "SELECT e.pushed_filters
+             FROM (VALUES ('row_1'), ('row_3')) AS keys(label)
+             JOIN echo e ON keys.label = e.s
+             ORDER BY e.s",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        2
+    );
+    for pushed in batches.iter().flat_map(|batch| {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("pushed_filters is Utf8")
+            .iter()
+            .flatten()
+    }) {
+        assert!(
+            pushed.contains("s IN ('row_1', 'row_3')"),
+            "worker did not receive the second-column join set: {pushed:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coerced_probe_join_key_stays_local() -> datafusion::error::Result<()> {
+    let Some(worker) = example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    let connection = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let Some(schema) = filter_echo_schema(&connection).await else {
+        eprintln!("skipping: filter_echo_table_scan not in this catalog");
+        return Ok(());
+    };
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(connection, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    let dataframe = ctx
+        .sql(
+            "SELECT e.n, e.pushed_filters
+             FROM (VALUES (CAST(1 AS INT)), (CAST(3 AS INT))) AS keys(id)
+             JOIN echo e ON keys.id = CAST(e.n AS INT)
+             ORDER BY e.n",
+        )
+        .await?;
+    let plan = dataframe.create_physical_plan().await?;
+    let rendered = datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(true)
+        .to_string();
+    assert!(
+        rendered.contains("VgiScanExec") && rendered.contains("dynamic_filters=1"),
+        "DataFusion did not link the coerced join filter to the VGI scan:\n{rendered}"
+    );
+    let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        2
+    );
+    for batch in &batches {
+        let pushed = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("pushed_filters is Utf8");
+        assert!(
+            pushed.iter().flatten().all(|value| value == "(none)"),
+            "a casted probe expression must not be applied to the raw remote column"
+        );
+    }
+    Ok(())
+}
+
 async fn assert_multi_column_hash_join_keys(
     connection: VgiConnection,
 ) -> datafusion::error::Result<()> {

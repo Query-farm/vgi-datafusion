@@ -1901,6 +1901,7 @@ impl TableProvider for VgiTableProvider {
         } else {
             Arc::clone(&self.output_schema)
         };
+        let remote_bind_schema = self.statistics_bind.output_schema().clone();
         let cache_result_is_bounded = !split_groups.as_ref().is_some_and(|plan| plan.unbounded);
 
         let result_cache_ineligible = self
@@ -1921,6 +1922,8 @@ impl TableProvider for VgiTableProvider {
             pushdown,
             limit,
             projected,
+            self.output_schema.clone(),
+            remote_bind_schema,
             cache_storage_schema,
             partitions,
             split_groups,
@@ -1953,6 +1956,14 @@ pub struct VgiScanExec {
     /// tightening comparison bounds.
     dynamic_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     limit: Option<usize>,
+    /// DataFusion-facing full table schema, before scan projection. Runtime
+    /// physical column indexes may be projection-relative, so names are
+    /// resolved against this schema instead.
+    filter_schema: SchemaRef,
+    /// Worker's full bind output schema. VGI wire column names, indexes, and
+    /// `filter_columns` use these coordinates even when DataFusion projects or
+    /// a catalog table renames the public columns.
+    remote_bind_schema: SchemaRef,
     schema: SchemaRef,
     /// Exact remote batch schema retained by either result-cache tier. This is
     /// the full worker output for local projections and the projected schema
@@ -2305,6 +2316,8 @@ impl VgiScanExec {
         pushdown: filters::Pushdown,
         limit: Option<usize>,
         schema: SchemaRef,
+        filter_schema: SchemaRef,
+        remote_bind_schema: SchemaRef,
         cache_storage_schema: SchemaRef,
         partitions: usize,
         split_groups: Option<PlannedSplits>,
@@ -2460,6 +2473,8 @@ impl VgiScanExec {
             pushdown,
             dynamic_filters: Vec::new(),
             limit,
+            filter_schema,
+            remote_bind_schema,
             schema,
             cache_storage_schema,
             properties,
@@ -2500,6 +2515,8 @@ impl VgiScanExec {
             pushdown: self.pushdown.clone(),
             dynamic_filters,
             limit: self.limit,
+            filter_schema: self.filter_schema.clone(),
+            remote_bind_schema: self.remote_bind_schema.clone(),
             schema: self.schema.clone(),
             cache_storage_schema: self.cache_storage_schema.clone(),
             properties: self.properties.clone(),
@@ -3884,6 +3901,8 @@ impl ExecutionPlan for VgiScanExec {
         let projection_pushdown = self.projection_pushdown;
         let pushdown = self.pushdown.clone();
         let dynamic_filters = self.dynamic_filters.clone();
+        let filter_schema = self.filter_schema.clone();
+        let remote_bind_schema = self.remote_bind_schema.clone();
         let limit = self.limit;
         let out_schema = self.schema.clone();
         // The tokens this partition redeems. An empty group is legal — a plan
@@ -3971,8 +3990,12 @@ impl ExecutionPlan for VgiScanExec {
                 // racing an eagerly-started remote scan.
                 let (mut dynamic_generation, dynamic_snapshot) =
                     snapshot_dynamic_filters(&dynamic_filters)?;
-                let initial_dynamic =
-                    filters::serialize_physical(&dynamic_snapshot, &scan_schema, true)?;
+                let initial_dynamic = filters::serialize_physical_for_remote(
+                    &dynamic_snapshot,
+                    &filter_schema,
+                    &remote_bind_schema,
+                    true,
+                )?;
                 let initial_pushdown = filters::merge(&pushdown, &initial_dynamic)?;
                 // Join-key side IPC is init-only. If either the SQL predicate
                 // or the first runtime snapshot contains membership keys, keep
@@ -4193,8 +4216,12 @@ impl ExecutionPlan for VgiScanExec {
                         let (stable_generation, snapshots) =
                             snapshot_dynamic_filters(&dynamic_filters)?;
                         if can_refine_on_continuation {
-                            let dynamic =
-                                filters::serialize_physical(&snapshots, &scan_schema, false)?;
+                            let dynamic = filters::serialize_physical_for_remote(
+                                &snapshots,
+                                &filter_schema,
+                                &remote_bind_schema,
+                                false,
+                            )?;
                             tick_pushdown = Some(filters::merge(&pushdown, &dynamic)?);
                         } else {
                             tick_pushdown = None;
