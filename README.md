@@ -128,7 +128,12 @@ SELECT * FROM duckdb_settings() WHERE name = 'multiplier';
 
 JSON strings provide DataFusion's spelling for Arrow Struct settings. Setting
 values are included in split-plan, producer-result, exchange, and scalar-type
-cache identity, so changing a setting cannot cross-serve cached state.
+cache identity, so changing a setting cannot cross-serve cached state. The
+adapter also owns two DuckDB-compatible host knobs: stable scalar input dedup is
+controlled by `vgi_exchange_input_dedup`, and worker-opted scalar per-value
+memoization can be vetoed with `vgi_result_cache_per_value`. Both default to
+`true`, support unqualified `SET`/`RESET`, and reach a worker only if it
+independently declares a setting with the same name.
 
 HTTP attachments automatically follow an RFC 9728 OAuth challenge. The CLI
 prints a device URL and code, then retries the attach after approval; access and
@@ -248,9 +253,13 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   replaying them. Secret-consuming calls bypass these caches, and native
   DataFusion metrics expose producer cache/worker activity in `EXPLAIN ANALYZE`.
   Cache diagnostics distinguish exchange hits, stores, and bytes served.
-  Buffered whole-input results, correlated 1:N per-value calls, disk
-  persistence, stale-while-revalidate, compression, and persistent
-  cross-process sharing remain unimplemented.
+  Buffered functions additionally cache the complete input multiset after a
+  successful finalize. Their keys preserve duplicate multiplicity while being
+  independent of row order and physical batch boundaries; ordered sinks,
+  secrets, cancellation, failed lifecycle phases, inconsistent policy, and
+  over-cap results never commit. Correlated 1:N per-value calls, disk
+  persistence, stale-while-revalidate, compression, persistent cross-process
+  sharing, and SQL mutation of cache memory limits remain unimplemented.
 - **Dynamic filters and join keys.** DataFusion 55 hash-join filters are linked
   to VGI scans. Completed single-column `IN` sets use `join_keys` side IPC at
   init (`vgi_join_keys_version=2`), while later range/constant refinements ride

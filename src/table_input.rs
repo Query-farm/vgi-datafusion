@@ -32,7 +32,7 @@
 //! change in DataFusion itself, so a multi-column table argument is out of
 //! reach here rather than merely unimplemented.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::catalog::Session;
@@ -522,6 +522,42 @@ impl ExchangeCacheKeyTemplate {
         self.input_digest(input)
             .map(|digest| self.key_for_digest(digest))
     }
+
+    /// Hash a complete unordered input multiset as one cache unit.
+    ///
+    /// Buffered caching is offered only for workers that declare
+    /// `sink_order_dependent=false`. Canonical per-row IPC digests are sorted,
+    /// preserving duplicates while making both row order and physical batch
+    /// boundaries irrelevant. The input schema is included explicitly so an
+    /// empty input cannot cross-serve a differently typed bind.
+    pub(crate) fn key_for_unordered_inputs(
+        &self,
+        inputs: &[datafusion::arrow::array::RecordBatch],
+        input_schema: &Schema,
+    ) -> DFResult<vgi_client::CacheKey> {
+        use sha2::{Digest, Sha256};
+
+        let mut rows = Vec::<[u8; 32]>::new();
+        for input in inputs {
+            for row in 0..input.num_rows() {
+                let encoded =
+                    vgi_protocol::ipc::write_batch(&input.slice(row, 1)).map_err(to_df)?;
+                rows.push(Sha256::digest(encoded).into());
+            }
+        }
+        rows.sort_unstable();
+
+        let mut digest = Sha256::new();
+        hash_exchange_field(&mut digest, b"vgi_buffered_whole_input_multiset_v2");
+        hash_exchange_field(&mut digest, &self.static_digest);
+        let input_schema = vgi_protocol::ipc::write_schema(input_schema).map_err(to_df)?;
+        hash_exchange_field(&mut digest, &input_schema);
+        hash_exchange_field(&mut digest, &(rows.len() as u64).to_le_bytes());
+        for row in rows {
+            hash_exchange_field(&mut digest, &row);
+        }
+        Ok(self.key_for_digest(digest.finalize().into()))
+    }
 }
 
 fn hash_exchange_field(digest: &mut sha2::Sha256, field: &[u8]) {
@@ -589,6 +625,85 @@ pub(crate) fn emit_exchange_cache_event(
     event.function = Some(format!("{schema_name}.{function}"));
     event.message = message;
     conn.runtime.emit(event);
+}
+
+fn emit_table_buffering_event(
+    conn: &VgiConnection,
+    catalog: &str,
+    schema_name: &str,
+    function: &str,
+    kind: &str,
+    duration: std::time::Duration,
+    message: Option<String>,
+) {
+    let mut event = VgiEvent::new(kind);
+    event.catalog = Some(catalog.to_string());
+    event.function = Some(format!("{schema_name}.{function}"));
+    event.duration = Some(duration);
+    event.message = message;
+    conn.runtime.emit(event);
+}
+
+#[derive(Debug)]
+enum BufferedCacheControl {
+    Consistent(Option<vgi_client::CacheControl>),
+    Refused,
+}
+
+fn normalize_buffered_cache_control(
+    function: &str,
+    controls: Vec<Option<vgi_client::CacheControl>>,
+) -> DFResult<BufferedCacheControl> {
+    let Some(first) = controls.first().cloned() else {
+        return Ok(BufferedCacheControl::Consistent(None));
+    };
+    if controls.iter().all(|control| control == &first) {
+        return Ok(BufferedCacheControl::Consistent(first));
+    }
+    if controls
+        .iter()
+        .flatten()
+        .any(|control| control.not_modified)
+    {
+        return Err(DataFusionError::Execution(format!(
+            "VGI buffered function `{function}` mixed not_modified with incompatible finalize cache control"
+        )));
+    }
+    // Cache metadata is an optimization. Fresh rows remain valid even when
+    // independent finalize streams disagree or only some opt in.
+    Ok(BufferedCacheControl::Refused)
+}
+
+/// Marks a detached blocking buffered lifecycle ineligible to commit if its
+/// async DataFusion scan future is dropped before the lifecycle completes.
+struct BufferedCommitGuard {
+    allowed: Arc<Mutex<bool>>,
+    completed: bool,
+}
+
+impl BufferedCommitGuard {
+    fn new() -> Self {
+        Self {
+            allowed: Arc::new(Mutex::new(true)),
+            completed: false,
+        }
+    }
+
+    fn token(&self) -> Arc<Mutex<bool>> {
+        Arc::clone(&self.allowed)
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for BufferedCommitGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            *self.allowed.lock().unwrap() = false;
+        }
+    }
 }
 
 /// A childless blended table-in/out call whose literal arguments form one
@@ -721,42 +836,315 @@ pub(crate) fn run_buffered(
     arguments: vgi_client::Arguments,
     input_schema: &Schema,
     inputs: Vec<datafusion::arrow::array::RecordBatch>,
+    sink_order_dependent: bool,
+    commit_allowed: Arc<Mutex<bool>>,
 ) -> DFResult<Vec<datafusion::arrow::array::RecordBatch>> {
-    use vgi_client::BindSpec;
+    use vgi_client::{BindSpec, ScanOptions};
 
     let mut client = conn.connect()?;
     let attached = conn.attach(&mut client, catalog)?;
+    let catalog_version = attached.info().catalog_version;
+    let argument_bytes = arguments.to_ipc().map_err(to_df)?.0;
     let spec = BindSpec::table(function)
         .in_schema(schema_name)
         .with_arguments(arguments);
-    let bound = crate::bind_with_input_secrets(conn, &mut client, &attached, &spec, input_schema)?;
+    let (bound, used_resolved_secrets) =
+        crate::bind_with_input_secrets_status(conn, &mut client, &attached, &spec, input_schema)?;
 
-    let execution_id = client.buffering_begin(&bound).map_err(to_df)?;
+    let run_lifecycle = |client: &mut vgi_client::VgiClient,
+                         options: &ScanOptions|
+     -> DFResult<(
+        Vec<datafusion::arrow::array::RecordBatch>,
+        Vec<Option<vgi_client::CacheControl>>,
+    )> {
+        let begin_started = std::time::Instant::now();
+        let execution_id = client.buffering_begin(&bound).map_err(to_df)?;
+        emit_table_buffering_event(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            "table_buffering.begin",
+            begin_started.elapsed(),
+            None,
+        );
 
-    let mut state_ids = Vec::with_capacity(inputs.len());
-    for (i, batch) in inputs.iter().enumerate() {
-        // The batch index is what lets a worker reconstruct source order from
-        // chunks it may process out of order.
-        let id = client
-            .buffering_process(&attached, &spec, &execution_id, batch, Some(i as i64))
+        let mut state_ids = Vec::with_capacity(inputs.len());
+        for (index, batch) in inputs.iter().enumerate() {
+            // The worker lifecycle still receives the physical batch index.
+            // Unordered cache identity below is deliberately independent of
+            // those boundaries; ordered sinks are ineligible for that cache.
+            let id = client
+                .buffering_process(&attached, &spec, &execution_id, batch, Some(index as i64))
+                .map_err(to_df)?;
+            state_ids.push(id);
+        }
+
+        let state_id_count = state_ids.len();
+        let combine_started = std::time::Instant::now();
+        let finalize_ids = client
+            .buffering_combine(&attached, &spec, &execution_id, state_ids)
             .map_err(to_df)?;
-        state_ids.push(id);
+        emit_table_buffering_event(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            "table_buffering.combine",
+            combine_started.elapsed(),
+            Some(format!(
+                "input_batches={} state_ids={state_id_count} finalize_ids={}",
+                inputs.len(),
+                finalize_ids.len()
+            )),
+        );
+
+        let mut out = Vec::new();
+        let mut controls = Vec::with_capacity(finalize_ids.len());
+        let finalize_started = std::time::Instant::now();
+        for id in &finalize_ids {
+            let mut scan = client
+                .buffering_finalize_with_options(&bound, &execution_id, id, options)
+                .map_err(to_df)?;
+            while let Some(batch) = scan.next_batch().map_err(to_df)? {
+                out.push(batch);
+            }
+            controls.push(scan.cache_control().cloned());
+        }
+        if !finalize_ids.is_empty() {
+            emit_table_buffering_event(
+                conn,
+                catalog,
+                schema_name,
+                function,
+                "table_buffering.finalize",
+                finalize_started.elapsed(),
+                Some(format!(
+                    "finalize_streams={} output_batches={}",
+                    finalize_ids.len(),
+                    out.len()
+                )),
+            );
+        }
+        Ok((out, controls))
+    };
+
+    // VGI's buffered-cache contract is a reduction over the complete input
+    // multiset. An ordered sink can observe row order, so it is deliberately
+    // ineligible instead of being cached under a weaker identity.
+    let template = if used_resolved_secrets || sink_order_dependent {
+        None
+    } else {
+        exchange_cache_key_template(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            &argument_bytes,
+            catalog_version,
+            bound.output_schema().as_ref(),
+            b"table_buffering_whole_input_v1",
+        )?
+    };
+    let Some(key) = template
+        .as_ref()
+        .map(|template| template.key_for_unordered_inputs(&inputs, input_schema))
+        .transpose()?
+    else {
+        return run_lifecycle(&mut client, &ScanOptions::default()).map(|(batches, _)| batches);
+    };
+
+    let cache = conn.runtime.result_cache();
+    if let Some(entry) = cache.get(&key) {
+        conn.runtime.note_exchange_cache_hit(entry.bytes());
+        emit_exchange_cache_event(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            "cache.hit",
+            Some("tier=buffered_whole_input".to_string()),
+        );
+        return Ok(entry.batches().to_vec());
     }
+    emit_exchange_cache_event(
+        conn,
+        catalog,
+        schema_name,
+        function,
+        "cache.miss",
+        Some("tier=buffered_whole_input".to_string()),
+    );
 
-    let finalize_ids = client
-        .buffering_combine(&attached, &spec, &execution_id, state_ids)
-        .map_err(to_df)?;
+    match conn.runtime.acquire_result_flight(&key) {
+        crate::runtime::ResultFlightClaim::Follower(waiter) => {
+            if matches!(
+                waiter.wait_blocking_timeout(conn.rpc_timeout()),
+                crate::runtime::ResultFlightOutcome::Stored
+            ) {
+                if let Some(entry) = cache.get(&key).or_else(|| cache.get_for_revalidation(&key)) {
+                    conn.runtime.note_exchange_cache_hit(entry.bytes());
+                    emit_exchange_cache_event(
+                        conn,
+                        catalog,
+                        schema_name,
+                        function,
+                        "cache.coalesced_hit",
+                        Some("tier=buffered_whole_input".to_string()),
+                    );
+                    return Ok(entry.batches().to_vec());
+                }
+            }
+            // A refusal, timeout, or intervening eviction cannot make the query
+            // fail. Execute without taking another flight, and do not store.
+            run_lifecycle(&mut client, &ScanOptions::default()).map(|(batches, _)| batches)
+        }
+        crate::runtime::ResultFlightClaim::Producer(flight) => {
+            let stale = cache.get_for_revalidation(&key);
+            let options = stale
+                .as_ref()
+                .map(|entry| ScanOptions {
+                    if_none_match: entry.etag.clone(),
+                    if_modified_since: entry.last_modified.clone(),
+                    ..Default::default()
+                })
+                .unwrap_or_default();
+            let (batches, controls) = match run_lifecycle(&mut client, &options) {
+                Ok(result) => result,
+                Err(error) => {
+                    let commit = commit_allowed.lock().unwrap();
+                    if !*commit {
+                        flight.abort("buffered consumer cancelled");
+                        return Err(error);
+                    }
+                    if !stale
+                        .as_ref()
+                        .is_some_and(|entry| entry.may_serve_on_error_at(std::time::Instant::now()))
+                    {
+                        flight.abort("buffered lifecycle failed");
+                        return Err(error);
+                    }
+                    let stale = stale.as_ref().expect("checked above");
+                    cache.record_stale_serve();
+                    conn.runtime.note_exchange_cache_hit(stale.bytes());
+                    flight.stored();
+                    emit_exchange_cache_event(
+                        conn,
+                        catalog,
+                        schema_name,
+                        function,
+                        "cache.stale_if_error",
+                        Some(format!("tier=buffered_whole_input {error}")),
+                    );
+                    return Ok(stale.batches().to_vec());
+                }
+            };
+            let commit = commit_allowed.lock().unwrap();
+            if !*commit {
+                flight.abort("buffered consumer cancelled");
+                return Ok(batches);
+            }
+            let control = match normalize_buffered_cache_control(function, controls)? {
+                BufferedCacheControl::Consistent(control) => control,
+                BufferedCacheControl::Refused => {
+                    cache.remove(&key);
+                    flight.abort("buffered finalize cache controls disagreed");
+                    emit_exchange_cache_event(
+                        conn,
+                        catalog,
+                        schema_name,
+                        function,
+                        "cache.refused",
+                        Some("tier=buffered_whole_input finalize controls disagreed".to_string()),
+                    );
+                    return Ok(batches);
+                }
+            };
 
-    let mut out = Vec::new();
-    for id in &finalize_ids {
-        let mut scan = client
-            .buffering_finalize(&bound, &execution_id, id)
-            .map_err(to_df)?;
-        while let Some(batch) = scan.next_batch().map_err(to_df)? {
-            out.push(batch);
+            if control.as_ref().is_some_and(|control| control.not_modified) {
+                let Some(stale) = stale.as_ref() else {
+                    flight.abort("not_modified without a conditional request");
+                    return Err(DataFusionError::Execution(format!(
+                        "VGI buffered function `{function}` returned not_modified without a conditional request"
+                    )));
+                };
+                if batches.iter().any(|batch| batch.num_rows() != 0) {
+                    flight.abort("not_modified returned rows");
+                    return Err(DataFusionError::Execution(format!(
+                        "VGI buffered function `{function}` returned rows and not_modified together"
+                    )));
+                }
+                let ttl = match exchange_cache_ttl(
+                    cache,
+                    control.as_ref(),
+                    &key.identity_scope,
+                    stale.bytes(),
+                ) {
+                    Ok(ttl) => ttl,
+                    Err(reason) => {
+                        cache.remove(&key);
+                        flight.abort(format!("revalidation revoked cache: {reason:?}"));
+                        return Err(DataFusionError::Execution(format!(
+                            "VGI buffered function `{function}` returned not_modified with ineligible cache control: {reason:?}"
+                        )));
+                    }
+                };
+                cache.slide(&key, ttl);
+                conn.runtime.note_exchange_cache_hit(stale.bytes());
+                flight.stored();
+                emit_exchange_cache_event(
+                    conn,
+                    catalog,
+                    schema_name,
+                    function,
+                    "cache.revalidated",
+                    Some("tier=buffered_whole_input".to_string()),
+                );
+                return Ok(stale.batches().to_vec());
+            }
+
+            let bytes = batches
+                .iter()
+                .flat_map(|batch| batch.columns())
+                .map(|array| array.get_array_memory_size())
+                .sum();
+            match exchange_cache_ttl(cache, control.as_ref(), &key.identity_scope, bytes) {
+                Ok(ttl) => {
+                    cache.insert(key, batches.clone(), ttl, control.as_ref());
+                    conn.runtime.note_exchange_cache_store();
+                    flight.stored();
+                    emit_exchange_cache_event(
+                        conn,
+                        catalog,
+                        schema_name,
+                        function,
+                        "cache.store",
+                        Some("tier=buffered_whole_input".to_string()),
+                    );
+                }
+                Err(reason) => {
+                    if reason == vgi_client::cache::Ineligible::EntryTooLarge {
+                        // Buffered output is necessarily materialized before
+                        // finalize completes. Record that the bounded cache
+                        // capture was abandoned even though the query result
+                        // itself remains valid and is returned normally.
+                        cache.record_capture_abort();
+                    }
+                    cache.remove(&key);
+                    flight.abort(format!("cache refused buffered result: {reason:?}"));
+                    emit_exchange_cache_event(
+                        conn,
+                        catalog,
+                        schema_name,
+                        function,
+                        "cache.refused",
+                        Some(format!("tier=buffered_whole_input {reason:?}")),
+                    );
+                }
+            }
+            Ok(batches)
         }
     }
-    Ok(out)
 }
 
 /// A call with a TABLE argument, exposed as a DataFusion table.
@@ -778,6 +1166,7 @@ pub struct VgiTableInputProvider {
     /// Whether the worker declared this a `TableBufferingFunction`, which is a
     /// different protocol rather than a variation on the streaming one.
     buffered: bool,
+    sink_order_dependent: bool,
     stream_cache_eligible: bool,
 }
 
@@ -791,6 +1180,7 @@ impl VgiTableInputProvider {
         arguments: vgi_client::Arguments,
         table_arg: TableArgument,
         buffered: bool,
+        sink_order_dependent: bool,
         stream_cache_eligible: bool,
     ) -> DFResult<Arc<Self>> {
         use vgi_client::BindSpec;
@@ -815,6 +1205,7 @@ impl VgiTableInputProvider {
             input_schema,
             output_schema,
             buffered,
+            sink_order_dependent,
             stream_cache_eligible,
         }))
     }
@@ -835,14 +1226,45 @@ impl datafusion::catalog::TableProvider for VgiTableInputProvider {
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         use datafusion::arrow::array::RecordBatch;
         use datafusion::datasource::memory::MemorySourceConfig;
         use futures::TryStreamExt;
 
-        // Run the subquery now: its rows are this call's input stream.
+        // Plan the subquery now: its rows are this call's input stream.
         let plan = self.table_arg.physical_plan(state).await?;
+
+        // A pushed limit is the one case where eager collection is observably
+        // wrong for a streaming exchange: DataFusion cannot cancel work hidden
+        // inside TableProvider::scan, so LIMIT 5 over a large child would first
+        // materialize and send the entire child. Keep the exchange in the
+        // physical plan instead. The buffered protocol still needs all input
+        // before it can produce any output and therefore retains the whole-
+        // input path below. This limited path intentionally bypasses result
+        // caching: cancellation leaves an incomplete child exchange, which
+        // must never be committed under the full per-batch cache identity.
+        if !self.buffered {
+            if let Some(limit) = limit {
+                return Ok(Arc::new(
+                    crate::table_input_stream::VgiLimitedTableInputExec::try_new(
+                        self.conn.clone(),
+                        self.catalog.clone(),
+                        self.schema_name.clone(),
+                        self.function.clone(),
+                        self.arguments.clone(),
+                        plan,
+                        Arc::clone(&self.input_schema),
+                        Arc::clone(&self.output_schema),
+                        projection.cloned(),
+                        limit,
+                    )?,
+                ));
+            }
+        }
+
+        // No finite limit: run and retain the complete exchange result as the
+        // existing cache-aware path expects.
         let task_ctx = state.task_ctx();
         let mut inputs: Vec<RecordBatch> = Vec::new();
         for partition in 0..plan.properties().output_partitioning().partition_count() {
@@ -875,10 +1297,23 @@ impl datafusion::catalog::TableProvider for VgiTableInputProvider {
         let for_worker = input_schema.clone();
 
         let buffered = self.buffered;
+        let sink_order_dependent = self.sink_order_dependent;
         let stream_cache_eligible = self.stream_cache_eligible;
+        let mut buffered_commit = buffered.then(BufferedCommitGuard::new);
+        let commit_allowed = buffered_commit.as_ref().map(BufferedCommitGuard::token);
         let out = tokio::task::spawn_blocking(move || {
             if buffered {
-                run_buffered(&conn, &cat, &sch, &func, args, &for_worker, inputs)
+                run_buffered(
+                    &conn,
+                    &cat,
+                    &sch,
+                    &func,
+                    args,
+                    &for_worker,
+                    inputs,
+                    sink_order_dependent,
+                    commit_allowed.expect("buffered execution has commit guard"),
+                )
             } else {
                 run_exchange(
                     &conn,
@@ -893,7 +1328,11 @@ impl datafusion::catalog::TableProvider for VgiTableInputProvider {
             }
         })
         .await
-        .map_err(|e| DataFusionError::External(Box::new(e)))??;
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        if let Some(commit) = &mut buffered_commit {
+            commit.complete();
+        }
+        let out = out?;
 
         let out: Vec<RecordBatch> = out
             .into_iter()
@@ -925,6 +1364,10 @@ mod cache_key_tests {
             vec![Arc::new(Int64Array::from(vec![value]))],
         )
         .unwrap()
+    }
+
+    fn rows(schema: &Arc<Schema>, values: Vec<i64>) -> RecordBatch {
+        RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(values))]).unwrap()
     }
 
     #[test]
@@ -1008,5 +1451,105 @@ mod cache_key_tests {
         let configured = key();
         assert_ne!(initial, configured);
         assert_ne!(initial.settings, configured.settings);
+    }
+
+    #[test]
+    fn buffered_keys_are_unordered_multisets_and_keep_protocol_identity() {
+        let conn = VgiConnection::subprocess(["unused"]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let template = exchange_cache_key_template(
+            &conn,
+            "example",
+            "main",
+            "sum_all",
+            &[],
+            7,
+            schema.as_ref(),
+            b"table_buffering_whole_input_v1",
+        )
+        .unwrap()
+        .unwrap();
+        let one_batch = template
+            .key_for_unordered_inputs(&[rows(&schema, vec![1, 2])], schema.as_ref())
+            .unwrap();
+        let same = template
+            .key_for_unordered_inputs(&[rows(&schema, vec![1, 2])], schema.as_ref())
+            .unwrap();
+        let split = template
+            .key_for_unordered_inputs(&[one_row(&schema, 1), one_row(&schema, 2)], schema.as_ref())
+            .unwrap();
+        let reversed = template
+            .key_for_unordered_inputs(&[one_row(&schema, 2), one_row(&schema, 1)], schema.as_ref())
+            .unwrap();
+        let duplicate = template
+            .key_for_unordered_inputs(
+                &[
+                    one_row(&schema, 1),
+                    one_row(&schema, 1),
+                    one_row(&schema, 2),
+                ],
+                schema.as_ref(),
+            )
+            .unwrap();
+
+        assert_eq!(one_batch, same);
+        assert_eq!(
+            one_batch, split,
+            "batch boundaries do not change a multiset"
+        );
+        assert_eq!(split, reversed, "unordered buffered input has one identity");
+        assert_ne!(
+            split, duplicate,
+            "duplicate multiplicity remains key material"
+        );
+
+        let streaming = exchange_cache_key_template(
+            &conn,
+            "example",
+            "main",
+            "sum_all",
+            &[],
+            7,
+            schema.as_ref(),
+            b"table_in_out_batch_v2",
+        )
+        .unwrap()
+        .unwrap()
+        .key_for_unordered_inputs(&[rows(&schema, vec![1, 2])], schema.as_ref())
+        .unwrap();
+        assert_ne!(one_batch, streaming, "protocol modes cannot cross-serve");
+    }
+
+    #[test]
+    fn fresh_finalize_control_mismatch_refuses_cache_but_partial_304_is_an_error() {
+        let ttl = vgi_client::CacheControl::ttl(60);
+        assert!(matches!(
+            normalize_buffered_cache_control("sum_all", vec![Some(ttl.clone()), None]).unwrap(),
+            BufferedCacheControl::Refused
+        ));
+        assert!(matches!(
+            normalize_buffered_cache_control(
+                "sum_all",
+                vec![Some(ttl.clone()), Some(ttl.clone())]
+            )
+            .unwrap(),
+            BufferedCacheControl::Consistent(Some(control)) if control == ttl
+        ));
+
+        let partial_304 = vgi_client::CacheControl::ttl(0)
+            .with_etag("v1")
+            .with_revalidatable()
+            .with_not_modified();
+        let error = normalize_buffered_cache_control(
+            "sum_all",
+            vec![Some(partial_304), Some(vgi_client::CacheControl::ttl(60))],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("mixed not_modified"), "{error}");
     }
 }

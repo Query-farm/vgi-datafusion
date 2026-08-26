@@ -669,6 +669,10 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             columns,
             &RecordBatchOptions::new().with_row_count(Some(rpc_rows)),
         )?;
+        let cacheable = self.volatility != Volatility::Volatile;
+        let adapter_settings = self.conn.runtime().adapter_settings();
+        let dedup_enabled = cacheable && adapter_settings.exchange_input_dedup();
+        let per_value_enabled = adapter_settings.result_cache_per_value();
 
         let (conn, cat, sch, name) = (
             self.conn.clone(),
@@ -677,10 +681,15 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             self.function.clone(),
         );
         let input_schema = Schema::new(fields);
-        let cacheable = self.volatility != Volatility::Volatile;
 
-        let out = tokio::task::spawn_blocking(move || {
-            run_scalar_exchange(
+        let (out, gather, sent_rows) = tokio::task::spawn_blocking(move || {
+            let (input, gather) = if dedup_enabled {
+                deduplicate_scalar_input(input)?
+            } else {
+                (input, None)
+            };
+            let sent_rows = input.num_rows();
+            let out = run_scalar_exchange(
                 &conn,
                 &cat,
                 &sch,
@@ -689,17 +698,19 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
                 &input_schema,
                 input,
                 cacheable,
-            )
+                per_value_enabled,
+            )?;
+            Ok::<_, DataFusionError>((out, gather, sent_rows))
         })
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
-        if out.num_rows() != rpc_rows {
+        if out.num_rows() != sent_rows {
             return Err(DataFusionError::Execution(format!(
                 "{} answered {} rows for {} input rows; a scalar function must be 1:1",
                 self.registered_name,
                 out.num_rows(),
-                rpc_rows
+                sent_rows
             )));
         }
         if out.num_columns() != 1 {
@@ -709,7 +720,9 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
                 out.num_columns()
             )));
         }
-        let output = if rpc_rows == 1 && rows > 1 {
+        let output = if let Some(gather) = gather {
+            datafusion::arrow::compute::take(out.column(0).as_ref(), &gather, None)?
+        } else if rpc_rows == 1 && rows > 1 {
             datafusion::common::ScalarValue::try_from_array(out.column(0), 0)?
                 .to_array_of_size(rows)?
         } else {
@@ -778,6 +791,74 @@ fn materialize_output_row(
     )?)
 }
 
+/// Collapse byte-identical stable scalar input rows and retain their original
+/// row-to-unique mapping for result assembly.
+///
+/// Canonical Arrow IPC handles every VGI/Arrow input type, including nested
+/// values, without inventing a second equality implementation. Treating
+/// bitwise-distinct but SQL-equal values as separate is conservative: it may
+/// miss a dedup opportunity but can never combine unequal worker inputs.
+fn deduplicate_scalar_input(
+    input: datafusion::arrow::array::RecordBatch,
+) -> DFResult<(
+    datafusion::arrow::array::RecordBatch,
+    Option<datafusion::arrow::array::UInt32Array>,
+)> {
+    use datafusion::arrow::compute::concat_batches;
+
+    if input.num_rows() <= 1 {
+        return Ok((input, None));
+    }
+    let mut unique_by_ipc = HashMap::<Vec<u8>, u32>::new();
+    let mut uniques = Vec::new();
+    let mut row_to_unique = Vec::with_capacity(input.num_rows());
+    for row in 0..input.num_rows() {
+        let input_row = input.slice(row, 1);
+        let ipc = vgi_protocol::ipc::write_batch(&input_row).map_err(to_df)?;
+        let unique = match unique_by_ipc.get(&ipc).copied() {
+            Some(unique) => unique,
+            None => {
+                let unique = u32::try_from(uniques.len()).map_err(|_| {
+                    DataFusionError::Execution(
+                        "stable scalar batch has more than u32::MAX distinct inputs".to_string(),
+                    )
+                })?;
+                unique_by_ipc.insert(ipc, unique);
+                uniques.push(input_row);
+                unique
+            }
+        };
+        row_to_unique.push(unique);
+    }
+    if uniques.len() == input.num_rows() {
+        return Ok((input, None));
+    }
+    let unique_input = concat_batches(&input.schema(), uniques.iter())?;
+    Ok((
+        unique_input,
+        Some(datafusion::arrow::array::UInt32Array::from(row_to_unique)),
+    ))
+}
+
+/// Record one scalar input batch after the exchange accepted it.
+///
+/// The event deliberately contains only cardinality and function identity.
+/// Scalar values, bind arguments, and resolved secrets must never enter the
+/// session log history.
+fn emit_scalar_write_input(
+    conn: &VgiConnection,
+    catalog: &str,
+    schema_name: &str,
+    function: &str,
+    input_rows: usize,
+) {
+    let mut event = crate::VgiEvent::new("scalar.write_input");
+    event.catalog = Some(catalog.to_string());
+    event.function = Some(format!("{schema_name}.{function}"));
+    event.message = Some(format!("input_rows={input_rows}"));
+    conn.runtime().emit(event);
+}
+
 /// Execute a scalar exchange with worker-opted-in per-value memoization.
 ///
 /// A stable scalar is a 1:1 map. Distinct input tuples are therefore safe to
@@ -794,6 +875,7 @@ fn run_scalar_exchange(
     input_schema: &datafusion::arrow::datatypes::Schema,
     input: datafusion::arrow::array::RecordBatch,
     cacheable: bool,
+    per_value_enabled: bool,
 ) -> DFResult<datafusion::arrow::array::RecordBatch> {
     use datafusion::arrow::array::{RecordBatch, UInt32Array};
     use datafusion::arrow::compute::{concat_batches, take};
@@ -815,6 +897,7 @@ fn run_scalar_exchange(
      -> DFResult<(RecordBatch, Option<vgi_client::CacheControl>)> {
         let mut exchange = client.open_exchange(&bound, options).map_err(to_df)?;
         let answer = exchange.send(input).map_err(to_df)?;
+        emit_scalar_write_input(conn, catalog, schema_name, function, input.num_rows());
         let control = exchange.cache_control().cloned();
         exchange.close().map_err(to_df)?;
         answer.map(|answer| (answer, control)).ok_or_else(|| {
@@ -822,7 +905,7 @@ fn run_scalar_exchange(
         })
     };
 
-    if !cacheable || used_resolved_secrets || input.num_rows() == 0 {
+    if !cacheable || used_resolved_secrets || input.num_rows() == 0 || !per_value_enabled {
         return direct(&mut client, &input, &ScanOptions::default()).map(|(answer, _)| answer);
     }
 
@@ -1150,7 +1233,9 @@ fn run_scalar_exchange(
         let mut exchange = client
             .open_exchange(&bound, &ScanOptions::default())
             .map_err(to_df)?;
-        let fresh = exchange.send(&miss_input).map_err(to_df)?.ok_or_else(|| {
+        let fresh = exchange.send(&miss_input).map_err(to_df)?;
+        emit_scalar_write_input(conn, catalog, schema_name, function, miss_input.num_rows());
+        let fresh = fresh.ok_or_else(|| {
             DataFusionError::Execution(format!("{function} returned no answer for its input"))
         })?;
         let control = exchange.cache_control().cloned();

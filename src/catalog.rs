@@ -1668,6 +1668,9 @@ impl TableProvider for VgiCatalogTableProvider {
 pub(crate) struct TableFunctionMetadata {
     pub specs: vgi_client::ArgSpecs,
     pub buffered: bool,
+    /// Buffered whole-input caching is valid only when the worker declares
+    /// that its result depends on the input multiset rather than row order.
+    pub sink_order_dependent: bool,
     pub input_from_args: bool,
     /// Per-input-batch memoization is valid only for the parallel streaming
     /// map shape. A serial worker or FINALIZE callback may carry state across
@@ -1764,6 +1767,7 @@ impl VgiSchemaProvider {
                         let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
                         let metadata = TableFunctionMetadata {
                             buffered: f.function_type.0.eq_ignore_ascii_case("table_buffering"),
+                            sink_order_dependent: f.sink_order_dependent,
                             input_from_args: f.input_from_args,
                             stream_cache_eligible: f.max_workers != Some(1) && !f.has_finalize,
                             specs,

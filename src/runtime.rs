@@ -324,6 +324,10 @@ impl VgiRuntime {
         self.session_settings.lock().unwrap().clone()
     }
 
+    pub(crate) fn adapter_settings(&self) -> crate::settings::VgiAdapterSettings {
+        self.session_settings.lock().unwrap().adapter_settings()
+    }
+
     pub(crate) fn session_settings_identity(&self) -> Vec<u8> {
         let settings = self.session_settings.lock().unwrap();
         let mut out = Vec::new();

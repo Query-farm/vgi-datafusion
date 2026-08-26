@@ -1,22 +1,22 @@
 {
   "schema_version": 2,
   "source_roots": [
-    "/home/ec2-user/Development/vgi/test/sql/integration"
+    "../vgi/test/sql/integration"
   ],
   "source_files": 327,
   "totals": {
     "files_run": 278,
     "files_skipped": 49,
-    "measured_records": 4126,
-    "executed": 3313,
-    "failed": 813,
-    "not_applicable": 595,
-    "adapted_records": 49,
+    "measured_records": 4161,
+    "executed": 3362,
+    "failed": 799,
+    "not_applicable": 560,
+    "adapted_records": 76,
     "blocked": 0,
     "timed_out": 0,
     "expected_errors_ignored": 179,
     "values": {
-      "exact": 2147,
+      "exact": 2161,
       "rendering_equivalent": 110,
       "different": 184,
       "unordered_subset": 42
@@ -25,7 +25,7 @@
   "failure_buckets": {
     "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 18,
     "parse error (dialect)": 102,
-    "type / signature mismatch": 86,
+    "type / signature mismatch": 72,
     "other": 607
   },
   "areas": [
@@ -55,10 +55,10 @@
       ],
       "files": 24,
       "files_skipped": 0,
-      "executed": 543,
-      "failed": 20,
-      "not_applicable": 22,
-      "adapted_records": 31,
+      "executed": 560,
+      "failed": 13,
+      "not_applicable": 12,
+      "adapted_records": 44,
       "blocked": 0,
       "timed_out": 0
     },
@@ -88,9 +88,9 @@
       ],
       "files": 43,
       "files_skipped": 3,
-      "executed": 314,
+      "executed": 320,
       "failed": 232,
-      "not_applicable": 59,
+      "not_applicable": 53,
       "adapted_records": 2,
       "blocked": 0,
       "timed_out": 0
@@ -136,10 +136,10 @@
       ],
       "files": 52,
       "files_skipped": 2,
-      "executed": 537,
-      "failed": 173,
-      "not_applicable": 356,
-      "adapted_records": 0,
+      "executed": 563,
+      "failed": 166,
+      "not_applicable": 337,
+      "adapted_records": 14,
       "blocked": 0,
       "timed_out": 0
     },
@@ -293,8 +293,8 @@
     {
       "group": "cache",
       "area": "result_cache",
-      "executed": 537,
-      "failed": 173
+      "executed": 563,
+      "failed": 166
     },
     {
       "group": "catalog",
@@ -359,8 +359,8 @@
     {
       "group": "scalar",
       "area": "scalar_functions",
-      "executed": 455,
-      "failed": 20
+      "executed": 472,
+      "failed": 13
     },
     {
       "group": "secret",
@@ -389,7 +389,7 @@
     {
       "group": "table_in_out",
       "area": "table_input",
-      "executed": 314,
+      "executed": 320,
       "failed": 232
     },
     {
@@ -914,7 +914,7 @@
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "corpus/overlays/aggregate/window.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/window.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring.",
           "issue": null,
@@ -923,7 +923,7 @@
         },
         {
           "record": 8,
-          "mechanism": "corpus/overlays/aggregate/window.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/window.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring.",
           "issue": null,
@@ -932,7 +932,7 @@
         },
         {
           "record": 9,
-          "mechanism": "corpus/overlays/aggregate/window.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/window.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring.",
           "issue": null,
@@ -941,7 +941,7 @@
         },
         {
           "record": 17,
-          "mechanism": "corpus/overlays/aggregate/window.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/window.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not implement aggregate-local ORDER BY inside a window function; supporting this requires a DataFusion planner feature rather than VGI adapter wiring.",
           "issue": null,
@@ -1516,22 +1516,147 @@
       "skipped": false,
       "records": 36,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 17,
-      "failed": 7,
-      "not_applicable": 12,
+      "adapted_records": 14,
+      "executed": 31,
+      "failed": 0,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 7,
+        "exact": 14,
         "rendering_equivalent": 0,
         "different": 2,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "type / signature mismatch": 7
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
+          "issue": null,
+          "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';",
+          "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';"
+        },
+        {
+          "record": 8,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 10,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
+          "issue": null,
+          "original_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';",
+          "replacement_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';"
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
+          "issue": null,
+          "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'result_cache.hit'\n  AND message LIKE '%cached_sum_all%';",
+          "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'result_cache.hit'\n  AND message LIKE '%cached_sum_all%';"
+        },
+        {
+          "record": 13,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 15,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
+          "issue": null,
+          "original_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';",
+          "replacement_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';"
+        },
+        {
+          "record": 18,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 20,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 22,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
+          "issue": null,
+          "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';",
+          "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';"
+        },
+        {
+          "record": 27,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 29,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
+          "issue": null,
+          "original_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';",
+          "replacement_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';"
+        },
+        {
+          "record": 32,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 34,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
+          "issue": null,
+          "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';",
+          "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'table_buffering.combine'\n  AND message LIKE '%cached_sum_all%';"
+        }
+      ]
     },
     {
       "path": "cache/exchange_lateral.test",
@@ -1564,9 +1689,9 @@
       "records": 23,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 5,
+      "executed": 6,
       "failed": 10,
-      "not_applicable": 8,
+      "not_applicable": 7,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -1968,9 +2093,9 @@
       "records": 18,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 8,
+      "executed": 13,
       "failed": 4,
-      "not_applicable": 6,
+      "not_applicable": 1,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -1991,9 +2116,9 @@
       "records": 23,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 5,
+      "executed": 7,
       "failed": 8,
-      "not_applicable": 10,
+      "not_applicable": 8,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -2015,9 +2140,9 @@
       "records": 19,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 4,
+      "executed": 5,
       "failed": 8,
-      "not_applicable": 7,
+      "not_applicable": 6,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -2039,9 +2164,9 @@
       "records": 18,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 4,
+      "executed": 5,
       "failed": 8,
-      "not_applicable": 6,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -2063,9 +2188,9 @@
       "records": 24,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 9,
+      "executed": 11,
       "failed": 6,
-      "not_applicable": 9,
+      "not_applicable": 7,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -2860,7 +2985,7 @@
       "adaptations": [
         {
           "record": 8,
-          "mechanism": "corpus/overlays/catalog/multi_branch_writes_refused.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/catalog/multi_branch_writes_refused.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion does not parse DESCRIBE as a derived table; typeof inspects the same writable result column through the existing DataFusion compatibility function.",
           "issue": null,
@@ -3705,7 +3830,7 @@
       "adaptations": [
         {
           "record": 12,
-          "mechanism": "corpus/overlays/global_functions/lifecycle.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/global_functions/lifecycle.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DuckDB cannot unregister functions and therefore retains dead registration tombstones. DataFusion supports deregistration, so DETACH removes both the aliases and their live metadata.",
           "issue": null,
@@ -3883,7 +4008,7 @@
       "adaptations": [
         {
           "record": 17,
-          "mechanism": "corpus/overlays/macro/macros.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/macro/macros.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's built-in range table function names its output column `value`; DuckDB names the equivalent column `range`.",
           "issue": null,
@@ -3892,7 +4017,7 @@
         },
         {
           "record": 18,
-          "mechanism": "corpus/overlays/macro/macros.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/macro/macros.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's built-in range table function names its output column `value`; DuckDB names the equivalent column `range`.",
           "issue": null,
@@ -3944,7 +4069,7 @@
       "adaptations": [
         {
           "record": 22,
-          "mechanism": "corpus/overlays/overload/scalar_overload.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/overload/scalar_overload.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast supplies the same UInt32 overload key as DuckDB's UINTEGER cast.",
           "issue": null,
@@ -3953,7 +4078,7 @@
         },
         {
           "record": 23,
-          "mechanism": "corpus/overlays/overload/scalar_overload.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/overload/scalar_overload.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast supplies the same UInt64 overload key as DuckDB's UBIGINT cast.",
           "issue": null,
@@ -4236,7 +4361,7 @@
         },
         {
           "record": 16,
-          "mechanism": "corpus/overlays/scalar/binary_packet.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/binary_packet.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's built-in octet_length accepts strings; encode the Binary result as two hex characters per byte and divide by two.",
           "issue": null,
@@ -4281,22 +4406,75 @@
       "skipped": false,
       "records": 20,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 9,
-      "failed": 3,
-      "not_applicable": 8,
+      "adapted_records": 6,
+      "executed": 17,
+      "failed": 0,
+      "not_applicable": 3,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 3,
+        "exact": 6,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "type / signature mismatch": 3
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion.",
+          "issue": null,
+          "original_sql": "SELECT max(CAST(regexp_extract(message, 'input_rows=([0-9]+)', 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%double%';",
+          "replacement_sql": "SELECT max(CAST(array_element(regexp_match(message, 'input_rows=([0-9]+)'), 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%double%';"
+        },
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion.",
+          "issue": null,
+          "original_sql": "SELECT max(CAST(regexp_extract(message, 'input_rows=([0-9]+)', 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%double%';",
+          "replacement_sql": "SELECT max(CAST(array_element(regexp_match(message, 'input_rows=([0-9]+)'), 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%double%';"
+        },
+        {
+          "record": 16,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 18,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion.",
+          "issue": null,
+          "original_sql": "SELECT max(CAST(regexp_extract(message, 'input_rows=([0-9]+)', 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%random_int%';",
+          "replacement_sql": "SELECT max(CAST(array_element(regexp_match(message, 'input_rows=([0-9]+)'), 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%random_int%';"
+        }
+      ]
     },
     {
       "path": "scalar/double.test",
@@ -4364,7 +4542,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "corpus/overlays/scalar/geo_centroid.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_centroid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed point as DuckDB's typed struct literal.",
           "issue": null,
@@ -4373,7 +4551,7 @@
         },
         {
           "record": 3,
-          "mechanism": "corpus/overlays/scalar/geo_centroid.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_centroid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -4382,7 +4560,7 @@
         },
         {
           "record": 4,
-          "mechanism": "corpus/overlays/scalar/geo_centroid.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_centroid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -4391,7 +4569,7 @@
         },
         {
           "record": 5,
-          "mechanism": "corpus/overlays/scalar/geo_centroid.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_centroid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same per-row typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -4422,7 +4600,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "corpus/overlays/scalar/geo_distance.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_distance.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -4431,7 +4609,7 @@
         },
         {
           "record": 3,
-          "mechanism": "corpus/overlays/scalar/geo_distance.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_distance.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -4440,7 +4618,7 @@
         },
         {
           "record": 4,
-          "mechanism": "corpus/overlays/scalar/geo_distance.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_distance.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same per-row typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -4515,7 +4693,7 @@
       "adaptations": [
         {
           "record": 4,
-          "mechanism": "corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes Arrow UInt8 through arrow_cast rather than DuckDB's UTINYINT SQL type spelling.",
           "issue": null,
@@ -4524,7 +4702,7 @@
         },
         {
           "record": 5,
-          "mechanism": "corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes Arrow UInt8 through arrow_cast rather than DuckDB's UTINYINT SQL type spelling.",
           "issue": null,
@@ -4533,7 +4711,7 @@
         },
         {
           "record": 6,
-          "mechanism": "corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes Arrow UInt32 through arrow_cast rather than DuckDB's UINTEGER SQL type spelling.",
           "issue": null,
@@ -4542,7 +4720,7 @@
         },
         {
           "record": 9,
-          "mechanism": "corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast supplies the same UInt32 input used by DuckDB's UINTEGER cast.",
           "issue": null,
@@ -4551,7 +4729,7 @@
         },
         {
           "record": 10,
-          "mechanism": "corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast supplies the same UInt32 input used by DuckDB's UINTEGER cast.",
           "issue": null,
@@ -4566,22 +4744,84 @@
       "skipped": false,
       "records": 23,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 9,
-      "failed": 4,
-      "not_applicable": 10,
+      "adapted_records": 7,
+      "executed": 18,
+      "failed": 0,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 3,
+        "exact": 7,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "type / signature mismatch": 4
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion.",
+          "issue": null,
+          "original_sql": "SELECT max(CAST(regexp_extract(message, 'input_rows=([0-9]+)', 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+          "replacement_sql": "SELECT max(CAST(array_element(regexp_match(message, 'input_rows=([0-9]+)'), 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';"
+        },
+        {
+          "record": 8,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 10,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion.",
+          "issue": null,
+          "original_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+          "replacement_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';"
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion.",
+          "issue": null,
+          "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'result_cache.hit'\n  AND message LIKE '%per_value%';",
+          "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'result_cache.hit'\n  AND message LIKE '%per_value%';"
+        },
+        {
+          "record": 18,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
+          "issue": null,
+          "original_sql": "CALL truncate_duckdb_logs();",
+          "replacement_sql": "SELECT vgi_logs_clear();"
+        },
+        {
+          "record": 20,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion.",
+          "issue": null,
+          "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+          "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';"
+        }
+      ]
     },
     {
       "path": "scalar/per_value_edge.test",
@@ -4718,7 +4958,7 @@
       "adaptations": [
         {
           "record": 3,
-          "mechanism": "corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DuckDB overloads length for lists; DataFusion exposes the equivalent list cardinality operation as array_length.",
           "issue": null,
@@ -4727,7 +4967,7 @@
         },
         {
           "record": 14,
-          "mechanism": "corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion arrow_cast expresses the same named nested Arrow struct type as DuckDB's STRUCT/list cast syntax.",
           "issue": null,
@@ -5147,7 +5387,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "corpus/overlays/settings/struct_settings.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/settings/struct_settings.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion ConfigExtension values are scalar strings; JSON preserves the worker's advertised Arrow Struct fields and types.",
           "issue": null,
@@ -5156,7 +5396,7 @@
         },
         {
           "record": 4,
-          "mechanism": "corpus/overlays/settings/struct_settings.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/settings/struct_settings.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion ConfigExtension values are scalar strings; JSON preserves the worker's advertised Arrow Struct fields and types.",
           "issue": null,
@@ -6630,7 +6870,7 @@
       "adaptations": [
         {
           "record": 11,
-          "mechanism": "corpus/overlays/table/required_filters_basic.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_basic.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "TOP is a DataFusion SQL keyword; quoting preserves the catalog column name and predicate semantics.",
           "issue": null,
@@ -6745,7 +6985,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "corpus/overlays/table/required_filters_prefix.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_prefix.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct constructor is equivalent to DuckDB's typed struct literal.",
           "issue": null,
@@ -6754,7 +6994,7 @@
         },
         {
           "record": 3,
-          "mechanism": "corpus/overlays/table/required_filters_prefix.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_prefix.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct constructor is equivalent to DuckDB's typed struct literal.",
           "issue": null,
@@ -6763,7 +7003,7 @@
         },
         {
           "record": 4,
-          "mechanism": "corpus/overlays/table/required_filters_prefix.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_prefix.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "Nested DataFusion named_struct calls preserve the same nested Arrow Struct value.",
           "issue": null,
@@ -6794,7 +7034,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "corpus/overlays/table/required_filters_rowid.test.datafusion.json",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_rowid.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This assertion targets DuckDB's hidden virtual rowid sentinel. DataFusion exposes only the worker's physical row_id column and has no equivalent virtual-rowid provider contract.",
           "issue": null,
@@ -7447,9 +7687,9 @@
       "records": 23,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 2,
+      "executed": 8,
       "failed": 10,
-      "not_applicable": 11,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {

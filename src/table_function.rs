@@ -99,6 +99,10 @@ impl TableFunctionImpl for VgiTableFunction {
             let schema_name = self.schema_name.clone();
             let function = self.function.clone();
             let buffered = self.metadata.as_ref().is_some_and(|m| m.buffered);
+            let sink_order_dependent = self
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.sink_order_dependent);
             let stream_cache_eligible = self
                 .metadata
                 .as_ref()
@@ -112,6 +116,7 @@ impl TableFunctionImpl for VgiTableFunction {
                     arguments,
                     table_arg,
                     buffered,
+                    sink_order_dependent,
                     stream_cache_eligible,
                 )
             })

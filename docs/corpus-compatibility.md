@@ -138,7 +138,7 @@ transport equivalence is itself part of completion.
 
 ## Current baseline — 2026-08-26
 
-The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,126
+The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,161
 measured positive records. The historical `subprocess.json` filename is kept
 for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
@@ -151,18 +151,18 @@ statistics also feed DataFusion's existing pruning API.
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 3,313 / 4,126 (80.3%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,257 / 2,441 (92.5%) |
-| Exact results | 1,567 | 2,147 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,362 / 4,161 (80.8%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,271 / 2,455 (92.5%) |
+| Exact results | 1,567 | 2,161 |
 | Rendering-equivalent results | 37 | 110 |
 | Genuine value differences | 149 | 184 |
-| Not-applicable records reported separately | 607 | 595 |
+| Not-applicable records reported separately | 607 | 560 |
 | Timeouts | 0 | 0 |
 
-The HTTP run executes 3,311 records with the same 2,147 exact, 110
-rendering-equivalent, and 184 different results. It has two additional timeouts
-in `table_in_out/parallel_fanout.test`; all other completed classifications
-match Unix. `cache/basic.test` is fully executable with all 14 value checks
+The HTTP run executes the same 3,362 records with 2,161 exact, 110
+rendering-equivalent, and 184 different results. Both transports have zero
+timeouts and identical completed classifications. `cache/basic.test` is fully
+executable with all 14 value checks
 exact. The settings slice is 42/42 with 14/14 exact, while reviewed
 required-filter files are 45/45 applicable records with 25/25 exact on both
 transports.
@@ -245,10 +245,12 @@ engine work to a minimum:
    stable scalar per-value caching, diagnostics, flush/reap, compatible event
    inspection, and native DataFusion scan metrics work. The two exchange tiers
    also perform conditional revalidation, single-flight, stale-if-error, and
-   revocation eviction. Buffered whole-input caching, correlated 1:N per-value
-   entries, disk persistence/spilling, compression, stale-while-revalidate, and
-   worker-log forwarding remain. The promoted baseline executes 537/710 cache
-   records.
+   revocation eviction. Unordered buffered whole-input caching now uses a
+   duplicate-preserving multiset key, atomic finalize commit, bounded capture,
+   conditional revalidation, and lifecycle events over both transports.
+   Correlated 1:N per-value entries, disk persistence/spilling, compression,
+   stale-while-revalidate, worker-log forwarding, and SQL-mutable cache memory
+   limits remain. The promoted baseline executes 563/729 cache records.
 4. **Table-in/out engine boundary.** Correlated LATERAL calls and wide table
    subqueries remain the predominant engine-boundary failures. The adapter
    accepts the single-column expression shape DataFusion exposes naturally,

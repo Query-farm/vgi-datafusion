@@ -1046,7 +1046,9 @@ fn qualify_vgi_set(statement: &mut DFStatement, runtime: &VgiRuntime) {
     let Some((prefixed, name)) = setting_object_name(variable) else {
         return;
     };
-    if !prefixed && declared_vgi_setting(runtime, &name) {
+    if !prefixed
+        && (crate::settings::is_adapter_setting(&name) || declared_vgi_setting(runtime, &name))
+    {
         variable.0.insert(
             0,
             ObjectNamePart::Identifier(datafusion::sql::sqlparser::ast::Ident::new("vgi")),
@@ -1071,10 +1073,11 @@ fn reset_vgi_setting(
         .extensions
         .get::<crate::VgiSettings>()
         .is_some_and(|settings| settings.get(&name).is_some());
-    if !prefixed && !declared_vgi_setting(runtime, &name) && !configured {
+    let adapter_owned = crate::settings::is_adapter_setting(&name);
+    if !prefixed && !adapter_owned && !declared_vgi_setting(runtime, &name) && !configured {
         return Ok(false);
     }
-    if prefixed && !declared_vgi_setting(runtime, &name) && !configured {
+    if prefixed && !adapter_owned && !declared_vgi_setting(runtime, &name) && !configured {
         return plan_err!("unknown VGI setting `{name}`");
     }
     let state = ctx.state_ref();
@@ -2476,6 +2479,7 @@ fn prepare_global_functions(
                 PreparedGlobalKind::Table(crate::catalog::TableFunctionMetadata {
                     specs,
                     buffered: function_type == "table_buffering",
+                    sink_order_dependent: info.sink_order_dependent,
                     input_from_args: info.input_from_args,
                     stream_cache_eligible: info.max_workers != Some(1) && !info.has_finalize,
                 })

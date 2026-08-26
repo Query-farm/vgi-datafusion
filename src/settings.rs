@@ -1,10 +1,12 @@
 // Copyright 2025, 2026 Query Farm LLC - https://query.farm
 
-//! DataFusion-native session settings forwarded to VGI workers.
+//! DataFusion-native VGI session settings.
 //!
 //! DataFusion requires third-party settings to live under a configuration
-//! namespace. `VgiSettings` therefore exposes `vgi.<worker_setting>` while the
-//! wire batch retains the worker's original unprefixed field names.
+//! namespace. `VgiSettings` therefore exposes `vgi.<setting>` while worker
+//! settings retain their original unprefixed names on the wire. A small fixed
+//! set of adapter-owned tuning settings live in the same extension but are
+//! only forwarded when a worker independently declares a setting of that name.
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -19,22 +21,68 @@ use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
 ///
 /// Values use DataFusion's ordinary `SET` string representation and are cast
 /// to each attached worker's advertised Arrow type immediately before bind.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VgiSettings {
     values: BTreeMap<String, String>,
 }
 
+pub(crate) const EXCHANGE_INPUT_DEDUP: &str = "vgi_exchange_input_dedup";
+pub(crate) const RESULT_CACHE_PER_VALUE: &str = "vgi_result_cache_per_value";
+
+const ADAPTER_BOOLEAN_SETTINGS: [&str; 2] = [EXCHANGE_INPUT_DEDUP, RESULT_CACHE_PER_VALUE];
+
+/// Typed snapshot of settings consumed by the DataFusion adapter itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VgiAdapterSettings {
+    exchange_input_dedup: bool,
+    result_cache_per_value: bool,
+}
+
+impl VgiAdapterSettings {
+    pub(crate) fn exchange_input_dedup(self) -> bool {
+        self.exchange_input_dedup
+    }
+
+    pub(crate) fn result_cache_per_value(self) -> bool {
+        self.result_cache_per_value
+    }
+}
+
+impl Default for VgiSettings {
+    fn default() -> Self {
+        Self {
+            values: ADAPTER_BOOLEAN_SETTINGS
+                .into_iter()
+                .map(|name| (name.to_string(), "true".to_string()))
+                .collect(),
+        }
+    }
+}
+
 impl VgiSettings {
-    /// Set one worker setting without going through SQL.
+    /// Set one VGI setting without going through SQL.
     pub fn set_value(&mut self, name: impl Into<String>, value: impl Into<String>) -> DFResult<()> {
         let name = normalize_name(&name.into())?;
-        self.values.insert(name, value.into());
+        let value = value.into();
+        let value = if is_adapter_setting(&name) {
+            parse_bool(&name, &value)?.to_string()
+        } else {
+            value
+        };
+        self.values.insert(name, value);
         Ok(())
     }
 
-    /// Remove one worker setting, restoring worker/default behavior.
+    /// Reset a setting to its default.
+    ///
+    /// Dynamic worker settings are removed. Adapter-owned booleans are
+    /// restored to `true`.
     pub fn reset_value(&mut self, name: &str) -> bool {
-        self.values.remove(&name.to_ascii_lowercase()).is_some()
+        let name = name.to_ascii_lowercase();
+        if is_adapter_setting(&name) {
+            return self.values.insert(name, "true".to_string()).is_some();
+        }
+        self.values.remove(&name).is_some()
     }
 
     /// Inspect the configured string value.
@@ -46,6 +94,21 @@ impl VgiSettings {
 
     pub(crate) fn values(&self) -> &BTreeMap<String, String> {
         &self.values
+    }
+
+    pub(crate) fn adapter_settings(&self) -> VgiAdapterSettings {
+        VgiAdapterSettings {
+            exchange_input_dedup: self.adapter_bool(EXCHANGE_INPUT_DEDUP),
+            result_cache_per_value: self.adapter_bool(RESULT_CACHE_PER_VALUE),
+        }
+    }
+
+    fn adapter_bool(&self, name: &str) -> bool {
+        // `set_value` validates and canonicalizes adapter booleans. Falling
+        // back to true also keeps hand-built/default snapshots conservative.
+        self.get(name)
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(true)
     }
 }
 
@@ -72,7 +135,11 @@ impl ExtensionOptions for VgiSettings {
             .map(|(name, value)| ConfigEntry {
                 key: format!("vgi.{name}"),
                 value: Some(value.clone()),
-                description: "Value forwarded using the attached VGI worker's declared Arrow type",
+                description: if is_adapter_setting(name) {
+                    "DataFusion VGI adapter tuning; forwarded only when the worker declares the same setting"
+                } else {
+                    "Value forwarded using the attached VGI worker's declared Arrow type"
+                },
             })
             .collect()
     }
@@ -90,6 +157,22 @@ fn normalize_name(name: &str) -> DFResult<String> {
         )));
     }
     Ok(name.to_ascii_lowercase())
+}
+
+pub(crate) fn is_adapter_setting(name: &str) -> bool {
+    ADAPTER_BOOLEAN_SETTINGS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+fn parse_bool(name: &str, value: &str) -> DFResult<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "on" | "1" => Ok(true),
+        "false" | "off" | "0" => Ok(false),
+        _ => Err(DataFusionError::Configuration(format!(
+            "VGI adapter setting `{name}` expects a boolean, found `{value}`"
+        ))),
+    }
 }
 
 pub(crate) fn encode_settings(
@@ -214,6 +297,61 @@ mod tests {
         assert_eq!(settings.get("multiplier"), Some("5"));
         assert!(settings.reset_value("MULTIPLIER"));
         assert_eq!(settings.get("multiplier"), None);
+    }
+
+    #[test]
+    fn adapter_settings_are_typed_default_true_and_reset_to_default() {
+        let mut settings = VgiSettings::default();
+        assert_eq!(
+            settings.adapter_settings(),
+            VgiAdapterSettings {
+                exchange_input_dedup: true,
+                result_cache_per_value: true,
+            }
+        );
+        let keys = settings
+            .entries()
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect::<Vec<_>>();
+        assert!(keys.contains(&format!("vgi.{EXCHANGE_INPUT_DEDUP}")));
+        assert!(keys.contains(&format!("vgi.{RESULT_CACHE_PER_VALUE}")));
+
+        settings.set_value(EXCHANGE_INPUT_DEDUP, "OFF").unwrap();
+        settings.set_value(RESULT_CACHE_PER_VALUE, "false").unwrap();
+        assert!(!settings.adapter_settings().exchange_input_dedup());
+        assert!(!settings.adapter_settings().result_cache_per_value());
+
+        assert!(settings.reset_value(EXCHANGE_INPUT_DEDUP));
+        assert!(settings.reset_value(RESULT_CACHE_PER_VALUE));
+        assert!(settings.adapter_settings().exchange_input_dedup());
+        assert!(settings.adapter_settings().result_cache_per_value());
+        assert!(settings.set_value(EXCHANGE_INPUT_DEDUP, "maybe").is_err());
+    }
+
+    #[test]
+    fn adapter_settings_are_only_encoded_for_matching_worker_declarations() {
+        let mut settings = VgiSettings::default();
+        settings.set_value(RESULT_CACHE_PER_VALUE, "false").unwrap();
+        assert!(encode_settings(&settings, &[]).unwrap().is_none());
+
+        let declaration = vgi_client::SettingSpec {
+            name: RESULT_CACHE_PER_VALUE.to_string(),
+            description: "worker independently declares the same setting".to_string(),
+            data_type: DataType::Boolean,
+            default_value: None,
+        };
+        let encoded = encode_settings(&settings, &[declaration])
+            .unwrap()
+            .expect("matching worker declaration is forwarded");
+        let batch = vgi_protocol::ipc::read_batch(&encoded.0).unwrap();
+        let values = batch
+            .column_by_name(RESULT_CACHE_PER_VALUE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+            .unwrap();
+        assert!(!values.value(0));
     }
 
     #[test]

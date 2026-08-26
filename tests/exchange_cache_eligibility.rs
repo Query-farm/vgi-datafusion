@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use datafusion::arrow::array::{Array, UInt64Array};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
@@ -134,14 +136,243 @@ async fn stateful_and_literal_exchanges_never_enter_streaming_batch_cache(
         assert_eq!(cache_entries(&ctx).await?, 0, "{query}");
     }
 
-    // A buffering function has its own whole-input/finalize lifecycle. Its
-    // cache advertisement must never be mistaken for a streaming batch entry.
-    let buffered = "SELECT * FROM ex.main.cached_sum_all(\
+    // A buffering function without finalize cache metadata remains uncached;
+    // buffered caching is an explicit whole-lifecycle worker opt-in.
+    let buffered = "SELECT * FROM ex.main.sum_all_columns(\
                     (SELECT x FROM range(5) t(x)), logging := false)";
     for _ in 0..2 {
         vgi_datafusion::sql(&ctx, buffered).await?.collect().await?;
     }
     assert_eq!(exchange_stats(&ctx).await?, (0, 0), "{buffered}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_cache_keys_and_commits_the_complete_input() -> datafusion::common::Result<()> {
+    let Some(ctx) = attached().await? else {
+        return Ok(());
+    };
+    const FIVE: &str = "SELECT x FROM ex.main.cached_sum_all(\
+                        (SELECT x FROM range(5) t(x)), logging := false)";
+    for _ in 0..2 {
+        let batches = vgi_datafusion::sql(&ctx, FIVE).await?.collect().await?;
+        assert_eq!(
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                .expect("buffered sum is Int64")
+                .value(0),
+            10
+        );
+    }
+    assert_eq!(exchange_stats(&ctx).await?, (1, 1));
+    assert_eq!(cache_entries(&ctx).await?, 1);
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT x FROM ex.main.cached_sum_all(\
+         (SELECT x FROM range(6) t(x)), logging := false)",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert_eq!(
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .expect("buffered sum is Int64")
+            .value(0),
+        15
+    );
+    assert_eq!(exchange_stats(&ctx).await?, (1, 2));
+    assert_eq!(cache_entries(&ctx).await?, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn buffered_revalidation_is_conditional_and_single_flight() -> datafusion::common::Result<()>
+{
+    let Some(ctx) = attached().await? else {
+        return Ok(());
+    };
+    const QUERY: &str = "SELECT x FROM ex.main.cached_reval_sum_all(\
+                         (SELECT x FROM range(5) t(x)), logging := false)";
+    vgi_datafusion::sql(&ctx, QUERY).await?.collect().await?;
+    assert_eq!(cache_entries(&ctx).await?, 1);
+    assert_eq!(cache_revalidations(&ctx).await?, 0);
+
+    concurrent_queries(&ctx, QUERY, 8).await?;
+    assert_eq!(
+        cache_revalidations(&ctx).await?,
+        1,
+        "one buffered lifecycle should validate an overlapping request wave"
+    );
+    let (hits, stores) = exchange_stats(&ctx).await?;
+    assert!(hits >= 8);
+    assert_eq!(stores, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_revalidation_honors_stale_if_error() -> datafusion::common::Result<()> {
+    let Some(ctx) = attached().await? else {
+        return Ok(());
+    };
+    const QUERY: &str = "SELECT x FROM ex.main.cached_reval_error_sum_all(\
+                         (SELECT x FROM range(5) t(x)), logging := false)";
+    for _ in 0..2 {
+        let batches = vgi_datafusion::sql(&ctx, QUERY).await?.collect().await?;
+        assert_eq!(
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                .expect("buffered sum is Int64")
+                .value(0),
+            10
+        );
+    }
+    assert_eq!(cache_entries(&ctx).await?, 1);
+    assert_eq!(cache_stale_serves(&ctx).await?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_revalidation_revocation_evicts_stale_bytes() -> datafusion::common::Result<()> {
+    let Some(ctx) = attached().await? else {
+        return Ok(());
+    };
+    const QUERY: &str = "SELECT x FROM ex.main.cached_reval_no_store_sum_all(\
+                         (SELECT x FROM range(5) t(x)), logging := false)";
+    vgi_datafusion::sql(&ctx, QUERY).await?.collect().await?;
+    assert_eq!(cache_entries(&ctx).await?, 1, "cold buffered entry");
+    assert!(
+        vgi_datafusion::sql(&ctx, QUERY)
+            .await?
+            .collect()
+            .await
+            .is_err(),
+        "no_store + not_modified must not replay stale buffered bytes"
+    );
+    assert_eq!(cache_entries(&ctx).await?, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_buffered_revocation_serves_result_but_evicts_stale_bytes(
+) -> datafusion::common::Result<()> {
+    let Some(ctx) = attached().await? else {
+        return Ok(());
+    };
+    const QUERY: &str = "SELECT x FROM ex.main.cached_reval_fresh_no_store_sum_all(\
+                         (SELECT x FROM range(5) t(x)), logging := false)";
+    let cold = vgi_datafusion::sql(&ctx, QUERY).await?.collect().await?;
+    assert_eq!(cache_entries(&ctx).await?, 1, "cold buffered entry");
+    let fresh = vgi_datafusion::sql(&ctx, QUERY).await?.collect().await?;
+    for batches in [cold, fresh] {
+        assert_eq!(
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                .expect("buffered sum is Int64")
+                .value(0),
+            10
+        );
+    }
+    assert_eq!(cache_entries(&ctx).await?, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_buffered_lifecycle_never_commits_a_partial_result() -> datafusion::common::Result<()>
+{
+    let Some(ctx) = attached().await? else {
+        return Ok(());
+    };
+    let query = "SELECT * FROM ex.main.exception_finalize(\
+                 (SELECT x FROM range(5) t(x)), logging := false)";
+    assert!(vgi_datafusion::sql(&ctx, query)
+        .await?
+        .collect()
+        .await
+        .is_err());
+    assert_eq!(cache_entries(&ctx).await?, 0);
+    assert_eq!(exchange_stats(&ctx).await?, (0, 0));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_buffered_result_records_capture_abort_without_failing_query(
+) -> datafusion::common::Result<()> {
+    let Some(worker) = common::example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    let mut options = vgi_datafusion::VgiSessionOptions::default();
+    options.cache_limits.max_entry_bytes = 1;
+    let runtime = Arc::new(vgi_datafusion::VgiRuntime::new(options));
+    let ctx = SessionContext::new_with_config(
+        SessionConfig::new()
+            .with_target_partitions(1)
+            .with_extension(Arc::clone(&runtime)),
+    );
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            common::sql_quote(&worker.to_string_lossy())
+        ),
+    )
+    .await?;
+
+    const QUERY: &str = "SELECT x FROM ex.main.cached_sum_all(\
+                         (SELECT x FROM range(5) t(x)), logging := false)";
+    for expected_aborts in 1..=2 {
+        let batches = vgi_datafusion::sql(&ctx, QUERY).await?.collect().await?;
+        assert_eq!(
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                .expect("buffered sum is Int64")
+                .value(0),
+            10
+        );
+        assert_eq!(runtime.result_cache().stats().entries, 0);
+        assert_eq!(
+            runtime.result_cache().stats().capture_aborts,
+            expected_aborts,
+            "every over-cap whole-input result is returned but not cached"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_buffered_lifecycle_cannot_commit_after_its_future_is_dropped(
+) -> datafusion::common::Result<()> {
+    let Some(ctx) = attached().await? else {
+        return Ok(());
+    };
+    const QUERY: &str = "SELECT x FROM ex.main.cached_slow_sum_all(\
+                         (SELECT x FROM range(5) t(x)), logging := false)";
+    let frame = vgi_datafusion::sql(&ctx, QUERY).await?;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), frame.collect())
+            .await
+            .is_err(),
+        "the fixture should still be inside its blocking buffered lifecycle"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+    assert_eq!(cache_entries(&ctx).await?, 0);
+    assert_eq!(exchange_stats(&ctx).await?, (0, 0));
+
+    vgi_datafusion::sql(&ctx, QUERY).await?.collect().await?;
+    assert_eq!(cache_entries(&ctx).await?, 1);
+    assert_eq!(exchange_stats(&ctx).await?, (0, 1));
     Ok(())
 }
 

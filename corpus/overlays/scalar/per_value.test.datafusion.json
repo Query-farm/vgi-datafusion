@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 7,
+      "original_sql": "SELECT max(CAST(regexp_extract(message, 'input_rows=([0-9]+)', 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+      "replacement_sql": "SELECT max(CAST(array_element(regexp_match(message, 'input_rows=([0-9]+)'), 1) AS BIGINT))\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion."
+    },
+    {
+      "record": 10,
+      "original_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+      "replacement_sql": "SELECT count(*)\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'result_cache.hit'\n  AND message LIKE '%per_value%';",
+      "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'result_cache.hit'\n  AND message LIKE '%per_value%';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion."
+    },
+    {
+      "record": 20,
+      "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+      "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'scalar.write_input'\n  AND message LIKE '%cached_double_scalar%';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion."
+    },
+    {
+      "record": 5,
+      "original_sql": "CALL truncate_duckdb_logs();",
+      "replacement_sql": "SELECT vgi_logs_clear();",
+      "kind": "equivalent_sql",
+      "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear()."
+    },
+    {
+      "record": 8,
+      "original_sql": "CALL truncate_duckdb_logs();",
+      "replacement_sql": "SELECT vgi_logs_clear();",
+      "kind": "equivalent_sql",
+      "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear()."
+    },
+    {
+      "record": 18,
+      "original_sql": "CALL truncate_duckdb_logs();",
+      "replacement_sql": "SELECT vgi_logs_clear();",
+      "kind": "equivalent_sql",
+      "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear()."
+    }
+  ]
+}

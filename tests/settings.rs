@@ -7,6 +7,62 @@ mod common;
 use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
 use datafusion::prelude::SessionContext;
 
+fn configured(ctx: &SessionContext, name: &str) -> Option<String> {
+    ctx.copied_config()
+        .options()
+        .extensions
+        .get::<vgi_datafusion::VgiSettings>()
+        .and_then(|settings| settings.get(name))
+        .map(str::to_string)
+}
+
+#[tokio::test]
+async fn adapter_tuning_supports_unqualified_set_defaults_and_reset(
+) -> datafusion::common::Result<()> {
+    let ctx = SessionContext::new();
+
+    // Calling through the adapter installs its ConfigExtension even without
+    // an attached worker. Both host-owned compatibility knobs default on.
+    vgi_datafusion::sql(&ctx, "SELECT 1").await?;
+    assert_eq!(
+        configured(&ctx, "vgi_exchange_input_dedup").as_deref(),
+        Some("true")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_per_value").as_deref(),
+        Some("true")
+    );
+
+    vgi_datafusion::sql(&ctx, "SET vgi_exchange_input_dedup = false")
+        .await?
+        .collect()
+        .await?;
+    vgi_datafusion::sql(&ctx, "SET vgi.vgi_result_cache_per_value = false")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        configured(&ctx, "vgi_exchange_input_dedup").as_deref(),
+        Some("false")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_per_value").as_deref(),
+        Some("false")
+    );
+
+    vgi_datafusion::sql(&ctx, "RESET vgi_exchange_input_dedup").await?;
+    vgi_datafusion::sql(&ctx, "RESET vgi.vgi_result_cache_per_value").await?;
+    assert_eq!(
+        configured(&ctx, "vgi_exchange_input_dedup").as_deref(),
+        Some("true")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_per_value").as_deref(),
+        Some("true")
+    );
+    Ok(())
+}
+
 async fn attached() -> datafusion::common::Result<Option<SessionContext>> {
     let Some(worker) = common::example_worker() else {
         eprintln!("skipping: vgi-example-worker not built");

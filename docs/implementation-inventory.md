@@ -20,10 +20,10 @@ DataFusion where there is no matching planning or execution seam.
   static filters, and limit.
   Split results with advertised ordering are not cached because flattened
   replay could violate DataFusion plan properties.
-- Producer results, stateless table-input batches, and stable scalar per-value
-  entries support ETag/Last-Modified conditional revalidation, including
-  immediate-stale validator policies, and worker-authorized stale-if-error
-  fallback.
+- Producer results, stateless table-input batches, stable scalar per-value
+  entries, and buffered whole-input results support ETag/Last-Modified
+  conditional revalidation, including immediate-stale validator policies, and
+  worker-authorized stale-if-error fallback.
 - Concurrent identical misses are coalesced per complete cache key. One query
   fills the entry while followers replay the atomic result; cancellation,
   refusal, expiry, and `no_store` wake followers to execute normally rather
@@ -33,11 +33,18 @@ DataFusion where there is no matching planning or execution seam.
 - Stateless parallel streaming table-in/out calls can memoize each complete
   input batch after the worker advertises cache control. Stateful FINALIZE,
   serial, literal-single-row, and secret-consuming calls are excluded.
+- Unordered buffering functions can memoize their complete input multiset.
+  Canonical row digests make the key independent of input order and DataFusion
+  batch boundaries while preserving duplicates; `sink_order_dependent`
+  functions are excluded. A result commits only after the complete lifecycle
+  and every finalize stream succeed, and cancellation or an over-cap capture
+  returns the query result without storing partial state.
 - Stable scalar functions can opt into per-value memoization. Distinct tuples
   are sent once, partial hits send only misses, and outputs are gathered back in
   caller order. Table-input and scalar exchange misses use the same per-key
   single-flight discipline as producers. Volatile and secret-consuming calls
-  take the direct path.
+  take the direct path. Adapter-owned `vgi_exchange_input_dedup` and
+  `vgi_result_cache_per_value` settings default on and support `SET`/`RESET`.
 - Conditional exchange failures may serve stale bytes only within the worker's
   advertised `stale_if_error` window. A `not_modified` or fresh response that
   withdraws eligibility (`no_store`, transaction scope, or per-value opt-in)
@@ -47,9 +54,9 @@ DataFusion where there is no matching planning or execution seam.
   DataFusion execution metrics and in `EXPLAIN ANALYZE`; result-cache statistics
   distinguish exchange hits, stores, and bytes served.
 
-This is intentionally narrower than the DuckDB cache. Buffered whole-input
-results, correlated 1:N per-value calls, persistent disk storage,
-stale-while-revalidate, and compression remain deferred.
+This is intentionally narrower than the DuckDB cache. Correlated 1:N per-value
+calls, persistent disk storage, stale-while-revalidate, compression, and
+SQL-mutable memory limits remain deferred.
 
 ### Catalog and function fidelity
 
@@ -110,7 +117,9 @@ stale-while-revalidate, and compression remain deferred.
   credential values.
 - `VgiEventSink` receives structured catalog, plan, scan, cache, error, and
   cancellation events. The session also retains a bounded event history for
-  `vgi_logs()` and `vgi_log_stats()`.
+  `vgi_logs()` and `vgi_log_stats()`. Successful buffered begin/combine/finalize
+  calls and actual scalar input writes report structural counts without
+  arguments, row values, secrets, or synthetic events on cache replay.
 - `VgiLocalityHook` exposes planned split locations to an embedding scheduler.
   The adapter does not invent DataFusion hash partitioning from VGI transforms.
 - `VgiSessionOptions` configures cache bounds, event history, and an optional
@@ -121,6 +130,10 @@ stale-while-revalidate, and compression remain deferred.
 - Dropping an unfinished producer scan sends one protocol cancellation. Open,
   header/decode, read, or cancellation failures poison the owning client so a
   pooled connection is discarded; natural end-of-stream remains reusable.
+- A non-buffered table-input call with a pushed finite limit stays inside the
+  physical plan and streams through bounded channels. DataFusion backpressure,
+  local truncation, and cancellation stop the child and worker without
+  materializing the complete input; partial exchanges bypass result caching.
 - Start-only VGI splits now declare `Boundedness::Unbounded` instead of being
   rejected or misrepresented as bounded.
 
@@ -138,7 +151,7 @@ stale-while-revalidate, and compression remain deferred.
 | Global functions | Supported | Default-on/opt-out policy, collision ownership, concurrent attach linearization, replacement, and DETACH cleanup included |
 | Projection, static filters, LIMIT | Supported | Direct functions preserve exactness; lazy catalog tables recheck filters |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
-| Session result cache | Partial | Producer/split, streaming per-batch, and stable scalar per-value tiers have conditional revalidation, single-flight, stale-if-error, revocation eviction, and native scan metrics; no buffered/1:N cache, disk, or SWR |
+| Session result cache | Partial | Producer/split, streaming per-batch, stable scalar per-value, and unordered buffered whole-input tiers have conditional revalidation, single-flight, stale-if-error, revocation eviction, and native scan metrics; no correlated 1:N cache, disk, SWR, or SQL-mutable memory limits |
 | Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
@@ -153,10 +166,11 @@ stale-while-revalidate, and compression remain deferred.
 
 ## Existing DataFusion APIs worth using next
 
-1. **Cache breadth with matching semantics.** Add buffered whole-input and
-   correlated 1:N tiers only where a complete deterministic key and
-   cancellation boundary can be proved. Keep disk persistence optional and add
-   bounded stale-while-revalidate only with deterministic scheduling semantics.
+1. **Cache breadth with matching semantics.** Add correlated 1:N entries only
+   where a complete deterministic key and cancellation boundary can be proved.
+   Keep disk persistence optional, consider SQL-safe cache-limit reconfiguration,
+   and add bounded stale-while-revalidate only with deterministic scheduling
+   semantics.
 2. **Unbounded execution hardening.** Gate resume on worker advertisement and
    add checkpoint/reconnect, cancellation, backpressure, and soak coverage.
 3. **Catalog and scalar breadth.** Broaden view translation and continue true
@@ -181,11 +195,10 @@ wiring VGI into DataFusion rather than developing a parallel query engine.
 ## Production verification gate
 
 The 327-file shared VGI SQLLogicTest corpus now completes against both HTTP and
-an explicitly managed Unix-socket worker. Unix executes 3,313 records and HTTP
-3,311; both produce 2,147 exact, 110 rendering-equivalent, and 184 genuinely
-different results. The only transport delta is two additional HTTP timeouts in
-`table_in_out/parallel_fanout.test`; every completed result classification is
-otherwise identical.
+an explicitly managed Unix-socket worker. Each transport executes 3,362 records
+with zero timeouts and produces 2,161 exact, 110 rendering-equivalent, and 184
+genuinely different results. Selected-file baseline comparison reports no
+regressions on either transport.
 The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
 and diagnostics, correlated table calls, wide table input, writes, and secret
 host configuration. Publishing, stalled subprocess-RPC cancellation, and
@@ -197,15 +210,17 @@ loopback HTTP. This includes native CSV/Parquet arms, typed format options,
 schema reconciliation, branch filtering, and split redemption.
 
 Post-baseline focused verification also covers concurrent producer and split
-cache fills; producer, table-input, and scalar per-value immediate-stale
-revalidation; exchange single-flight and stale-if-error; revocation eviction;
+cache fills; producer, table-input, scalar per-value, and buffered whole-input
+immediate-stale revalidation; exchange single-flight and stale-if-error;
+revocation eviction; unordered buffered multiset identity and bounded capture;
+truthful scalar/buffered lifecycle events; incremental finite-LIMIT exchange;
 catalog-source provider resolution; pre-attach canonical catalog discovery;
 global-function opt-out/collision/lifecycle; scan Drop cancellation and pool
 poisoning; callback-only window median; overload incompatibility; native scalar
 overlays; and multi-scope secret binds. The reviewed aggregate window slice now
 executes 15/15 applicable records with all 14 results agreeing.
 
-The current release-mode adapter suite passes 211/211 tests plus two doctests.
+The current release-mode adapter suite passes 232/232 tests plus two doctests.
 The settings slice executes 42/42 records with all 14 results exact, and the
 required-filter slice executes 45/45 applicable records with all 25 results
 exact, over both Unix and HTTP. A 13-file

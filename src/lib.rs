@@ -90,6 +90,7 @@ mod session;
 mod settings;
 mod table_function;
 mod table_input;
+mod table_input_stream;
 
 pub use aggregate::VgiAggregateUdf;
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};

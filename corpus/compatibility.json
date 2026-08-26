@@ -65,7 +65,7 @@
       "title": "VGI result cache",
       "status": "partial",
       "groups": ["cache"],
-      "remaining": ["buffered whole-input result caching", "correlated 1:N per-value caching", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events"]
+      "remaining": ["correlated 1:N per-value caching", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events", "SQL-mutable cache memory limits"]
     },
     {
       "id": "catalog_metadata",
