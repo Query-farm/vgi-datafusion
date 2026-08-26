@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 2,
+      "original_sql": "SELECT n, h FROM (VALUES\n  (1, 100::HUGEINT),\n  (2, 200::HUGEINT),\n  (3, NULL::HUGEINT),\n  (4, 999999999::HUGEINT)\n) t(n, h)\nWHERE h = 200::HUGEINT ORDER BY n;",
+      "replacement_sql": "SELECT n, h FROM (VALUES\n  (1, arrow_cast('100', 'Decimal128(38, 0)')),\n  (2, arrow_cast('200', 'Decimal128(38, 0)')),\n  (3, arrow_cast(NULL, 'Decimal128(38, 0)')),\n  (4, arrow_cast('999999999', 'Decimal128(38, 0)'))\n) t(n, h)\nWHERE h = arrow_cast('200', 'Decimal128(38, 0)') ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax."
+    },
+    {
+      "record": 3,
+      "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES\n  (1, 100::HUGEINT),\n  (2, 200::HUGEINT),\n  (3, NULL::HUGEINT),\n  (4, 999999999::HUGEINT)\n) v(n, h)))\nWHERE h = 200::HUGEINT ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path."
+    },
+    {
+      "record": 4,
+      "original_sql": "SELECT n, h FROM (VALUES\n  (1, 100::HUGEINT),\n  (2, 99999999999999999999999999999999999999::HUGEINT)\n) t(n, h)\nWHERE h = 99999999999999999999999999999999999999::HUGEINT;",
+      "replacement_sql": "SELECT n, h FROM (VALUES\n  (1, arrow_cast('100', 'Decimal128(38, 0)')),\n  (2, arrow_cast('99999999999999999999999999999999999999', 'Decimal128(38, 0)'))\n) t(n, h)\nWHERE h = arrow_cast('99999999999999999999999999999999999999', 'Decimal128(38, 0)');",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax."
+    },
+    {
+      "record": 5,
+      "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES\n  (1, 100::HUGEINT),\n  (2, 99999999999999999999999999999999999999::HUGEINT)\n) v(n, h)))\nWHERE h = 99999999999999999999999999999999999999::HUGEINT;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path."
+    },
+    {
+      "record": 6,
+      "original_sql": "SELECT n, h FROM (VALUES\n  (1, 9223372036854775807::HUGEINT),\n  (2, 9223372036854775808::HUGEINT),\n  (3, 18446744073709551616::HUGEINT)\n) t(n, h)\nWHERE h > 9223372036854775807::HUGEINT ORDER BY n;",
+      "replacement_sql": "SELECT n, h FROM (VALUES\n  (1, arrow_cast('9223372036854775807', 'Decimal128(38, 0)')),\n  (2, arrow_cast('9223372036854775808', 'Decimal128(38, 0)')),\n  (3, arrow_cast('18446744073709551616', 'Decimal128(38, 0)'))\n) t(n, h)\nWHERE h > arrow_cast('9223372036854775807', 'Decimal128(38, 0)') ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax."
+    },
+    {
+      "record": 7,
+      "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES\n  (1, 9223372036854775807::HUGEINT),\n  (2, 9223372036854775808::HUGEINT),\n  (3, 18446744073709551616::HUGEINT)\n) v(n, h)))\nWHERE h > 9223372036854775807::HUGEINT ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT n, h FROM (VALUES (1, 100::HUGEINT), (2, 200::HUGEINT), (3, 300::HUGEINT)) t(n, h)\nWHERE h IN (100::HUGEINT, 300::HUGEINT) ORDER BY n;",
+      "replacement_sql": "SELECT n, h FROM (VALUES (1, arrow_cast('100', 'Decimal128(38, 0)')), (2, arrow_cast('200', 'Decimal128(38, 0)')), (3, arrow_cast('300', 'Decimal128(38, 0)'))) t(n, h)\nWHERE h IN (arrow_cast('100', 'Decimal128(38, 0)'), arrow_cast('300', 'Decimal128(38, 0)')) ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax."
+    },
+    {
+      "record": 9,
+      "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES (1, 100::HUGEINT), (2, 200::HUGEINT), (3, 300::HUGEINT)) v(n, h)))\nWHERE h IN (100::HUGEINT, 300::HUGEINT) ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path."
+    },
+    {
+      "record": 10,
+      "original_sql": "SELECT n, h FROM (VALUES\n  (1, 0::UHUGEINT),\n  (2, 1::UHUGEINT),\n  (3, 99999999999999999999999999999999999999::UHUGEINT)\n) t(n, h)\nWHERE h = 99999999999999999999999999999999999999::UHUGEINT;",
+      "replacement_sql": "SELECT n, h FROM (VALUES\n  (1, arrow_cast('0', 'Decimal128(38, 0)')),\n  (2, arrow_cast('1', 'Decimal128(38, 0)')),\n  (3, arrow_cast('99999999999999999999999999999999999999', 'Decimal128(38, 0)'))\n) t(n, h)\nWHERE h = arrow_cast('99999999999999999999999999999999999999', 'Decimal128(38, 0)');",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES\n  (1, 0::UHUGEINT),\n  (2, 1::UHUGEINT),\n  (3, 99999999999999999999999999999999999999::UHUGEINT)\n) v(n, h)))\nWHERE h = 99999999999999999999999999999999999999::UHUGEINT;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path."
+    }
+  ]
+}

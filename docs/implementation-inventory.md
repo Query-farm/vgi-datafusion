@@ -216,7 +216,7 @@ wiring VGI into DataFusion rather than developing a parallel query engine.
 
 The current promoted 327-file shared VGI SQLLogicTest baseline completes
 against both HTTP and an explicitly managed Unix-socket worker. Each transport
-executes 3,526 records with zero timeouts and produces 2,252 exact, 126
+executes 3,554 records with zero timeouts and produces 2,278 exact, 128
 rendering-equivalent, and 169 genuinely different results. The promoted reports
 are byte-identical.
 The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
@@ -250,6 +250,9 @@ includes the focused cache-identity, multi-column dynamic-filter, and transport
 hardening contracts in addition to cache-limit, table-input observability,
 scalar-null, deterministic single-flight, and the existing transport and
 integration coverage.
+The typed static/dynamic filter-pushdown area executes 185/185 applicable
+records with every comparable result agreeing; its remaining records are
+reviewed DataFusion SQL/planning boundaries rather than failed VGI filters.
 The settings slice executes 42/42 records with all 14 results exact, and the
 required-filter slice executes 45/45 applicable records with all 25 results
 exact, over both Unix and HTTP. A 13-file

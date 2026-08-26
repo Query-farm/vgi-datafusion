@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 2,
+      "original_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) t(n, u)\nWHERE u = '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
+      "replacement_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, NULL::VARCHAR),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) t(n, u)\nWHERE u = '00000000-0000-0000-0000-000000000002'\nORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type."
+    },
+    {
+      "record": 3,
+      "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u = '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths."
+    },
+    {
+      "record": 4,
+      "original_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) t(n, u)\nWHERE u != '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
+      "replacement_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, NULL::VARCHAR),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) t(n, u)\nWHERE u != '00000000-0000-0000-0000-000000000002'\nORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type."
+    },
+    {
+      "record": 5,
+      "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u != '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths."
+    },
+    {
+      "record": 6,
+      "original_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, NULL::UUID)\n) t(n, u)\nWHERE u IS NULL ORDER BY n;",
+      "replacement_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, NULL::VARCHAR)\n) t(n, u)\nWHERE u IS NULL ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type."
+    },
+    {
+      "record": 7,
+      "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, NULL::UUID)\n) v(n, u)))\nWHERE u IS NULL ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) t(n, u)\nWHERE u IN (\n  '00000000-0000-0000-0000-000000000001'::UUID,\n  'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID\n)\nORDER BY n;",
+      "replacement_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) t(n, u)\nWHERE u IN (\n  '00000000-0000-0000-0000-000000000001',\n  'ffffffff-ffff-ffff-ffff-ffffffffffff'\n)\nORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type."
+    },
+    {
+      "record": 9,
+      "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u IN (\n  '00000000-0000-0000-0000-000000000001'::UUID,\n  'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID\n)\nORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths."
+    }
+  ]
+}

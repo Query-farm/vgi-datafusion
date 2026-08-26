@@ -7,17 +7,17 @@
   "totals": {
     "files_run": 278,
     "files_skipped": 49,
-    "measured_records": 4183,
-    "executed": 3526,
-    "failed": 657,
-    "not_applicable": 538,
-    "adapted_records": 187,
+    "measured_records": 4134,
+    "executed": 3554,
+    "failed": 580,
+    "not_applicable": 587,
+    "adapted_records": 213,
     "blocked": 0,
     "timed_out": 0,
     "expected_errors_ignored": 179,
     "values": {
-      "exact": 2252,
-      "rendering_equivalent": 126,
+      "exact": 2278,
+      "rendering_equivalent": 128,
       "different": 169,
       "unordered_subset": 42
     }
@@ -25,8 +25,8 @@
   "failure_buckets": {
     "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 17,
     "parse error (dialect)": 87,
-    "type / signature mismatch": 54,
-    "other": 499
+    "type / signature mismatch": 50,
+    "other": 426
   },
   "areas": [
     {
@@ -104,10 +104,10 @@
       ],
       "files": 13,
       "files_skipped": 0,
-      "executed": 157,
-      "failed": 77,
-      "not_applicable": 0,
-      "adapted_records": 4,
+      "executed": 185,
+      "failed": 0,
+      "not_applicable": 49,
+      "adapted_records": 30,
       "blocked": 0,
       "timed_out": 0
     },
@@ -323,8 +323,8 @@
     {
       "group": "filter_pushdown",
       "area": "filter_pushdown",
-      "executed": 157,
-      "failed": 77
+      "executed": 185,
+      "failed": 0
     },
     {
       "group": "global_functions",
@@ -3942,10 +3942,10 @@
       "skipped": false,
       "records": 5,
       "expected_errors_ignored": 0,
-      "adapted_records": 4,
+      "adapted_records": 2,
       "executed": 3,
-      "failed": 2,
-      "not_applicable": 0,
+      "failed": 0,
+      "not_applicable": 2,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -3954,9 +3954,7 @@
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 2
-      },
+      "failure_buckets": {},
       "adaptations": [
         {
           "record": 2,
@@ -3969,12 +3967,12 @@
         },
         {
           "record": 3,
-          "mechanism": "builtin:duckdb_binary",
-          "kind": "equivalent_sql",
-          "reason": "DuckDB BLOB/hex syntax mapped to DataFusion Binary/encode semantics",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/blob.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The runner can map DuckDB BLOB literals to DataFusion Binary, but DataFusion 55 cannot pass both n and b as top-level columns through this scalar-subquery table-function argument. Struct packing would change the VGI input schema.",
           "issue": null,
           "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES\n  (1, '\\x00\\x01\\x02'::BLOB),\n  (2, '\\xff\\xee\\xdd'::BLOB),\n  (3, NULL::BLOB)\n) v(n, b)))\nWHERE b = '\\xff\\xee\\xdd'::BLOB ORDER BY n;",
-          "replacement_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, X'000102'), (2, X'ffeedd'), (3, NULL::BYTEA)) v (n, b))) WHERE b = X'ffeedd' ORDER BY n"
+          "replacement_sql": null
         },
         {
           "record": 4,
@@ -3987,12 +3985,12 @@
         },
         {
           "record": 5,
-          "mechanism": "builtin:duckdb_binary",
-          "kind": "equivalent_sql",
-          "reason": "DuckDB BLOB/hex syntax mapped to DataFusion Binary/encode semantics",
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/blob.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The runner can map DuckDB BLOB literals to DataFusion Binary, but DataFusion 55 cannot pass both n and b as top-level columns through this scalar-subquery table-function argument. Struct packing would change the VGI input schema.",
           "issue": null,
           "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, 'data'::BLOB), (2, NULL::BLOB)) v(n, b)))\nWHERE b IS NULL ORDER BY n;",
-          "replacement_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, X'64617461'), (2, NULL::BYTEA)) v (n, b))) WHERE b IS NULL ORDER BY n"
+          "replacement_sql": null
         }
       ]
     },
@@ -4004,8 +4002,8 @@
       "expected_errors_ignored": 0,
       "adapted_records": 0,
       "executed": 10,
-      "failed": 9,
-      "not_applicable": 0,
+      "failed": 0,
+      "not_applicable": 9,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -4014,10 +4012,90 @@
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 9
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 3,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b = true ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b = false ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b != true ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would no longer test the original boolean validity path.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b IS NULL ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would no longer test the original boolean validity path.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b IS NOT NULL ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 13,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and boolean membership filter.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b IN (true) ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 15,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and boolean membership filter.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b IN (true, false) ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 17,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "This compound filter requires both input columns, but DataFusion 55 permits only one top-level scalar-subquery column for the table-function argument. Struct packing would change both referenced filter paths.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b = true AND n > 2 ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 19,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "This compound filter requires both input columns, but DataFusion 55 permits only one top-level scalar-subquery column for the table-function argument. Struct packing would change both referenced filter paths.",
+          "issue": null,
+          "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b = true OR n = 2 ORDER BY n;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/decimals.test",
@@ -4025,22 +4103,57 @@
       "skipped": false,
       "records": 24,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 20,
-      "failed": 4,
+      "adapted_records": 4,
+      "executed": 24,
+      "failed": 0,
       "not_applicable": 0,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 18,
+        "exact": 22,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "type / signature mismatch": 4
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 14,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/decimals.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) values and comparison literal without DataFusion literal simplification widening the near-cap integers.",
+          "issue": null,
+          "original_sql": "SELECT v FROM (VALUES (10000000000000000000000000000000000000::DECIMAL(38,0)),\n                      (20000000000000000000000000000000000000::DECIMAL(38,0)),\n                      (30000000000000000000000000000000000000::DECIMAL(38,0))) t(v)\nWHERE v = 20000000000000000000000000000000000000 ORDER BY v;",
+          "replacement_sql": "SELECT v FROM (VALUES (arrow_cast('10000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('30000000000000000000000000000000000000', 'Decimal128(38, 0)'))) t(v)\nWHERE v = arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)') ORDER BY v;"
+        },
+        {
+          "record": 15,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/decimals.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) input and pushed comparison literal, preserving the near-cap filter-pushdown assertion.",
+          "issue": null,
+          "original_sql": "SELECT v FROM example.echo((\n  SELECT v FROM (VALUES (10000000000000000000000000000000000000::DECIMAL(38,0)),\n                        (20000000000000000000000000000000000000::DECIMAL(38,0)),\n                        (30000000000000000000000000000000000000::DECIMAL(38,0))) t(v)\n)) WHERE v = 20000000000000000000000000000000000000 ORDER BY v;",
+          "replacement_sql": "SELECT v FROM example.echo((\n  SELECT v FROM (VALUES (arrow_cast('10000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('30000000000000000000000000000000000000', 'Decimal128(38, 0)'))) t(v)\n)) WHERE v = arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)') ORDER BY v;"
+        },
+        {
+          "record": 16,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/decimals.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) values and comparison literal without DataFusion literal simplification widening the near-cap integers.",
+          "issue": null,
+          "original_sql": "SELECT v FROM (VALUES (10000000000000000000000000000000000000::DECIMAL(38,0)),\n                      (20000000000000000000000000000000000000::DECIMAL(38,0)),\n                      (30000000000000000000000000000000000000::DECIMAL(38,0))) t(v)\nWHERE v > 15000000000000000000000000000000000000 ORDER BY v;",
+          "replacement_sql": "SELECT v FROM (VALUES (arrow_cast('10000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('30000000000000000000000000000000000000', 'Decimal128(38, 0)'))) t(v)\nWHERE v > arrow_cast('15000000000000000000000000000000000000', 'Decimal128(38, 0)') ORDER BY v;"
+        },
+        {
+          "record": 17,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/decimals.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) input and pushed comparison literal, preserving the near-cap filter-pushdown assertion.",
+          "issue": null,
+          "original_sql": "SELECT v FROM example.echo((\n  SELECT v FROM (VALUES (10000000000000000000000000000000000000::DECIMAL(38,0)),\n                        (20000000000000000000000000000000000000::DECIMAL(38,0)),\n                        (30000000000000000000000000000000000000::DECIMAL(38,0))) t(v)\n)) WHERE v > 15000000000000000000000000000000000000 ORDER BY v;",
+          "replacement_sql": "SELECT v FROM example.echo((\n  SELECT v FROM (VALUES (arrow_cast('10000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('30000000000000000000000000000000000000', 'Decimal128(38, 0)'))) t(v)\n)) WHERE v > arrow_cast('15000000000000000000000000000000000000', 'Decimal128(38, 0)') ORDER BY v;"
+        }
+      ]
     },
     {
       "path": "filter_pushdown/dictionary_varchar.test",
@@ -4069,22 +4182,93 @@
       "skipped": false,
       "records": 9,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 1,
-      "failed": 8,
-      "not_applicable": 0,
+      "adapted_records": 3,
+      "executed": 4,
+      "failed": 0,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 0,
+        "exact": 3,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 8
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 2,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion has no session DDL for DuckDB enum types; adjacent reference values use Arrow Dictionary<UInt8, Utf8> directly.",
+          "issue": null,
+          "original_sql": "CREATE TYPE color AS ENUM ('red', 'green', 'blue');",
+          "replacement_sql": null
+        },
+        {
+          "record": 3,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference equality semantics without session enum DDL.",
+          "issue": null,
+          "original_sql": "SELECT n, c FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, NULL::color), (4, 'blue'::color)) t(n, c)\nWHERE c = 'green'::color ORDER BY n;",
+          "replacement_sql": "SELECT n, c FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast('green', 'Dictionary(UInt8, Utf8)')), (3, arrow_cast(NULL, 'Dictionary(UInt8, Utf8)')), (4, arrow_cast('blue', 'Dictionary(UInt8, Utf8)'))) t(n, c)\nWHERE c = arrow_cast('green', 'Dictionary(UInt8, Utf8)') ORDER BY n;"
+        },
+        {
+          "record": 4,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path.",
+          "issue": null,
+          "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, NULL::color), (4, 'blue'::color)) v(n, c)))\nWHERE c = 'green'::color ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference membership semantics without session enum DDL.",
+          "issue": null,
+          "original_sql": "SELECT n, c FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, 'blue'::color)) t(n, c)\nWHERE c IN ('red'::color, 'blue'::color) ORDER BY n;",
+          "replacement_sql": "SELECT n, c FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast('green', 'Dictionary(UInt8, Utf8)')), (3, arrow_cast('blue', 'Dictionary(UInt8, Utf8)'))) t(n, c)\nWHERE c IN (arrow_cast('red', 'Dictionary(UInt8, Utf8)'), arrow_cast('blue', 'Dictionary(UInt8, Utf8)')) ORDER BY n;"
+        },
+        {
+          "record": 6,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path.",
+          "issue": null,
+          "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, 'blue'::color)) v(n, c)))\nWHERE c IN ('red'::color, 'blue'::color) ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "arrow_cast constructs the same nullable Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference NULL semantics without session enum DDL.",
+          "issue": null,
+          "original_sql": "SELECT n, c FROM (VALUES (1, 'red'::color), (2, NULL::color)) t(n, c)\nWHERE c IS NULL ORDER BY n;",
+          "replacement_sql": "SELECT n, c FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast(NULL, 'Dictionary(UInt8, Utf8)'))) t(n, c)\nWHERE c IS NULL ORDER BY n;"
+        },
+        {
+          "record": 8,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path.",
+          "issue": null,
+          "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, NULL::color)) v(n, c)))\nWHERE c IS NULL ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion has no corresponding session enum type to drop; the reference dictionary values are exercised directly above.",
+          "issue": null,
+          "original_sql": "DROP TYPE color;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/floats.test",
@@ -4094,8 +4278,8 @@
       "expected_errors_ignored": 0,
       "adapted_records": 0,
       "executed": 6,
-      "failed": 5,
-      "not_applicable": 0,
+      "failed": 0,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -4104,10 +4288,54 @@
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 5
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 3,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and filtered floating-point column.",
+          "issue": null,
+          "original_sql": "SELECT n, x FROM example.echo((SELECT * FROM (VALUES (1, 1.5::DOUBLE), (2, 2.5::DOUBLE), (3, NULL::DOUBLE), (4, 3.5::DOUBLE)) v(n, x)))\nWHERE x = 2.5::DOUBLE ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and range-filtered floating-point column.",
+          "issue": null,
+          "original_sql": "SELECT n, x FROM example.echo((SELECT * FROM (VALUES (1, 0.0::DOUBLE), (2, 1.5::DOUBLE), (3, 2.5::DOUBLE)) v(n, x)))\nWHERE x > 1.0::DOUBLE ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and filtered Float32 column.",
+          "issue": null,
+          "original_sql": "SELECT n, x FROM example.echo((SELECT * FROM (VALUES (1, 1.5::FLOAT), (2, 2.5::FLOAT), (3, 3.5::FLOAT)) v(n, x)))\nWHERE x = 2.5::FLOAT ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and would not validate NaN filter pushdown.",
+          "issue": null,
+          "original_sql": "SELECT n, x FROM example.echo((SELECT * FROM (VALUES (1, 'nan'::DOUBLE), (2, 1.0::DOUBLE), (3, 'nan'::DOUBLE)) v(n, x)))\nWHERE x = 'nan'::DOUBLE ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and would not validate infinity range pushdown.",
+          "issue": null,
+          "original_sql": "SELECT n, x FROM example.echo((SELECT * FROM (VALUES (1, '-inf'::DOUBLE), (2, 0.0::DOUBLE), (3, 'inf'::DOUBLE)) v(n, x)))\nWHERE x > 1.0::DOUBLE ORDER BY n;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/hugeint.test",
@@ -4115,22 +4343,111 @@
       "skipped": false,
       "records": 11,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 1,
-      "failed": 10,
-      "not_applicable": 0,
+      "adapted_records": 5,
+      "executed": 6,
+      "failed": 0,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 0,
+        "exact": 5,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 10
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 2,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM (VALUES\n  (1, 100::HUGEINT),\n  (2, 200::HUGEINT),\n  (3, NULL::HUGEINT),\n  (4, 999999999::HUGEINT)\n) t(n, h)\nWHERE h = 200::HUGEINT ORDER BY n;",
+          "replacement_sql": "SELECT n, h FROM (VALUES\n  (1, arrow_cast('100', 'Decimal128(38, 0)')),\n  (2, arrow_cast('200', 'Decimal128(38, 0)')),\n  (3, arrow_cast(NULL, 'Decimal128(38, 0)')),\n  (4, arrow_cast('999999999', 'Decimal128(38, 0)'))\n) t(n, h)\nWHERE h = arrow_cast('200', 'Decimal128(38, 0)') ORDER BY n;"
+        },
+        {
+          "record": 3,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES\n  (1, 100::HUGEINT),\n  (2, 200::HUGEINT),\n  (3, NULL::HUGEINT),\n  (4, 999999999::HUGEINT)\n) v(n, h)))\nWHERE h = 200::HUGEINT ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 4,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM (VALUES\n  (1, 100::HUGEINT),\n  (2, 99999999999999999999999999999999999999::HUGEINT)\n) t(n, h)\nWHERE h = 99999999999999999999999999999999999999::HUGEINT;",
+          "replacement_sql": "SELECT n, h FROM (VALUES\n  (1, arrow_cast('100', 'Decimal128(38, 0)')),\n  (2, arrow_cast('99999999999999999999999999999999999999', 'Decimal128(38, 0)'))\n) t(n, h)\nWHERE h = arrow_cast('99999999999999999999999999999999999999', 'Decimal128(38, 0)');"
+        },
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES\n  (1, 100::HUGEINT),\n  (2, 99999999999999999999999999999999999999::HUGEINT)\n) v(n, h)))\nWHERE h = 99999999999999999999999999999999999999::HUGEINT;",
+          "replacement_sql": null
+        },
+        {
+          "record": 6,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM (VALUES\n  (1, 9223372036854775807::HUGEINT),\n  (2, 9223372036854775808::HUGEINT),\n  (3, 18446744073709551616::HUGEINT)\n) t(n, h)\nWHERE h > 9223372036854775807::HUGEINT ORDER BY n;",
+          "replacement_sql": "SELECT n, h FROM (VALUES\n  (1, arrow_cast('9223372036854775807', 'Decimal128(38, 0)')),\n  (2, arrow_cast('9223372036854775808', 'Decimal128(38, 0)')),\n  (3, arrow_cast('18446744073709551616', 'Decimal128(38, 0)'))\n) t(n, h)\nWHERE h > arrow_cast('9223372036854775807', 'Decimal128(38, 0)') ORDER BY n;"
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES\n  (1, 9223372036854775807::HUGEINT),\n  (2, 9223372036854775808::HUGEINT),\n  (3, 18446744073709551616::HUGEINT)\n) v(n, h)))\nWHERE h > 9223372036854775807::HUGEINT ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 8,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM (VALUES (1, 100::HUGEINT), (2, 200::HUGEINT), (3, 300::HUGEINT)) t(n, h)\nWHERE h IN (100::HUGEINT, 300::HUGEINT) ORDER BY n;",
+          "replacement_sql": "SELECT n, h FROM (VALUES (1, arrow_cast('100', 'Decimal128(38, 0)')), (2, arrow_cast('200', 'Decimal128(38, 0)')), (3, arrow_cast('300', 'Decimal128(38, 0)'))) t(n, h)\nWHERE h IN (arrow_cast('100', 'Decimal128(38, 0)'), arrow_cast('300', 'Decimal128(38, 0)')) ORDER BY n;"
+        },
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES (1, 100::HUGEINT), (2, 200::HUGEINT), (3, 300::HUGEINT)) v(n, h)))\nWHERE h IN (100::HUGEINT, 300::HUGEINT) ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 10,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM (VALUES\n  (1, 0::UHUGEINT),\n  (2, 1::UHUGEINT),\n  (3, 99999999999999999999999999999999999999::UHUGEINT)\n) t(n, h)\nWHERE h = 99999999999999999999999999999999999999::UHUGEINT;",
+          "replacement_sql": "SELECT n, h FROM (VALUES\n  (1, arrow_cast('0', 'Decimal128(38, 0)')),\n  (2, arrow_cast('1', 'Decimal128(38, 0)')),\n  (3, arrow_cast('99999999999999999999999999999999999999', 'Decimal128(38, 0)'))\n) t(n, h)\nWHERE h = arrow_cast('99999999999999999999999999999999999999', 'Decimal128(38, 0)');"
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
+          "issue": null,
+          "original_sql": "SELECT n, h FROM example.echo((SELECT * FROM (VALUES\n  (1, 0::UHUGEINT),\n  (2, 1::UHUGEINT),\n  (3, 99999999999999999999999999999999999999::UHUGEINT)\n) v(n, h)))\nWHERE h = 99999999999999999999999999999999999999::UHUGEINT;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/integers.test",
@@ -4138,22 +4455,138 @@
       "skipped": false,
       "records": 54,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 41,
-      "failed": 13,
-      "not_applicable": 0,
+      "adapted_records": 10,
+      "executed": 51,
+      "failed": 0,
+      "not_applicable": 3,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 39,
+        "exact": 49,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 13
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 3,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 100))) WHERE n = 42 ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 100))) WHERE n = 42 ORDER BY n;"
+        },
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 5))) WHERE n != 2 ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 5))) WHERE n != 2 ORDER BY n;"
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 10))) WHERE n < 3 ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 10))) WHERE n < 3 ORDER BY n;"
+        },
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 10))) WHERE n > 7 ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 10))) WHERE n > 7 ORDER BY n;"
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 10))) WHERE n <= 3 ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 10))) WHERE n <= 3 ORDER BY n;"
+        },
+        {
+          "record": 13,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 10))) WHERE n >= 7 ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 10))) WHERE n >= 7 ORDER BY n;"
+        },
+        {
+          "record": 39,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 20))) WHERE n IN (3, 7, 13) ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 20))) WHERE n IN (3, 7, 13) ORDER BY n;"
+        },
+        {
+          "record": 43,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 200))) WHERE n IN (\n  1, 5, 7, 11, 13, 17, 19, 23, 29, 31,\n  37, 41, 43, 47, 53, 59, 61, 67, 71, 73,\n  79, 83, 89, 97, 101, 103\n) ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 200))) WHERE n IN (\n  1, 5, 7, 11, 13, 17, 19, 23, 29, 31,\n  37, 41, 43, 47, 53, 59, 61, 67, 71, 73,\n  79, 83, 89, 97, 101, 103\n) ORDER BY n;"
+        },
+        {
+          "record": 45,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 100))) WHERE n >= 50 AND n < 55 ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 100))) WHERE n >= 50 AND n < 55 ORDER BY n;"
+        },
+        {
+          "record": 47,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API.",
+          "issue": null,
+          "original_sql": "SELECT n, t FROM example.echo((\n  SELECT n, t FROM (VALUES (1::BIGINT, 'x'),\n                           (2::BIGINT, NULL),\n                           (3::BIGINT, 'y'),\n                           (4::BIGINT, NULL)) v(n, t)\n)) WHERE n > 1 AND t IS NOT NULL ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 49,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 20))) WHERE n < 3 OR n > 17 ORDER BY n;",
+          "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 20))) WHERE n < 3 OR n > 17 ORDER BY n;"
+        },
+        {
+          "record": 51,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API.",
+          "issue": null,
+          "original_sql": "SELECT n, t FROM example.echo((\n  SELECT n, t FROM (VALUES (1::BIGINT, 'a'),\n                           (2::BIGINT, NULL),\n                           (3::BIGINT, 'c')) v(n, t)\n)) WHERE n = 2 OR t = 'c' ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 53,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API.",
+          "issue": null,
+          "original_sql": "SELECT n, m FROM example.echo((\n  SELECT n, m FROM (VALUES (1::BIGINT, 100::BIGINT),\n                           (2::BIGINT, 200::BIGINT),\n                           (2::BIGINT, 300::BIGINT),\n                           (3::BIGINT, 400::BIGINT)) v(n, m)\n)) WHERE n = 2 AND m >= 250 ORDER BY n, m;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/null_logic.test",
@@ -4163,8 +4596,8 @@
       "expected_errors_ignored": 0,
       "adapted_records": 0,
       "executed": 17,
-      "failed": 3,
-      "not_applicable": 0,
+      "failed": 0,
+      "not_applicable": 3,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -4173,10 +4606,36 @@
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 3
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/null_logic.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The SQL three-valued AND assertion needs both n and t, but DataFusion 55 permits only one top-level scalar-subquery column for the table function. Struct packing would change the VGI filter paths.",
+          "issue": null,
+          "original_sql": "SELECT n, t FROM example.echo((\n  SELECT n, t FROM (VALUES (1::BIGINT, 1::BIGINT),\n                           (1::BIGINT, NULL::BIGINT),\n                           (5::BIGINT, 1::BIGINT),\n                           (5::BIGINT, NULL::BIGINT),\n                           (NULL::BIGINT, 1::BIGINT),\n                           (NULL::BIGINT, NULL::BIGINT))\n                    v(n, t)\n)) WHERE n = 1 AND t = 1 ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/null_logic.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The SQL three-valued OR assertion needs both n and t, but DataFusion 55 permits only one top-level scalar-subquery column for the table function. Struct packing would change the VGI filter paths.",
+          "issue": null,
+          "original_sql": "SELECT n, t FROM example.echo((\n  SELECT n, t FROM (VALUES (1::BIGINT, 1::BIGINT),\n                           (1::BIGINT, NULL::BIGINT),\n                           (5::BIGINT, 1::BIGINT),\n                           (5::BIGINT, NULL::BIGINT),\n                           (NULL::BIGINT, 1::BIGINT),\n                           (NULL::BIGINT, 5::BIGINT),\n                           (NULL::BIGINT, NULL::BIGINT))\n                    v(n, t)\n)) WHERE n = 1 OR t = 1 ORDER BY n NULLS LAST, t NULLS LAST;",
+          "replacement_sql": null
+        },
+        {
+          "record": 19,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/null_logic.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The equality-plus-validity assertion needs both n and t, but DataFusion 55 permits only one top-level scalar-subquery column for the table function. Struct packing would change the VGI filter paths.",
+          "issue": null,
+          "original_sql": "SELECT n, t FROM example.echo((\n  SELECT n, t FROM (VALUES (1::BIGINT, 'a'),\n                           (1::BIGINT, NULL),\n                           (2::BIGINT, 'b'),\n                           (2::BIGINT, NULL)) v(n, t)\n)) WHERE n = 1 AND t IS NULL ORDER BY n, t;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/strings.test",
@@ -4186,8 +4645,8 @@
       "expected_errors_ignored": 0,
       "adapted_records": 0,
       "executed": 39,
-      "failed": 1,
-      "not_applicable": 0,
+      "failed": 0,
+      "not_applicable": 1,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -4196,10 +4655,18 @@
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 1
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 39,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/strings.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "This compound predicate requires both s and t, but DataFusion 55 permits only one top-level scalar-subquery column for the table-function argument. Struct packing would change the VGI input schema and filter paths.",
+          "issue": null,
+          "original_sql": "SELECT s, t FROM example.echo((\n  SELECT s, t FROM (VALUES ('a', 1::BIGINT),\n                           ('b', NULL::BIGINT),\n                           ('c', 3::BIGINT)) v(s, t)\n)) WHERE s >= 'b' AND t IS NOT NULL ORDER BY s;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/temporal.test",
@@ -4207,22 +4674,111 @@
       "skipped": false,
       "records": 17,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 7,
-      "failed": 10,
-      "not_applicable": 0,
+      "adapted_records": 2,
+      "executed": 9,
+      "failed": 0,
+      "not_applicable": 8,
       "blocked": 0,
       "timed_out": 0,
       "values": {
         "exact": 3,
-        "rendering_equivalent": 3,
+        "rendering_equivalent": 5,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 10
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 3,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and d into one struct would change the VGI input schema and no longer test filter pushdown on the original date column.",
+          "issue": null,
+          "original_sql": "SELECT n, d FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-01-01'::DATE),\n  (2, '2026-05-06'::DATE),\n  (3, NULL::DATE),\n  (4, '2027-01-01'::DATE)\n) v(n, d)))\nWHERE d = '2026-05-06'::DATE ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and d into one struct would change the VGI input schema and no longer test range pushdown on the original date column.",
+          "issue": null,
+          "original_sql": "SELECT n, d FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-01-01'::DATE),\n  (2, '2026-05-06'::DATE),\n  (3, '2027-01-01'::DATE)\n) v(n, d)))\nWHERE d > '2026-03-01'::DATE ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and t into one struct would change the VGI input schema and no longer test filter pushdown on the original time column.",
+          "issue": null,
+          "original_sql": "SELECT n, t FROM example.echo((SELECT * FROM (VALUES (1, '08:00:00'::TIME), (2, '12:34:56'::TIME), (3, '18:00:00'::TIME)) v(n, t)))\nWHERE t = '12:34:56'::TIME ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timestamp field.",
+          "issue": null,
+          "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 08:00:00'::TIMESTAMP),\n  (2, '2026-05-06 12:34:56.123456'::TIMESTAMP),\n  (3, '2026-05-06 18:00:00'::TIMESTAMP)\n) v(n, ts)))\nWHERE ts = '2026-05-06 12:34:56.123456'::TIMESTAMP ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 11,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timestamp field.",
+          "issue": null,
+          "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 08:00:00'::TIMESTAMP),\n  (2, '2026-05-06 12:00:00'::TIMESTAMP),\n  (3, '2026-05-06 18:00:00'::TIMESTAMP)\n) v(n, ts)))\nWHERE ts > '2026-05-06 10:00:00'::TIMESTAMP ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 13,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timezone-bearing timestamp field.",
+          "issue": null,
+          "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 12:00:00+00'::TIMESTAMPTZ),\n  (2, '2026-05-06 13:00:00+01'::TIMESTAMPTZ),\n  (3, '2026-05-06 14:00:00+02'::TIMESTAMPTZ)\n) v(n, ts)))\nWHERE ts = '2026-05-06 12:00:00+00'::TIMESTAMPTZ ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 14,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's native arrow_cast constructs and compares the same Arrow millisecond-resolution timestamps without DuckDB's TIMESTAMP_MS type spelling.",
+          "issue": null,
+          "original_sql": "SELECT n, ts FROM (VALUES\n  (1, '2026-05-06 12:00:00.123'::TIMESTAMP_MS),\n  (2, '2026-05-06 12:00:00.456'::TIMESTAMP_MS)\n) t(n, ts)\nWHERE ts = '2026-05-06 12:00:00.456'::TIMESTAMP_MS ORDER BY n;",
+          "replacement_sql": "SELECT n, ts FROM (VALUES (1, arrow_cast('2026-05-06 12:00:00.123', 'Timestamp(Millisecond, None)')), (2, arrow_cast('2026-05-06 12:00:00.456', 'Timestamp(Millisecond, None)'))) t(n, ts) WHERE ts = arrow_cast('2026-05-06 12:00:00.456', 'Timestamp(Millisecond, None)') ORDER BY n;"
+        },
+        {
+          "record": 15,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion can construct millisecond timestamps with arrow_cast, but its table-function scalar-subquery seam cannot carry both n and ts as top-level columns. Struct packing would change the VGI input schema.",
+          "issue": null,
+          "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 12:00:00.123'::TIMESTAMP_MS),\n  (2, '2026-05-06 12:00:00.456'::TIMESTAMP_MS)\n) v(n, ts)))\nWHERE ts = '2026-05-06 12:00:00.456'::TIMESTAMP_MS ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 16,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DataFusion's native arrow_cast constructs and compares the same Arrow nanosecond-resolution timestamps without DuckDB's TIMESTAMP_NS type spelling.",
+          "issue": null,
+          "original_sql": "SELECT n, ts FROM (VALUES\n  (1, '2026-05-06 12:00:00.000000001'::TIMESTAMP_NS),\n  (2, '2026-05-06 12:00:00.000000002'::TIMESTAMP_NS)\n) t(n, ts)\nWHERE ts = '2026-05-06 12:00:00.000000002'::TIMESTAMP_NS ORDER BY n;",
+          "replacement_sql": "SELECT n, ts FROM (VALUES (1, arrow_cast('2026-05-06 12:00:00.000000001', 'Timestamp(Nanosecond, None)')), (2, arrow_cast('2026-05-06 12:00:00.000000002', 'Timestamp(Nanosecond, None)'))) t(n, ts) WHERE ts = arrow_cast('2026-05-06 12:00:00.000000002', 'Timestamp(Nanosecond, None)') ORDER BY n;"
+        },
+        {
+          "record": 17,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion can construct nanosecond timestamps with arrow_cast, but its table-function scalar-subquery seam cannot carry both n and ts as top-level columns. Struct packing would change the VGI input schema.",
+          "issue": null,
+          "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 12:00:00.000000001'::TIMESTAMP_NS),\n  (2, '2026-05-06 12:00:00.000000002'::TIMESTAMP_NS)\n) v(n, ts)))\nWHERE ts = '2026-05-06 12:00:00.000000002'::TIMESTAMP_NS ORDER BY n;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/time_tz.test",
@@ -4232,8 +4788,8 @@
       "expected_errors_ignored": 0,
       "adapted_records": 0,
       "executed": 1,
-      "failed": 4,
-      "not_applicable": 0,
+      "failed": 0,
+      "not_applicable": 4,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -4242,10 +4798,45 @@
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 4
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 2,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/time_tz.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no TIME WITH TIME ZONE SQL type or equivalent Arrow logical type constructor. Replacing TIMETZ with TIME, text, or binary would change the comparison semantics this record tests.",
+          "issue": null,
+          "original_sql": "SELECT n FROM (VALUES\n  (1, '08:00:00+00'::TIMETZ),\n  (2, '12:00:00+00'::TIMETZ),\n  (3, NULL::TIMETZ),\n  (4, '18:00:00+00'::TIMETZ)\n) t(n, t)\nWHERE t = '12:00:00+00'::TIMETZ ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 3,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/time_tz.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot construct TIMETZ values and also cannot pass the two top-level input columns through the scalar-subquery table-function seam. A text or struct substitute would not test the same VGI filter.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT * FROM (VALUES\n  (1, '08:00:00+00'::TIMETZ),\n  (2, '12:00:00+00'::TIMETZ),\n  (3, NULL::TIMETZ),\n  (4, '18:00:00+00'::TIMETZ)\n) v(n, t)))\nWHERE t = '12:00:00+00'::TIMETZ ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 4,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/time_tz.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 has no TIME WITH TIME ZONE SQL type or equivalent Arrow logical type constructor. Substituting another nullable type would no longer exercise the TIMETZ validity path.",
+          "issue": null,
+          "original_sql": "SELECT n FROM (VALUES (1, '12:00:00+00'::TIMETZ), (2, NULL::TIMETZ)) t(n, t)\nWHERE t IS NULL ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/time_tz.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot construct TIMETZ values and also cannot pass the two top-level input columns through the scalar-subquery table-function seam. Substitution would hide both protocol boundaries.",
+          "issue": null,
+          "original_sql": "SELECT n FROM example.echo((SELECT * FROM (VALUES (1, '12:00:00+00'::TIMETZ), (2, NULL::TIMETZ)) v(n, t)))\nWHERE t IS NULL ORDER BY n;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "filter_pushdown/uuid.test",
@@ -4253,22 +4844,93 @@
       "skipped": false,
       "records": 9,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 1,
-      "failed": 8,
-      "not_applicable": 0,
+      "adapted_records": 4,
+      "executed": 5,
+      "failed": 0,
+      "not_applicable": 4,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 0,
+        "exact": 4,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 8
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 2,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type.",
+          "issue": null,
+          "original_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) t(n, u)\nWHERE u = '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
+          "replacement_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, NULL::VARCHAR),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) t(n, u)\nWHERE u = '00000000-0000-0000-0000-000000000002'\nORDER BY n;"
+        },
+        {
+          "record": 3,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths.",
+          "issue": null,
+          "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u = '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 4,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type.",
+          "issue": null,
+          "original_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) t(n, u)\nWHERE u != '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
+          "replacement_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, NULL::VARCHAR),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) t(n, u)\nWHERE u != '00000000-0000-0000-0000-000000000002'\nORDER BY n;"
+        },
+        {
+          "record": 5,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths.",
+          "issue": null,
+          "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u != '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 6,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type.",
+          "issue": null,
+          "original_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, NULL::UUID)\n) t(n, u)\nWHERE u IS NULL ORDER BY n;",
+          "replacement_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, NULL::VARCHAR)\n) t(n, u)\nWHERE u IS NULL ORDER BY n;"
+        },
+        {
+          "record": 7,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths.",
+          "issue": null,
+          "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, NULL::UUID)\n) v(n, u)))\nWHERE u IS NULL ORDER BY n;",
+          "replacement_sql": null
+        },
+        {
+          "record": 8,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type.",
+          "issue": null,
+          "original_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) t(n, u)\nWHERE u IN (\n  '00000000-0000-0000-0000-000000000001'::UUID,\n  'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID\n)\nORDER BY n;",
+          "replacement_sql": "SELECT n, u FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) t(n, u)\nWHERE u IN (\n  '00000000-0000-0000-0000-000000000001',\n  'ffffffff-ffff-ffff-ffff-ffffffffffff'\n)\nORDER BY n;"
+        },
+        {
+          "record": 9,
+          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths.",
+          "issue": null,
+          "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u IN (\n  '00000000-0000-0000-0000-000000000001'::UUID,\n  'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID\n)\nORDER BY n;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "github/download.test",

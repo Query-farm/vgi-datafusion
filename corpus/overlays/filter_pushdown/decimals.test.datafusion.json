@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 14,
+      "original_sql": "SELECT v FROM (VALUES (10000000000000000000000000000000000000::DECIMAL(38,0)),\n                      (20000000000000000000000000000000000000::DECIMAL(38,0)),\n                      (30000000000000000000000000000000000000::DECIMAL(38,0))) t(v)\nWHERE v = 20000000000000000000000000000000000000 ORDER BY v;",
+      "replacement_sql": "SELECT v FROM (VALUES (arrow_cast('10000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('30000000000000000000000000000000000000', 'Decimal128(38, 0)'))) t(v)\nWHERE v = arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)') ORDER BY v;",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) values and comparison literal without DataFusion literal simplification widening the near-cap integers."
+    },
+    {
+      "record": 15,
+      "original_sql": "SELECT v FROM example.echo((\n  SELECT v FROM (VALUES (10000000000000000000000000000000000000::DECIMAL(38,0)),\n                        (20000000000000000000000000000000000000::DECIMAL(38,0)),\n                        (30000000000000000000000000000000000000::DECIMAL(38,0))) t(v)\n)) WHERE v = 20000000000000000000000000000000000000 ORDER BY v;",
+      "replacement_sql": "SELECT v FROM example.echo((\n  SELECT v FROM (VALUES (arrow_cast('10000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('30000000000000000000000000000000000000', 'Decimal128(38, 0)'))) t(v)\n)) WHERE v = arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)') ORDER BY v;",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) input and pushed comparison literal, preserving the near-cap filter-pushdown assertion."
+    },
+    {
+      "record": 16,
+      "original_sql": "SELECT v FROM (VALUES (10000000000000000000000000000000000000::DECIMAL(38,0)),\n                      (20000000000000000000000000000000000000::DECIMAL(38,0)),\n                      (30000000000000000000000000000000000000::DECIMAL(38,0))) t(v)\nWHERE v > 15000000000000000000000000000000000000 ORDER BY v;",
+      "replacement_sql": "SELECT v FROM (VALUES (arrow_cast('10000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('30000000000000000000000000000000000000', 'Decimal128(38, 0)'))) t(v)\nWHERE v > arrow_cast('15000000000000000000000000000000000000', 'Decimal128(38, 0)') ORDER BY v;",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) values and comparison literal without DataFusion literal simplification widening the near-cap integers."
+    },
+    {
+      "record": 17,
+      "original_sql": "SELECT v FROM example.echo((\n  SELECT v FROM (VALUES (10000000000000000000000000000000000000::DECIMAL(38,0)),\n                        (20000000000000000000000000000000000000::DECIMAL(38,0)),\n                        (30000000000000000000000000000000000000::DECIMAL(38,0))) t(v)\n)) WHERE v > 15000000000000000000000000000000000000 ORDER BY v;",
+      "replacement_sql": "SELECT v FROM example.echo((\n  SELECT v FROM (VALUES (arrow_cast('10000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('20000000000000000000000000000000000000', 'Decimal128(38, 0)')),\n                      (arrow_cast('30000000000000000000000000000000000000', 'Decimal128(38, 0)'))) t(v)\n)) WHERE v > arrow_cast('15000000000000000000000000000000000000', 'Decimal128(38, 0)') ORDER BY v;",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) input and pushed comparison literal, preserving the near-cap filter-pushdown assertion."
+    }
+  ]
+}

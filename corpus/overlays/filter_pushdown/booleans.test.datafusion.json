@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 3,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b = true ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column."
+    },
+    {
+      "record": 5,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b = false ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column."
+    },
+    {
+      "record": 7,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b != true ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column."
+    },
+    {
+      "record": 9,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b IS NULL ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would no longer test the original boolean validity path."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b IS NOT NULL ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would no longer test the original boolean validity path."
+    },
+    {
+      "record": 13,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b IN (true) ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and boolean membership filter."
+    },
+    {
+      "record": 15,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b IN (true, false) ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and boolean membership filter."
+    },
+    {
+      "record": 17,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b = true AND n > 2 ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "This compound filter requires both input columns, but DataFusion 55 permits only one top-level scalar-subquery column for the table-function argument. Struct packing would change both referenced filter paths."
+    },
+    {
+      "record": 19,
+      "original_sql": "SELECT n, b FROM example.echo((SELECT * FROM (VALUES (1, true), (2, false), (3, NULL), (4, true)) v(n, b)))\nWHERE b = true OR n = 2 ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "This compound filter requires both input columns, but DataFusion 55 permits only one top-level scalar-subquery column for the table-function argument. Struct packing would change both referenced filter paths."
+    }
+  ]
+}

@@ -138,7 +138,7 @@ transport equivalence is itself part of completion.
 
 ## Current promoted baseline — 2026-08-26
 
-The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,183
+The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,134
 measured positive records. The historical `subprocess.json` filename is kept
 for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
@@ -151,15 +151,15 @@ statistics also feed DataFusion's existing pruning API.
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 3,526 / 4,183 (84.3%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,378 / 2,547 (93.4%) |
-| Exact results | 1,567 | 2,252 |
-| Rendering-equivalent results | 37 | 126 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,554 / 4,134 (86.0%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,406 / 2,575 (93.4%) |
+| Exact results | 1,567 | 2,278 |
+| Rendering-equivalent results | 37 | 128 |
 | Genuine value differences | 149 | 169 |
-| Not-applicable records reported separately | 607 | 538 |
+| Not-applicable records reported separately | 607 | 587 |
 | Timeouts | 0 | 0 |
 
-The HTTP run executes the same 3,526 records with 2,252 exact, 126
+The HTTP run executes the same 3,554 records with 2,278 exact, 128
 rendering-equivalent, and 169 different results. Both transports have zero
 timeouts and byte-identical reports. `cache/basic.test` is fully
 executable with all 14 value checks
@@ -250,13 +250,21 @@ Those two differences are missing detailed cache-ineligibility reason logs,
 which remain an honest gap. This is focused post-baseline evidence, not a new
 full-corpus total.
 
+The complete typed filter-pushdown slice executes 185/185 applicable records
+with zero failures over both transports. All 164 comparable assertions agree
+(151 exact and 13 rendering-only). Thirty reviewed SQL adaptations use
+DataFusion-native Arrow casts or column aliases; 49 records remain explicitly
+non-applicable because they require multiple top-level scalar-subquery columns,
+DuckDB enum DDL, or a TIMETZ constructor unavailable in DataFusion 55. No
+filter result mismatch is hidden by those classifications.
+
 ## What remains
 
 The following order maximizes useful coverage while keeping new DataFusion
 engine work to a minimum:
 
 1. **Corpus adaptation and classification.** The current machine-readable
-   baseline records 17 DuckDB/extension-surface failures and 101 parser
+   baseline records 17 DuckDB/extension-surface failures and 87 parser
    failures. Continue with reviewable
    equivalents for metadata queries and harmless dialect differences. Keep
    DuckDB storage internals and its hidden virtual-rowid sentinel `out_of_scope`

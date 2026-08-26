@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 2,
+      "original_sql": "CREATE TYPE color AS ENUM ('red', 'green', 'blue');",
+      "kind": "out_of_scope",
+      "reason": "DataFusion has no session DDL for DuckDB enum types; adjacent reference values use Arrow Dictionary<UInt8, Utf8> directly."
+    },
+    {
+      "record": 3,
+      "original_sql": "SELECT n, c FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, NULL::color), (4, 'blue'::color)) t(n, c)\nWHERE c = 'green'::color ORDER BY n;",
+      "replacement_sql": "SELECT n, c FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast('green', 'Dictionary(UInt8, Utf8)')), (3, arrow_cast(NULL, 'Dictionary(UInt8, Utf8)')), (4, arrow_cast('blue', 'Dictionary(UInt8, Utf8)'))) t(n, c)\nWHERE c = arrow_cast('green', 'Dictionary(UInt8, Utf8)') ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference equality semantics without session enum DDL."
+    },
+    {
+      "record": 4,
+      "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, NULL::color), (4, 'blue'::color)) v(n, c)))\nWHERE c = 'green'::color ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path."
+    },
+    {
+      "record": 5,
+      "original_sql": "SELECT n, c FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, 'blue'::color)) t(n, c)\nWHERE c IN ('red'::color, 'blue'::color) ORDER BY n;",
+      "replacement_sql": "SELECT n, c FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast('green', 'Dictionary(UInt8, Utf8)')), (3, arrow_cast('blue', 'Dictionary(UInt8, Utf8)'))) t(n, c)\nWHERE c IN (arrow_cast('red', 'Dictionary(UInt8, Utf8)'), arrow_cast('blue', 'Dictionary(UInt8, Utf8)')) ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference membership semantics without session enum DDL."
+    },
+    {
+      "record": 6,
+      "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, 'blue'::color)) v(n, c)))\nWHERE c IN ('red'::color, 'blue'::color) ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path."
+    },
+    {
+      "record": 7,
+      "original_sql": "SELECT n, c FROM (VALUES (1, 'red'::color), (2, NULL::color)) t(n, c)\nWHERE c IS NULL ORDER BY n;",
+      "replacement_sql": "SELECT n, c FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast(NULL, 'Dictionary(UInt8, Utf8)'))) t(n, c)\nWHERE c IS NULL ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "arrow_cast constructs the same nullable Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference NULL semantics without session enum DDL."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, NULL::color)) v(n, c)))\nWHERE c IS NULL ORDER BY n;",
+      "kind": "out_of_scope",
+      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path."
+    },
+    {
+      "record": 9,
+      "original_sql": "DROP TYPE color;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion has no corresponding session enum type to drop; the reference dictionary values are exercised directly above."
+    }
+  ]
+}
