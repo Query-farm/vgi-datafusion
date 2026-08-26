@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 5,
+      "original_sql": "SELECT\n  x,\n  example.main.vgi_window_sum(x::BIGINT) OVER (ORDER BY x ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING EXCLUDE CURRENT ROW)\n  = sum(x::BIGINT) OVER (ORDER BY x ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING EXCLUDE CURRENT ROW)\nFROM generate_series(1, 10) t(x)\nORDER BY x;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT\n  COUNT(*) FILTER (WHERE NOT match)\nFROM (\n  SELECT\n    x,\n    example.main.vgi_window_sum(x::BIGINT) OVER (ORDER BY x ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING EXCLUDE TIES)\n    = sum(x::BIGINT) OVER (ORDER BY x ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING EXCLUDE TIES) AS match\n  FROM generate_series(1, 10) t(x)\n);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring."
+    },
+    {
+      "record": 9,
+      "original_sql": "SELECT\n  COUNT(*) FILTER (WHERE NOT match)\nFROM (\n  SELECT\n    x,\n    example.main.vgi_window_sum(x::BIGINT) OVER (ORDER BY x ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING EXCLUDE GROUP)\n    = sum(x::BIGINT) OVER (ORDER BY x ROWS BETWEEN 3 PRECEDING AND 3 FOLLOWING EXCLUDE GROUP) AS match\n  FROM generate_series(1, 10) t(x)\n);",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring."
+    },
+    {
+      "record": 17,
+      "original_sql": "SELECT example.main.vgi_window_listagg(s ORDER BY x)\n  OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)\nFROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) t(x, s)\nLIMIT 1;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 does not implement aggregate-local ORDER BY inside a window function; supporting this requires a DataFusion planner feature rather than VGI adapter wiring."
+    }
+  ]
+}

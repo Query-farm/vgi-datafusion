@@ -21,6 +21,10 @@ DataFusion where there is no matching planning or execution seam.
   replay could violate DataFusion plan properties.
 - Large stale entries support ETag/Last-Modified conditional revalidation and
   worker-authorized stale-if-error fallback.
+- Concurrent identical misses are coalesced per complete cache key. One query
+  fills the entry while followers replay the atomic result; cancellation,
+  refusal, expiry, and `no_store` wake followers to execute normally rather
+  than making cache policy a correctness dependency.
 - Catalog-scoped split plans are reused only for their advertised lifetime.
   Version-scoped and transaction-scoped plans are not reused.
 - SQL diagnostics expose cache statistics, entries, flushing, reaping, and plan
@@ -28,7 +32,7 @@ DataFusion where there is no matching planning or execution seam.
 
 This is intentionally narrower than the DuckDB cache. Exchange/per-value
 results, persistent disk storage, stale-while-revalidate, compression, and
-cross-query single-flight remain deferred.
+exchange/per-value entries remain deferred.
 
 ### Catalog and function fidelity
 
@@ -42,13 +46,18 @@ cross-query single-flight remain deferred.
   and Arrow file arms through DataFusion's registered file-format factories and
   `ListingTable`. Typed paths and options are preserved, schemas reconcile by
   column name, and eligible filters reach the underlying native provider.
+- Catalog-table arms resolve already attached DataFusion providers by alias or
+  unique VGI worker-catalog identity. They share reconciliation and pushdown,
+  and direct or indirect source cycles fail with an explicit path.
 - Function stability maps to DataFusion volatility. Directly bound table
   functions map exact worker filter application to
   `TableProviderFilterPushDown::Exact`; lazy catalog tables recheck locally.
-- Aggregate functions preserve bind-time ConstParams and support DataFusion
-  sliding window frames through retractable aggregate state. Dedicated VGI window RPC execution is not
-  currently selectable through DataFusion's same-name aggregate/window SQL
-  resolution.
+- Aggregate functions preserve bind-time ConstParams. DataFusion sliding
+  accumulators use the worker's dedicated VGI window callback when advertised;
+  ordinary `GROUP BY` continues through aggregate update/finalize.
+- Scalar overload selection rejects incompatible typed arms without losing
+  ConstParam literal coercion, allowing `ANY` arms or the worker's authoritative
+  bind error instead of silently casting into the wrong overload.
 
 ### Secrets, runtime hooks, and observability
 
@@ -57,6 +66,9 @@ cross-query single-flight remain deferred.
   retry the bind once. Aggregate declarations resolve their static secrets.
 - Secret values stay out of SQL, cache keys, events, and diagnostic tables.
   SQL `CREATE SECRET` and raw secret values in `ATTACH` remain unsupported.
+- Deterministic coverage verifies multiple same-type, differently scoped
+  secrets in one bind and rejects duplicate resolved names without exposing
+  credential values.
 - `VgiEventSink` receives structured catalog, plan, scan, cache, error, and
   cancellation events. The session also retains a bounded event history for
   `vgi_logs()` and `vgi_log_stats()`.
@@ -76,12 +88,12 @@ cross-query single-flight remain deferred.
 | Catalogs, schemas, tables, views | Supported | Views are registered after dependencies and qualified to their alias |
 | Native format scan branches | Supported | CSV, Parquet, JSON/NDJSON, and Arrow arms use registered DataFusion formats; custom formats require a host registration |
 | Scalar and SQL macro functions | Supported | Async scalar UDFs plus scalar/table macro expansion with typed defaults and named arguments |
-| Aggregate/window-frame use | Partial | ConstParams and retract work; dedicated VGI window RPC deferred |
+| Aggregate/window-frame use | Partial | ConstParams, retract, and advertised sliding-window callbacks work; DataFusion lacks EXCLUDE and aggregate-local ORDER BY window forms |
 | Table and buffered functions | Supported | Table input is currently constrained to one column by scalar-subquery planning |
 | Global functions | Supported | Prefix/collision rules and DETACH cleanup included |
 | Projection, static filters, LIMIT | Supported | Direct functions preserve exactness; lazy catalog tables recheck filters |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
-| Session result cache | Partial | Safe memory tier and revalidation; no exchange/disk/SWR/single-flight |
+| Session result cache | Partial | Safe memory tier, revalidation, and per-key single-flight; no exchange/disk/SWR |
 | Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
@@ -96,15 +108,14 @@ cross-query single-flight remain deferred.
 
 ## Existing DataFusion APIs worth using next
 
-1. **Cache breadth with matching semantics.** Add per-key single-flight first,
-   then exchange or single-value entries only where a complete deterministic
-   key and cancellation boundary can be proved. Keep disk persistence optional.
+1. **Cache breadth with matching semantics.** Add exchange or single-value
+   entries only where a complete deterministic key and cancellation boundary
+   can be proved. Keep disk persistence optional.
 2. **Unbounded execution hardening.** Gate resume on worker advertisement and
    add checkpoint/reconnect, cancellation, backpressure, and soak coverage.
-3. **Transactions and writes.** DataFusion 55 exposes mutation provider hooks,
-   while the SQL adapter can intercept transaction statements. First add the
-   missing mutation RPC wrappers to `vgi-client`, then define catalog-scoped
-   transaction and cache invalidation semantics.
+3. **Catalog and scalar breadth.** Add real companion-catalog source fixtures,
+   broaden view translation, and continue signature coverage for nested,
+   unsigned, zero-argument, and remaining varargs forms.
 4. **Dynamic-filter breadth.** Add a VGI representation for DataFusion's large
    hash-table lookup and multi-column struct membership expressions, and decide
    whether completed filters may safely refine split enumeration before init.
@@ -136,3 +147,9 @@ The focused 10-file multi-branch slice additionally executes 75/75 positive
 records with all 53 comparable results exact over subprocess, Unix sockets, and
 loopback HTTP. This includes native CSV/Parquet arms, typed format options,
 schema reconciliation, branch filtering, and split redemption.
+
+Post-baseline focused verification also covers concurrent producer and split
+cache fills, immediate-stale revalidation, `no_store` fallback, catalog-source
+provider resolution, callback-only window median, overload incompatibility,
+and multi-scope secret binds. The reviewed aggregate window slice now executes
+15/15 applicable records with all 14 results agreeing.

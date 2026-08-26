@@ -309,6 +309,230 @@ async fn split_results_commit_only_after_every_partition() -> datafusion::error:
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_split_cache_misses_share_one_fill() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_extension(runtime.clone()));
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let concurrency = 6;
+    let barrier = Arc::new(tokio::sync::Barrier::new(concurrency));
+    let queries = (0..concurrency).map(|_| {
+        let ctx = ctx.clone();
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            vgi_datafusion::sql(
+                &ctx,
+                "SELECT count(*), sum(n) FROM ex.main.split_cacheable(n := 250000, splits := 8)",
+            )
+            .await?
+            .collect()
+            .await
+        })
+    });
+    for result in futures::future::join_all(queries).await {
+        let batches = result.expect("concurrent query task panicked")?;
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+    }
+
+    let stats = runtime.result_cache().stats();
+    assert_eq!(stats.inserts, 1, "events: {:?}", runtime.events());
+    assert!(
+        runtime
+            .events()
+            .iter()
+            .any(|event| event.kind == "cache.wait"),
+        "the test did not overlap cache misses: {:?}",
+        runtime.events()
+    );
+    assert!(
+        runtime
+            .events()
+            .iter()
+            .any(|event| event.kind == "cache.coalesced_hit"),
+        "no follower replayed the completed fill: {:?}",
+        runtime.events()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_producer_cache_misses_share_one_fill() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()])
+        .with_runtime(runtime.clone());
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote_cacheable",
+        VgiTableProvider::bind_with_arguments(
+            conn,
+            "example",
+            "main",
+            "cacheable_numbers",
+            vgi_client::Arguments::new().named("n", 250_000_i64),
+        )
+        .await?,
+    )?;
+
+    let concurrency = 4;
+    let barrier = Arc::new(tokio::sync::Barrier::new(concurrency));
+    let queries = (0..concurrency).map(|_| {
+        let ctx = ctx.clone();
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            ctx.sql("SELECT count(*), sum(n) FROM remote_cacheable")
+                .await?
+                .collect()
+                .await
+        })
+    });
+    for result in futures::future::join_all(queries).await {
+        let batches = result.expect("concurrent query task panicked")?;
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+    }
+
+    let stats = runtime.result_cache().stats();
+    assert_eq!(stats.inserts, 1, "events: {:?}", runtime.events());
+    assert!(
+        runtime
+            .events()
+            .iter()
+            .any(|event| event.kind == "cache.coalesced_hit"),
+        "no producer follower replayed the fill: {:?}",
+        runtime.events()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn followers_fall_back_when_the_producer_declines_caching() -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()])
+        .with_runtime(runtime.clone());
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote_no_store",
+        VgiTableProvider::bind_with_arguments(
+            conn,
+            "example",
+            "main",
+            "cache_no_store",
+            vgi_client::Arguments::new().named("n", 250_000_i64),
+        )
+        .await?,
+    )?;
+
+    let concurrency = 4;
+    let barrier = Arc::new(tokio::sync::Barrier::new(concurrency));
+    let queries = (0..concurrency).map(|_| {
+        let ctx = ctx.clone();
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            ctx.sql("SELECT count(*), sum(n) FROM remote_no_store")
+                .await?
+                .collect()
+                .await
+        })
+    });
+    for result in futures::future::join_all(queries).await {
+        let batches = result.expect("concurrent query task panicked")?;
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+    }
+
+    let stats = runtime.result_cache().stats();
+    assert_eq!(stats.inserts, 0, "events: {:?}", runtime.events());
+    assert_eq!(stats.entries, 0, "events: {:?}", runtime.events());
+    assert!(
+        runtime
+            .events()
+            .iter()
+            .any(|event| event.kind == "cache.coalesced_abort"),
+        "no follower observed the no-store outcome: {:?}",
+        runtime.events()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_revalidation_finishes_its_flight_and_stale_followers_retry(
+) -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()])
+        .with_runtime(runtime.clone());
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote_revalidatable",
+        VgiTableProvider::bind(conn, "example", "main", "cache_revalidatable").await?,
+    )?;
+
+    ctx.sql("SELECT nonce FROM remote_revalidatable")
+        .await?
+        .collect()
+        .await?;
+
+    let concurrency = 4;
+    let barrier = Arc::new(tokio::sync::Barrier::new(concurrency));
+    let queries = (0..concurrency).map(|_| {
+        let ctx = ctx.clone();
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            ctx.sql("SELECT nonce FROM remote_revalidatable")
+                .await?
+                .collect()
+                .await
+        })
+    });
+    for result in futures::future::join_all(queries).await {
+        let batches = result.expect("concurrent query task panicked")?;
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            1
+        );
+    }
+
+    let events = runtime.events();
+    assert!(
+        events.iter().any(|event| event.kind == "cache.wait"),
+        "the test did not overlap revalidations: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == "cache.coalesced_retry"),
+        "an immediately-stale follower did not retry: {events:?}"
+    );
+    assert_eq!(
+        runtime.result_cache().stats().capture_aborts,
+        0,
+        "successful revalidations must complete their captures: {events:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn split_plans_are_reused_only_when_the_worker_allows_it() -> datafusion::error::Result<()> {
     let worker = skip_without_worker!();
@@ -371,6 +595,34 @@ async fn advertised_aggregates_support_sliding_window_frames() -> datafusion::er
         })
         .collect::<Vec<_>>();
     assert_eq!(got, vec![1, 3, 5]);
+
+    // This fixture deliberately implements only VGI's dedicated window
+    // callback: its ordinary aggregate finalize returns NULL. It therefore
+    // catches accidental fallback to the grouped-aggregate RPC path.
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT ex.main.vgi_window_median(x) OVER (ORDER BY x ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING) AS m \
+         FROM (VALUES (1::DOUBLE), (2::DOUBLE), (3::DOUBLE), (4::DOUBLE), (5::DOUBLE), (6::DOUBLE), (7::DOUBLE)) t(x) ORDER BY x",
+    )
+    .await?
+    .collect()
+    .await?;
+    let got = batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Float64Array>()
+                .expect("window median is Float64")
+                .clone();
+            (0..values.len()).map(move |index| {
+                assert!(values.is_valid(index), "window callback returned NULL");
+                values.value(index)
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(got, vec![2.0, 2.5, 3.0, 4.0, 5.0, 5.5, 6.0]);
     Ok(())
 }
 

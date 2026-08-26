@@ -1850,6 +1850,7 @@ fn register_global_functions(
                         metadata_volatility(info),
                     )
                     .with_arg_specs(specs)
+                    .with_window_support(info.supports_window)
                     .with_required_secrets(metadata_secrets(info)),
                 ));
                 record_registration(ctx, &spec.alias, RegistrationKind::Aggregate, name);
@@ -2319,7 +2320,7 @@ fn register_aggregate_functions(
     provider: &VgiCatalogProvider,
 ) {
     for (schema_name, schema) in provider.vgi_schemas() {
-        for (function, specs, volatility, _supports_window, required_secrets) in schema.aggregates()
+        for (function, specs, volatility, supports_window, required_secrets) in schema.aggregates()
         {
             for name in publish_names(&spec.alias, schema_name, function) {
                 if ctx.state().aggregate_functions().contains_key(&name) {
@@ -2335,6 +2336,7 @@ fn register_aggregate_functions(
                         *volatility,
                     )
                     .with_arg_specs(specs.clone())
+                    .with_window_support(*supports_window)
                     .with_required_secrets(required_secrets.clone()),
                 ));
                 record_registration(ctx, &spec.alias, RegistrationKind::Aggregate, name);

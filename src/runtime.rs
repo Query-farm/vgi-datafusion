@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -146,6 +146,7 @@ pub struct VgiRuntime {
     events: Mutex<VecDeque<VgiEvent>>,
     plan_cache: Mutex<HashMap<PlanCacheKey, CachedPlan>>,
     plan_cache_stats: Mutex<PlanCacheStats>,
+    result_flights: Arc<ResultFlightRegistry>,
     catalog_metadata: Mutex<HashMap<String, VgiCatalogMetadata>>,
     event_sink: Option<Arc<dyn VgiEventSink>>,
     secret_resolver: Option<Arc<dyn VgiSecretResolver>>,
@@ -179,6 +180,7 @@ impl VgiRuntime {
             events: Mutex::new(VecDeque::new()),
             plan_cache: Mutex::new(HashMap::new()),
             plan_cache_stats: Mutex::new(PlanCacheStats::default()),
+            result_flights: Arc::new(ResultFlightRegistry::default()),
             catalog_metadata: Mutex::new(HashMap::new()),
             event_sink: None,
             secret_resolver: None,
@@ -349,6 +351,133 @@ impl VgiRuntime {
         self.plan_cache_stats.lock().unwrap().entries = 0;
         count
     }
+
+    pub(crate) fn acquire_result_flight(&self, key: &vgi_client::CacheKey) -> ResultFlightClaim {
+        self.result_flights.acquire(key)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResultFlightOutcome {
+    Stored,
+    Aborted(String),
+}
+
+#[derive(Debug)]
+struct ResultFlight {
+    outcome: tokio::sync::watch::Sender<Option<ResultFlightOutcome>>,
+}
+
+#[derive(Debug, Default)]
+struct ResultFlightRegistry {
+    flights: Mutex<HashMap<vgi_client::CacheKey, Arc<ResultFlight>>>,
+}
+
+impl ResultFlightRegistry {
+    fn acquire(self: &Arc<Self>, key: &vgi_client::CacheKey) -> ResultFlightClaim {
+        let mut flights = self.flights.lock().unwrap();
+        if let Some(flight) = flights.get(key) {
+            return ResultFlightClaim::Follower(ResultFlightWaiter {
+                outcome: flight.outcome.subscribe(),
+            });
+        }
+        let (outcome, _) = tokio::sync::watch::channel(None);
+        let flight = Arc::new(ResultFlight { outcome });
+        flights.insert(key.clone(), Arc::clone(&flight));
+        ResultFlightClaim::Producer(Arc::new(ResultFlightProducer {
+            registry: Arc::downgrade(self),
+            key: key.clone(),
+            flight,
+            finished: Mutex::new(false),
+        }))
+    }
+
+    fn finish(
+        &self,
+        key: &vgi_client::CacheKey,
+        flight: &Arc<ResultFlight>,
+        outcome: ResultFlightOutcome,
+    ) {
+        let mut flights = self.flights.lock().unwrap();
+        if flights
+            .get(key)
+            .is_some_and(|active| Arc::ptr_eq(active, flight))
+        {
+            flights.remove(key);
+        }
+        drop(flights);
+        flight.outcome.send_replace(Some(outcome));
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ResultFlightClaim {
+    Producer(Arc<ResultFlightProducer>),
+    Follower(ResultFlightWaiter),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResultFlightWaiter {
+    outcome: tokio::sync::watch::Receiver<Option<ResultFlightOutcome>>,
+}
+
+impl ResultFlightWaiter {
+    pub(crate) async fn wait(mut self) -> ResultFlightOutcome {
+        loop {
+            if let Some(outcome) = self.outcome.borrow_and_update().clone() {
+                return outcome;
+            }
+            if self.outcome.changed().await.is_err() {
+                return ResultFlightOutcome::Aborted("cache producer disappeared".to_string());
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ResultFlightProducer {
+    registry: Weak<ResultFlightRegistry>,
+    key: vgi_client::CacheKey,
+    flight: Arc<ResultFlight>,
+    finished: Mutex<bool>,
+}
+
+impl ResultFlightProducer {
+    pub(crate) fn stored(&self) {
+        self.finish(ResultFlightOutcome::Stored);
+    }
+
+    pub(crate) fn abort(&self, reason: impl Into<String>) {
+        self.finish(ResultFlightOutcome::Aborted(reason.into()));
+    }
+
+    fn finish(&self, outcome: ResultFlightOutcome) {
+        let mut finished = self.finished.lock().unwrap();
+        if *finished {
+            return;
+        }
+        *finished = true;
+        if let Some(registry) = self.registry.upgrade() {
+            registry.finish(&self.key, &self.flight, outcome);
+        } else {
+            self.flight.outcome.send_replace(Some(outcome));
+        }
+    }
+}
+
+impl Drop for ResultFlightProducer {
+    fn drop(&mut self) {
+        let finished = self.finished.get_mut().map(|value| *value).unwrap_or(true);
+        if !finished {
+            if let Some(registry) = self.registry.upgrade() {
+                registry.finish(
+                    &self.key,
+                    &self.flight,
+                    ResultFlightOutcome::Aborted("cache producer dropped".to_string()),
+                );
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -383,4 +512,74 @@ pub struct PlanCacheStats {
     pub inserts: u64,
     /// Plans currently retained.
     pub entries: usize,
+}
+
+#[cfg(test)]
+mod result_flight_tests {
+    use super::*;
+
+    fn key(function: &str) -> vgi_client::CacheKey {
+        vgi_client::CacheKey {
+            catalog: "example".to_string(),
+            identity_scope: "example:anonymous".to_string(),
+            worker_label: "fixture".to_string(),
+            function: function.to_string(),
+            arguments: Vec::new(),
+            projection: None,
+            filters: None,
+            catalog_version: 1,
+            at: None,
+            settings: Vec::new(),
+            attach_options: Vec::new(),
+            row_limit: None,
+            ordering: None,
+            sample: None,
+            plan: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn identical_misses_share_one_producer_until_it_stores() {
+        let runtime = VgiRuntime::default();
+        let key = key("main.cache_nonce");
+        let producer = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Producer(producer) => producer,
+            ResultFlightClaim::Follower(_) => panic!("first claim must produce"),
+        };
+        let follower = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Follower(follower) => follower,
+            ResultFlightClaim::Producer(_) => panic!("second claim must follow"),
+        };
+
+        producer.stored();
+        assert_eq!(follower.wait().await, ResultFlightOutcome::Stored);
+        assert!(matches!(
+            runtime.acquire_result_flight(&key),
+            ResultFlightClaim::Producer(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_producer_wakes_followers_without_a_store() {
+        let runtime = VgiRuntime::default();
+        let key = key("main.cancelled");
+        let producer = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Producer(producer) => producer,
+            ResultFlightClaim::Follower(_) => panic!("first claim must produce"),
+        };
+        let follower = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Follower(follower) => follower,
+            ResultFlightClaim::Producer(_) => panic!("second claim must follow"),
+        };
+
+        drop(producer);
+        assert!(matches!(
+            follower.wait().await,
+            ResultFlightOutcome::Aborted(reason) if reason == "cache producer dropped"
+        ));
+        assert!(matches!(
+            runtime.acquire_result_flight(&key),
+            ResultFlightClaim::Producer(_)
+        ));
+    }
 }

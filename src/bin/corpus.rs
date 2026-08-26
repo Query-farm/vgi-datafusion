@@ -1821,7 +1821,7 @@ async fn main() {
     );
     if tally.not_applicable > 0 {
         println!(
-            "         {} not applicable (SET / PRAGMA / CALL — engine or extension config)",
+            "         {} not applicable (engine, dialect, or extension surface)",
             tally.not_applicable
         );
     }

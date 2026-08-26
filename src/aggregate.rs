@@ -61,6 +61,12 @@ pub struct VgiAggregateUdf {
     /// arguments, even though DataFusion evaluates every aggregate expression
     /// into an array for `update_batch`.
     specs: ArgSpecs,
+    /// Whether the worker provides the dedicated VGI window callback.
+    ///
+    /// DataFusion asks for a sliding accumulator separately from an ordinary
+    /// grouped accumulator. Keeping this bit here lets the former use the
+    /// worker's window RPC without changing plain GROUP BY semantics.
+    supports_window: bool,
     required_secrets: Vec<vgi_client::SecretLookupRequest>,
 }
 
@@ -104,12 +110,18 @@ impl VgiAggregateUdf {
             registered_name: registered_name.into(),
             signature: Signature::variadic_any(volatility),
             specs: ArgSpecs::default(),
+            supports_window: false,
             required_secrets: Vec::new(),
         }
     }
 
     pub(crate) fn with_arg_specs(mut self, specs: ArgSpecs) -> Self {
         self.specs = specs;
+        self
+    }
+
+    pub(crate) fn with_window_support(mut self, supports_window: bool) -> Self {
+        self.supports_window = supports_window;
         self
     }
 
@@ -192,6 +204,20 @@ impl AggregateUDFImpl for VgiAggregateUdf {
     }
 
     fn accumulator(&self, args: AccumulatorArgs) -> DFResult<Box<dyn Accumulator>> {
+        self.make_accumulator(args, false)
+    }
+
+    fn create_sliding_accumulator(&self, args: AccumulatorArgs) -> DFResult<Box<dyn Accumulator>> {
+        self.make_accumulator(args, self.supports_window)
+    }
+}
+
+impl VgiAggregateUdf {
+    fn make_accumulator(
+        &self,
+        args: AccumulatorArgs,
+        use_window_callback: bool,
+    ) -> DFResult<Box<dyn Accumulator>> {
         Ok(Box::new(VgiAccumulator {
             conn: self.conn.clone(),
             catalog: self.catalog.clone(),
@@ -205,6 +231,7 @@ impl AggregateUDFImpl for VgiAggregateUdf {
             specs: self.specs.clone(),
             arguments: aggregate_arguments(&self.function, &self.specs, args.exprs)?,
             required_secrets: self.required_secrets.clone(),
+            use_window_callback,
             buffered: Vec::new(),
         }))
     }
@@ -320,6 +347,9 @@ struct VgiAccumulator {
     specs: ArgSpecs,
     arguments: Arguments,
     required_secrets: Vec<vgi_client::SecretLookupRequest>,
+    /// Evaluate the current sliding frame with the worker's dedicated window
+    /// callback instead of its ordinary aggregate finalize implementation.
+    use_window_callback: bool,
     /// One buffer per argument; `buffered[i]` are the chunks seen for argument
     /// `i`, concatenated only when needed.
     buffered: Vec<Vec<ArrayRef>>,
@@ -468,6 +498,7 @@ impl Accumulator for VgiAccumulator {
         let function = self.function.clone();
         let arguments = self.arguments.clone();
         let required_secrets = self.required_secrets.clone();
+        let use_window_callback = self.use_window_callback;
 
         // DataFusion invokes `Accumulator::evaluate` synchronously while
         // polling its async execution streams. HTTP uses reqwest::blocking,
@@ -489,6 +520,32 @@ impl Accumulator for VgiAccumulator {
                 &schema,
                 &required_secrets,
             )?;
+
+            if use_window_callback {
+                let rows = batch.num_rows() as i64;
+                let partition = match client.window_init(&bound, 0, &batch).map_err(to_df) {
+                    Ok(partition) => partition,
+                    Err(error) => {
+                        let _ = client.aggregate_destroy(&attached, &bound, &[0]);
+                        return Err(error);
+                    }
+                };
+                let evaluated = client
+                    .window_evaluate(&partition, 0, &[(0, rows)])
+                    .map_err(to_df);
+                let _ = client.window_destroy(&partition);
+                let _ = client.aggregate_destroy(&attached, &bound, &[0]);
+                let out = evaluated?;
+
+                if out.num_rows() != 1 || out.num_columns() == 0 {
+                    return Err(DataFusionError::Execution(format!(
+                        "VGI window aggregate `{function}` evaluated to {} rows / {} columns; expected one value",
+                        out.num_rows(),
+                        out.num_columns()
+                    )));
+                }
+                return ScalarValue::try_from_array(out.column(0), 0);
+            }
 
             // A single group: this accumulator *is* one group, and DataFusion
             // has already partitioned the rows for us.

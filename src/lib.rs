@@ -39,7 +39,7 @@
 //! argument; DataFusion restricts that subquery to one column, so wider table
 //! inputs need an upstream planner change.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1771,6 +1771,8 @@ pub struct VgiScanExec {
     partition_statistics: Vec<Arc<Statistics>>,
     cache_key: Option<vgi_client::CacheKey>,
     cache_probe: OnceLock<Option<vgi_client::CachedEntry>>,
+    cache_flight: OnceLock<crate::runtime::ResultFlightClaim>,
+    cache_flight_probe: Arc<OnceLock<Option<vgi_client::CachedEntry>>>,
     cache_capture: Option<Arc<ScanCacheCapture>>,
     at: Option<vgi_client::At>,
     column_mapping: Option<Arc<HashMap<String, String>>>,
@@ -1909,6 +1911,8 @@ impl VgiScanExec {
             partition_statistics,
             cache_key,
             cache_probe: OnceLock::new(),
+            cache_flight: OnceLock::new(),
+            cache_flight_probe: Arc::new(OnceLock::new()),
             cache_capture,
             at,
             column_mapping,
@@ -1937,6 +1941,8 @@ impl VgiScanExec {
             // by its planning-time filter must never enter the VGI result cache.
             cache_key: None,
             cache_probe: OnceLock::new(),
+            cache_flight: OnceLock::new(),
+            cache_flight_probe: Arc::new(OnceLock::new()),
             cache_capture: None,
             at: self.at.clone(),
             column_mapping: self.column_mapping.clone(),
@@ -1970,6 +1976,7 @@ struct ScanCacheCapture {
     cache: Arc<vgi_client::ResultCache>,
     runtime: Arc<VgiRuntime>,
     key: vgi_client::CacheKey,
+    flight: Mutex<Option<Arc<crate::runtime::ResultFlightProducer>>>,
     state: Mutex<ScanCacheCaptureState>,
 }
 
@@ -2000,6 +2007,7 @@ impl ScanCacheCapture {
             cache,
             runtime,
             key,
+            flight: Mutex::new(None),
             state: Mutex::new(ScanCacheCaptureState {
                 partitions: vec![None; partitions],
                 controls: vec![None; partitions],
@@ -2021,6 +2029,27 @@ impl ScanCacheCapture {
             event.function = Some(self.key.function.clone());
             event.message = Some(reason.to_string());
             self.runtime.emit(event);
+            if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+                flight.abort(reason);
+            }
+        }
+    }
+
+    fn set_flight(&self, flight: Arc<crate::runtime::ResultFlightProducer>) {
+        let mut active = self.flight.lock().unwrap();
+        if active.is_none() {
+            *active = Some(flight);
+        }
+    }
+
+    fn revalidated(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.aborted || state.committed {
+            return;
+        }
+        state.committed = true;
+        if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+            flight.stored();
         }
     }
 
@@ -2048,6 +2077,9 @@ impl ScanCacheCapture {
         }
         let Some(control) = state.controls.iter().flatten().next().cloned() else {
             state.aborted = true;
+            if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+                flight.abort("worker did not opt result into caching");
+            }
             return;
         };
         if state
@@ -2058,6 +2090,9 @@ impl ScanCacheCapture {
         {
             state.aborted = true;
             self.cache.record_capture_abort();
+            if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+                flight.abort("split cache controls disagreed");
+            }
             return;
         }
         let batches = state
@@ -2083,6 +2118,9 @@ impl ScanCacheCapture {
                 event.catalog = Some(self.key.catalog.clone());
                 event.function = Some(self.key.function.clone());
                 self.runtime.emit(event);
+                if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+                    flight.stored();
+                }
             }
             Err(reason) => {
                 state.aborted = true;
@@ -2091,6 +2129,9 @@ impl ScanCacheCapture {
                 event.function = Some(self.key.function.clone());
                 event.message = Some(format!("{reason:?}"));
                 self.runtime.emit(event);
+                if let Some(flight) = self.flight.lock().unwrap().as_ref() {
+                    flight.abort(format!("cache refused result: {reason:?}"));
+                }
             }
         }
     }
@@ -2108,6 +2149,14 @@ impl Drop for ScanCacheCapture {
             event.function = Some(self.key.function.clone());
             event.message = Some("execution ended before every partition completed".to_string());
             self.runtime.emit(event);
+            if let Some(flight) = self
+                .flight
+                .get_mut()
+                .ok()
+                .and_then(|flight| flight.as_ref())
+            {
+                flight.abort("execution ended before every partition completed");
+            }
         }
     }
 }
@@ -2550,6 +2599,7 @@ impl ExecutionPlan for VgiScanExec {
         partition: usize,
         _ctx: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
+        let mut cache_waiter = None;
         if let Some(key) = &self.cache_key {
             let first_probe = self.cache_probe.get().is_none();
             let cached = self
@@ -2573,6 +2623,20 @@ impl ExecutionPlan for VgiScanExec {
                     .unwrap_or_default();
                 let stream = futures::stream::iter(batches.into_iter().map(Ok));
                 return Ok(Box::pin(RecordBatchStreamAdapter::new(out_schema, stream)));
+            }
+
+            match self
+                .cache_flight
+                .get_or_init(|| self.conn.runtime.acquire_result_flight(key))
+            {
+                crate::runtime::ResultFlightClaim::Producer(flight) => {
+                    if let Some(capture) = &self.cache_capture {
+                        capture.set_flight(Arc::clone(flight));
+                    }
+                }
+                crate::runtime::ResultFlightClaim::Follower(waiter) => {
+                    cache_waiter = Some((waiter.clone(), key.clone()));
+                }
             }
         }
         let conn = self.conn.clone();
@@ -2604,9 +2668,6 @@ impl ExecutionPlan for VgiScanExec {
         let scan_schema = self.schema.clone();
         let column_mapping = self.column_mapping.clone();
         let cache_capture = self.cache_capture.clone();
-        if let Some(capture) = &cache_capture {
-            capture.start(partition);
-        }
         let revalidation = if self.split_groups.is_none() {
             self.cache_key.as_ref().and_then(|key| {
                 self.conn
@@ -2627,6 +2688,9 @@ impl ExecutionPlan for VgiScanExec {
             tokio::sync::mpsc::channel::<DFResult<datafusion::arrow::array::RecordBatch>>(2);
 
         let job = move || {
+            if let Some(capture) = &cache_capture {
+                capture.start(partition);
+            }
             let started = std::time::Instant::now();
             let mut event = VgiEvent::new("scan.start");
             event.catalog = Some(catalog.clone());
@@ -2845,6 +2909,9 @@ impl ExecutionPlan for VgiScanExec {
                                 )
                             })?;
                         }
+                        if let Some(capture) = &cache_capture {
+                            capture.revalidated();
+                        }
                         let mut event = VgiEvent::new("cache.revalidated");
                         event.catalog = Some(catalog.clone());
                         event.function = Some(format!("{schema_name}.{function}"));
@@ -2885,12 +2952,78 @@ impl ExecutionPlan for VgiScanExec {
         // join-key dynamic filter is ready. Starting the blocking RPC here
         // would consume the remote scan before DataFusion had a chance to
         // publish that filter.
-        let stream = futures::stream::unfold((rx, Some(job)), |(mut rx, mut job)| async move {
-            if let Some(job) = job.take() {
-                tokio::task::spawn_blocking(job);
-            }
-            rx.recv().await.map(|item| (item, (rx, job)))
+        let wait_context = cache_waiter.map(|(waiter, key)| {
+            (
+                waiter,
+                key,
+                Arc::clone(self.conn.runtime.result_cache()),
+                Arc::clone(&self.cache_flight_probe),
+                Arc::clone(&self.conn.runtime),
+                self.catalog.clone(),
+                format!("{}.{}", self.schema_name, self.function),
+            )
         });
+        let stream = futures::stream::unfold(
+            (rx, Some(job), wait_context, VecDeque::new()),
+            move |(mut rx, mut job, wait_context, mut replay)| async move {
+                if let Some((waiter, key, cache, probe, runtime, catalog, function)) = wait_context
+                {
+                    let mut event = VgiEvent::new("cache.wait");
+                    event.catalog = Some(catalog.clone());
+                    event.function = Some(function.clone());
+                    runtime.emit(event);
+                    match waiter.wait().await {
+                        crate::runtime::ResultFlightOutcome::Stored => {
+                            match probe.get_or_init(|| cache.get(&key)).clone() {
+                                Some(entry) => {
+                                    // Dropping the unstarted fallback job also
+                                    // drops its sender, so replay closes normally.
+                                    drop(job.take());
+                                    if partition == 0 {
+                                        replay.extend(entry.batches().iter().cloned().map(Ok));
+                                        let mut event = VgiEvent::new("cache.coalesced_hit");
+                                        event.catalog = Some(catalog);
+                                        event.function = Some(function);
+                                        runtime.emit(event);
+                                    }
+                                }
+                                None => {
+                                    // A zero-TTL revalidatable entry, short
+                                    // expiry, or intervening eviction can make
+                                    // a successful fill unavailable by the
+                                    // time this follower wakes. Cache policy
+                                    // must never turn that race into a query
+                                    // failure: execute this plan normally.
+                                    let mut event = VgiEvent::new("cache.coalesced_retry");
+                                    event.catalog = Some(catalog);
+                                    event.function = Some(function);
+                                    runtime.emit(event);
+                                    if let Some(job) = job.take() {
+                                        tokio::task::spawn_blocking(job);
+                                    }
+                                }
+                            }
+                        }
+                        crate::runtime::ResultFlightOutcome::Aborted(reason) => {
+                            let mut event = VgiEvent::new("cache.coalesced_abort");
+                            event.catalog = Some(catalog);
+                            event.function = Some(function);
+                            event.message = Some(reason);
+                            runtime.emit(event);
+                            if let Some(job) = job.take() {
+                                tokio::task::spawn_blocking(job);
+                            }
+                        }
+                    }
+                } else if let Some(job) = job.take() {
+                    tokio::task::spawn_blocking(job);
+                }
+                if let Some(item) = replay.pop_front() {
+                    return Some((item, (rx, job, None, replay)));
+                }
+                rx.recv().await.map(|item| (item, (rx, job, None, replay)))
+            },
+        );
         Ok(Box::pin(RecordBatchStreamAdapter::new(out_schema, stream)))
     }
 }

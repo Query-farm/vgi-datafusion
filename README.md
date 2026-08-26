@@ -204,9 +204,10 @@ that timeout.
   semantics differ. A host locality hook receives worker location hints, but the
   standalone DataFusion CLI has no distributed scheduler-affinity implementation.
 - **Cache breadth.** Complete, worker-opted producer and split results have a
-  safe bounded memory tier with conditional revalidation. Exchange/per-value
+  safe bounded memory tier with conditional revalidation and per-key
+  single-flight for concurrent misses. Exchange/per-value
   results, disk persistence, stale-while-revalidate, compression, and
-  cross-query single-flight are not implemented.
+  persistent cross-process sharing are not implemented.
 - **Dynamic filters and join keys.** DataFusion 55 hash-join filters are linked
   to VGI scans. Completed single-column `IN` sets use `join_keys` side IPC at
   init (`vgi_join_keys_version=2`), while later range/constant refinements ride

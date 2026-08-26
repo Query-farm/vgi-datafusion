@@ -37,7 +37,7 @@
       "title": "Aggregates, windows, and accumulation",
       "status": "partial",
       "groups": ["aggregate", "accumulate"],
-      "remaining": ["window-frame correctness", "zero-argument aggregate signatures", "remaining ANY/varargs forms"]
+      "remaining": ["zero-argument aggregate signatures", "remaining ANY/varargs forms", "DataFusion-only window EXCLUDE and aggregate ORDER BY syntax"]
     },
     {
       "id": "table_input",
@@ -65,14 +65,14 @@
       "title": "VGI result cache",
       "status": "partial",
       "groups": ["cache"],
-      "remaining": ["exchange/per-value caching", "disk persistence and spilling", "compression", "single-flight", "worker-log forwarding beyond adapter events", "DataFusion-native EXPLAIN and metrics"]
+      "remaining": ["exchange/per-value caching", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events", "DataFusion-native EXPLAIN and metrics"]
     },
     {
       "id": "catalog_metadata",
       "title": "Catalogs, views, macros, and global functions",
       "status": "partial",
       "groups": ["catalog", "view", "macro", "global_functions", "schema_reconcile.test"],
-      "remaining": ["catalog-table source scan branches", "custom formats without a registered DataFusion factory", "broader view translation", "database metadata adaptations", "same-schema qualification for unqualified objects inside macro definitions"]
+      "remaining": ["custom formats without a registered DataFusion factory", "broader view translation", "database metadata adaptations", "same-schema qualification for unqualified objects inside macro definitions", "real companion-catalog source fixture coverage"]
     },
     {
       "id": "attach_settings",
@@ -86,7 +86,7 @@
       "title": "Authentication and secrets",
       "status": "partial",
       "groups": ["bearer_auth", "secret"],
-      "remaining": ["corpus secret resolver fixtures", "multi-scope secret policy", "OAuth identity fixture coverage"]
+      "remaining": ["corpus-wide secret resolver fixtures", "OAuth identity fixture coverage", "CLI secret mapping policy"]
     },
     {
       "id": "copy",
@@ -107,7 +107,7 @@
       "title": "Transport, launcher, protocol, and external fixtures",
       "status": "blocked",
       "groups": ["http", "launcher", "protocol_version", "container", "github"],
-      "remaining": ["provide container/GitHub fixtures", "adapt transport-specific extension diagnostics", "run the same corpus over Unix and HTTP"]
+      "remaining": ["provide container/GitHub fixtures", "adapt transport-specific extension diagnostics", "long-lived cancellation and unbounded-stream soak coverage"]
     },
     {
       "id": "regression_contracts",

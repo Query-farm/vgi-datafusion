@@ -81,6 +81,122 @@ struct NativeFormatSpec {
     options: Vec<(String, vgi_client::ArgValue)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogTableSpec {
+    catalog: String,
+    schema: String,
+    table: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogTableIdentity {
+    catalog: String,
+    schema: String,
+    table: String,
+}
+
+impl CatalogTableIdentity {
+    fn new(catalog: &str, schema: &str, table: &str) -> Self {
+        Self {
+            catalog: catalog.to_ascii_lowercase(),
+            schema: schema.to_ascii_lowercase(),
+            table: table.to_ascii_lowercase(),
+        }
+    }
+
+    fn display(&self) -> String {
+        format!("{}.{}.{}", self.catalog, self.schema, self.table)
+    }
+}
+
+fn catalog_table_spec(branch: &vgi_client::ScanBranch) -> DFResult<Option<CatalogTableSpec>> {
+    let Some(table) = branch
+        .source_table
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let catalog = branch
+        .source_catalog
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "VGI catalog-table branch for source table {table:?} has no source_catalog"
+            ))
+        })?;
+    let schema = branch
+        .source_schema
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "VGI catalog-table branch for source table {table:?} has no source_schema"
+            ))
+        })?;
+    Ok(Some(CatalogTableSpec {
+        catalog: catalog.to_string(),
+        schema: schema.to_string(),
+        table: table.to_string(),
+    }))
+}
+
+fn select_catalog_alias(
+    requested: &str,
+    catalog_names: &[String],
+    worker_catalogs: &[(String, String)],
+) -> DFResult<String> {
+    // The protocol normally names the companion's ATTACH alias. Preserve that
+    // qualification whenever it exists rather than guessing from its target.
+    if catalog_names.iter().any(|name| name == requested) {
+        return Ok(requested.to_string());
+    }
+
+    let mut aliases = catalog_names
+        .iter()
+        .filter(|name| name.eq_ignore_ascii_case(requested))
+        .cloned()
+        .collect::<Vec<_>>();
+    aliases.sort();
+    aliases.dedup();
+    match aliases.as_slice() {
+        [alias] => return Ok(alias.clone()),
+        [] => {}
+        _ => {
+            return Err(DataFusionError::Plan(format!(
+                "VGI catalog-table source catalog {requested:?} ambiguously matches attached aliases {}",
+                aliases.join(", ")
+            )));
+        }
+    }
+
+    // A worker can name the catalog target rather than the host alias. Only
+    // accept that spelling when retained VGI attachment metadata identifies a
+    // unique mounted alias; silently choosing one of two mounts would scan the
+    // wrong catalog.
+    let available = catalog_names.iter().collect::<HashSet<_>>();
+    aliases = worker_catalogs
+        .iter()
+        .filter(|(alias, worker)| {
+            worker.eq_ignore_ascii_case(requested) && available.contains(alias)
+        })
+        .map(|(alias, _)| alias.clone())
+        .collect();
+    aliases.sort();
+    aliases.dedup();
+    match aliases.as_slice() {
+        [alias] => Ok(alias.clone()),
+        [] => Err(DataFusionError::Plan(format!(
+            "VGI catalog-table source catalog {requested:?} is not attached"
+        ))),
+        _ => Err(DataFusionError::Plan(format!(
+            "VGI catalog-table source catalog {requested:?} maps to multiple attached aliases {}; use the companion attachment alias",
+            aliases.join(", ")
+        ))),
+    }
+}
+
 fn native_reader_format(function: &str) -> Option<&'static str> {
     match function.to_ascii_lowercase().as_str() {
         "read_csv" | "read_csv_auto" => Some("csv"),
@@ -285,6 +401,73 @@ fn native_format_spec(branch: &vgi_client::ScanBranch) -> DFResult<Option<Native
 #[cfg(test)]
 mod native_format_tests {
     use super::*;
+    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::datatypes::Field;
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::datasource::MemTable;
+    use datafusion::prelude::SessionContext;
+
+    fn catalog_provider_named(mount_alias: &str, name: &str) -> Arc<VgiCatalogTableProvider> {
+        let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+        let info = vgi_client::TableInfo {
+            comment: None,
+            tags: Vec::new(),
+            name: name.into(),
+            schema_name: "main".into(),
+            columns: vgi_protocol::ipc::write_schema(&schema).unwrap().into(),
+            not_null_constraints: Vec::new(),
+            unique_constraints: Vec::new(),
+            check_constraints: Vec::new(),
+            primary_key_constraints: Vec::new(),
+            foreign_key_constraints: Vec::new(),
+            supports_insert: false,
+            supports_update: false,
+            supports_delete: false,
+            supports_returning: false,
+            supports_column_statistics: false,
+            scan_function: None,
+            insert_function: None,
+            update_function: None,
+            delete_function: None,
+            cardinality_estimate: None.into(),
+            cardinality_max: None.into(),
+            column_statistics: None,
+            bind_result: None,
+            required_filters: Vec::new(),
+        };
+        VgiCatalogTableProvider::new(
+            VgiConnection::subprocess(["/bin/false"]),
+            mount_alias,
+            "example",
+            "main",
+            info,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn catalog_provider_for_test() -> Arc<VgiCatalogTableProvider> {
+        catalog_provider_named("root", "events")
+    }
+
+    fn source_branch(provider: Arc<dyn TableProvider>) -> BoundCatalogBranch {
+        BoundCatalogBranch {
+            info: vgi_client::ScanBranch {
+                function_name: String::new(),
+                arguments: Vec::<u8>::new().into(),
+                branch_filter: None,
+                writable: false,
+                source_catalog: Some("source".into()),
+                source_schema: Some("main".into()),
+                source_table: Some("events".into()),
+                format_name: None,
+                format_locations: None,
+                format_options: None,
+            },
+            provider,
+            null_string: None,
+        }
+    }
 
     #[test]
     fn translates_duckdb_csv_options_without_losing_semantics() {
@@ -341,6 +524,184 @@ mod native_format_tests {
             .unwrap()
             .with_local_format_paths(true)
             .allows_local_format_paths());
+    }
+
+    #[test]
+    fn catalog_table_branches_require_fully_qualified_sources() {
+        let branch = vgi_client::ScanBranch {
+            function_name: String::new(),
+            arguments: Vec::<u8>::new().into(),
+            branch_filter: None,
+            writable: false,
+            source_catalog: Some("lake".into()),
+            source_schema: Some("main".into()),
+            source_table: Some("events".into()),
+            format_name: None,
+            format_locations: None,
+            format_options: None,
+        };
+        assert_eq!(
+            catalog_table_spec(&branch).unwrap(),
+            Some(CatalogTableSpec {
+                catalog: "lake".into(),
+                schema: "main".into(),
+                table: "events".into(),
+            })
+        );
+
+        let mut missing_schema = branch;
+        missing_schema.source_schema = None;
+        let error = catalog_table_spec(&missing_schema).unwrap_err();
+        assert!(error.to_string().contains("no source_schema"));
+    }
+
+    #[test]
+    fn source_catalog_prefers_alias_then_unique_worker_catalog() {
+        let catalogs = vec!["main_mount".to_string(), "lake_alias".to_string()];
+        let workers = vec![
+            ("main_mount".to_string(), "example".to_string()),
+            ("lake_alias".to_string(), "acme_lake".to_string()),
+        ];
+        assert_eq!(
+            select_catalog_alias("lake_alias", &catalogs, &workers).unwrap(),
+            "lake_alias"
+        );
+        assert_eq!(
+            select_catalog_alias("acme_lake", &catalogs, &workers).unwrap(),
+            "lake_alias"
+        );
+        assert!(select_catalog_alias("missing", &catalogs, &workers)
+            .unwrap_err()
+            .to_string()
+            .contains("is not attached"));
+    }
+
+    #[test]
+    fn source_catalog_rejects_ambiguous_worker_catalog_mounts() {
+        let catalogs = vec!["lake_one".to_string(), "lake_two".to_string()];
+        let workers = vec![
+            ("lake_one".to_string(), "acme_lake".to_string()),
+            ("lake_two".to_string(), "acme_lake".to_string()),
+        ];
+        let error = select_catalog_alias("acme_lake", &catalogs, &workers).unwrap_err();
+        assert!(error.to_string().contains("multiple attached aliases"));
+        assert!(error.to_string().contains("lake_one, lake_two"));
+    }
+
+    #[test]
+    fn reports_the_indirect_catalog_branch_cycle_path() {
+        let a = catalog_provider_named("root", "events");
+        let b = catalog_provider_named("lake", "events_archive");
+        let c = catalog_provider_named("cold", "events_history");
+        let b_provider: Arc<dyn TableProvider> = b.clone();
+        a.branches
+            .set(Some(vec![source_branch(b_provider)]))
+            .unwrap();
+        let c_provider: Arc<dyn TableProvider> = c.clone();
+        b.branches
+            .set(Some(vec![source_branch(c_provider)]))
+            .unwrap();
+        let a_provider: Arc<dyn TableProvider> = a;
+        assert_eq!(
+            c.catalog_source_cycle(&a_provider).unwrap(),
+            [
+                "cold.main.events_history",
+                "root.main.events",
+                "lake.main.events_archive",
+                "cold.main.events_history"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_catalog_table_branch_through_datafusion_catalogs() {
+        let ctx = SessionContext::new();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        ctx.register_table(
+            "source_events",
+            Arc::new(MemTable::try_new(Arc::clone(&schema), vec![vec![]]).unwrap()),
+        )
+        .unwrap();
+        let owner = catalog_provider_for_test();
+        let state = ctx.state();
+        let resolved = owner
+            .bind_catalog_table_source(
+                &state,
+                CatalogTableSpec {
+                    catalog: "datafusion".into(),
+                    schema: "public".into(),
+                    table: "source_events".into(),
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.schema(), schema);
+    }
+
+    #[tokio::test]
+    async fn rejects_direct_catalog_table_branch_recursion() {
+        let ctx = SessionContext::new();
+        let owner = catalog_provider_for_test();
+        ctx.register_table("events", owner.clone()).unwrap();
+        let state = ctx.state();
+        let error = owner
+            .bind_catalog_table_source(
+                &state,
+                CatalogTableSpec {
+                    catalog: "datafusion".into(),
+                    schema: "public".into(),
+                    table: "events".into(),
+                },
+                0,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("directly references itself"));
+    }
+
+    #[tokio::test]
+    async fn catalog_table_branches_share_reconciliation_and_branch_filters() {
+        let ctx = SessionContext::new();
+        let raw_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&raw_schema),
+            vec![Arc::new(Int32Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+        let raw_provider =
+            Arc::new(MemTable::try_new(raw_schema, vec![vec![batch]]).unwrap()) as Arc<_>;
+        let branch = BoundCatalogBranch {
+            info: vgi_client::ScanBranch {
+                function_name: String::new(),
+                arguments: Vec::<u8>::new().into(),
+                branch_filter: Some("id >= 2".into()),
+                writable: false,
+                source_catalog: Some("datafusion".into()),
+                source_schema: Some("public".into()),
+                source_table: Some("source_events".into()),
+                format_name: None,
+                format_locations: None,
+                format_options: None,
+            },
+            provider: raw_provider,
+            null_string: None,
+        };
+        let owner = catalog_provider_for_test();
+        let state = ctx.state();
+        let plan = owner
+            .scan_multi_branches(&state, &[branch], None, &[], None)
+            .await
+            .unwrap();
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+        let ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(ids.values(), &[2]);
     }
 }
 
@@ -497,6 +858,113 @@ impl VgiCatalogTableProvider {
         Ok(Arc::new(ListingTable::try_new(config)?))
     }
 
+    fn identity(&self) -> CatalogTableIdentity {
+        CatalogTableIdentity::new(&self.mount_alias, &self.schema_name, &self.info.name)
+    }
+
+    fn catalog_source_cycle(&self, provider: &Arc<dyn TableProvider>) -> Option<Vec<String>> {
+        fn reaches(
+            provider: &Arc<dyn TableProvider>,
+            target: *const VgiCatalogTableProvider,
+            visited: &mut HashSet<usize>,
+            path: &mut Vec<CatalogTableIdentity>,
+        ) -> bool {
+            let Some(source) = provider.downcast_ref::<VgiCatalogTableProvider>() else {
+                return false;
+            };
+            let pointer = source as *const VgiCatalogTableProvider;
+            if !visited.insert(pointer as usize) {
+                return false;
+            }
+            path.push(source.identity());
+            if pointer == target {
+                return true;
+            }
+            if let Some(branches) = source.branches.get().and_then(Option::as_ref) {
+                for branch in branches {
+                    if reaches(&branch.provider, target, visited, path) {
+                        return true;
+                    }
+                }
+            }
+            path.pop();
+            false
+        }
+
+        let mut path = vec![self.identity()];
+        reaches(
+            provider,
+            self as *const VgiCatalogTableProvider,
+            &mut HashSet::new(),
+            &mut path,
+        )
+        .then(|| path.into_iter().map(|item| item.display()).collect())
+    }
+
+    async fn bind_catalog_table_source(
+        &self,
+        state: &dyn Session,
+        spec: CatalogTableSpec,
+        branch_index: usize,
+    ) -> DFResult<Arc<dyn TableProvider>> {
+        let session_state = state
+            .as_any()
+            .downcast_ref::<SessionState>()
+            .ok_or_else(|| {
+                DataFusionError::Plan(
+                    "VGI catalog-table branches require DataFusion SessionState catalog support"
+                        .to_string(),
+                )
+            })?;
+        let catalog_names = session_state.catalog_list().catalog_names();
+        let worker_catalogs = self
+            .conn
+            .runtime()
+            .catalog_metadata()
+            .into_iter()
+            .map(|(alias, metadata)| (alias, metadata.worker_catalog))
+            .collect::<Vec<_>>();
+        let alias = select_catalog_alias(&spec.catalog, &catalog_names, &worker_catalogs)?;
+        let catalog = session_state
+            .catalog_list()
+            .catalog(&alias)
+            .ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "VGI catalog-table scan branch {branch_index} resolved source catalog {:?} to alias {alias:?}, but that alias is no longer attached",
+                    spec.catalog
+                ))
+            })?;
+        let schema = catalog.schema(&spec.schema).ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "VGI catalog-table scan branch {branch_index} references missing schema {alias}.{}",
+                spec.schema
+            ))
+        })?;
+        let provider = schema.table(&spec.table).await?.ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "VGI catalog-table scan branch {branch_index} references missing table {alias}.{}.{}",
+                spec.schema, spec.table
+            ))
+        })?;
+
+        if provider
+            .downcast_ref::<VgiCatalogTableProvider>()
+            .is_some_and(|source| std::ptr::eq(source, self))
+        {
+            return Err(DataFusionError::Plan(format!(
+                "VGI catalog-table scan branch {branch_index} for `{}.{}` directly references itself as {alias}.{}.{}",
+                self.schema_name, self.info.name, spec.schema, spec.table
+            )));
+        }
+        if let Some(path) = self.catalog_source_cycle(&provider) {
+            return Err(DataFusionError::Plan(format!(
+                "VGI catalog-table scan branch cycle detected: {}",
+                path.join(" -> ")
+            )));
+        }
+        Ok(provider)
+    }
+
     async fn multi_branches(
         &self,
         state: &dyn Session,
@@ -559,40 +1027,20 @@ impl VgiCatalogTableProvider {
                         self.schema_name, self.info.name
                     )));
                 }
-                let session_state = state
-                    .as_any()
-                    .downcast_ref::<SessionState>()
-                    .ok_or_else(|| {
-                        DataFusionError::Plan(
-                            "VGI catalog branches require DataFusion SessionState support"
-                                .to_string(),
-                        )
-                })?;
-                for extension in &resolved.required_extensions {
-                    let normalized = extension.to_ascii_lowercase();
-                    let format = if normalized == "ndjson" {
-                        "json"
-                    } else {
-                        normalized.as_str()
-                    };
-                    if session_state.get_file_format_factory(format).is_none() {
-                        return Err(DataFusionError::NotImplemented(format!(
-                            "VGI table `{}.{}` requires host extension {:?}, which is not registered as a DataFusion file format",
-                            self.schema_name, self.info.name, extension
-                        )));
-                    }
-                }
-
+                // `required_extensions` names DuckDB host extensions. It is
+                // retained in diagnostics, but is not itself a DataFusion
+                // capability check: catalog-table arms prove support by
+                // resolving their attached provider, and format arms prove it
+                // through `get_file_format_factory` in `bind_native_format`.
                 let mut bound = Vec::with_capacity(resolved.branches.len());
                 for (index, branch) in resolved.branches.into_iter().enumerate() {
-                    if branch.source_table.is_some() {
-                        return Err(DataFusionError::NotImplemented(format!(
-                            "VGI catalog-table scan branch {index} for `{}.{}` is not yet mapped to a DataFusion provider",
-                            self.schema_name, self.info.name
-                        )));
-                    }
                     let (provider, null_string): (Arc<dyn TableProvider>, Option<String>) =
-                        if let Some(spec) = native_format_spec(&branch)? {
+                        if let Some(spec) = catalog_table_spec(&branch)? {
+                            (
+                                self.bind_catalog_table_source(state, spec, index).await?,
+                                None,
+                            )
+                        } else if let Some(spec) = native_format_spec(&branch)? {
                             let null_string = exact_null_string(&spec.options)?;
                             (
                                 self.bind_native_format(state, spec, index).await?,
@@ -772,9 +1220,22 @@ impl VgiCatalogTableProvider {
                 .iter()
                 .any(|field| field.name().eq_ignore_ascii_case(&column.name))
             {
+                let source = branch
+                    .info
+                    .source_table
+                    .as_deref()
+                    .map(|table| {
+                        format!(
+                            "catalog table {}.{}.{}",
+                            branch.info.source_catalog.as_deref().unwrap_or("?"),
+                            branch.info.source_schema.as_deref().unwrap_or("?"),
+                            table
+                        )
+                    })
+                    .unwrap_or_else(|| format!("function {:?}", branch.info.function_name));
                 return Err(DataFusionError::Plan(format!(
-                    "VGI branch filter references column {:?} not exposed by branch function {:?}",
-                    column.name, branch.info.function_name
+                    "VGI branch filter references column {:?} not exposed by branch {source}",
+                    column.name
                 )));
             }
         }
@@ -792,6 +1253,16 @@ impl VgiCatalogTableProvider {
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         let mut inputs = Vec::with_capacity(branches.len());
         for branch in branches {
+            // Re-check after every provider's branch cache has had a chance to
+            // initialize. This catches cycles whose arms were first resolved
+            // concurrently, without treating independent concurrent scans as
+            // recursion.
+            if let Some(path) = self.catalog_source_cycle(&branch.provider) {
+                return Err(DataFusionError::Plan(format!(
+                    "VGI catalog-table scan branch cycle detected: {}",
+                    path.join(" -> ")
+                )));
+            }
             // Send only predicates whose columns exist on this raw branch.
             // The outer provider is Inexact, so DataFusion still rechecks
             // every query predicate after reconciliation and union. Native

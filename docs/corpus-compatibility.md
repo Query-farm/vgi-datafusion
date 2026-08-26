@@ -195,6 +195,12 @@ overlays translate only DuckDB's `COPY ... (FORMAT ...)` fixture syntax and its
 `range.range` column spelling. Subprocess, Unix, and loopback HTTP runs each
 execute 75/75 records, with all 53 comparable query results exact.
 
+The focused aggregate window slice now executes all 15 applicable records and
+all 14 results agree after routing advertised sliding accumulators through the
+VGI window callback. Four SQL forms unsupported by DataFusion 55—three frame
+`EXCLUDE` variants and aggregate-local `ORDER BY` in a window—are retained as
+reviewed `out_of_scope` records rather than adapter failures.
+
 ## What remains
 
 The following order maximizes useful coverage while keeping new DataFusion
@@ -210,9 +216,9 @@ engine work to a minimum:
    the remainder by capability area, prioritizing functions that map to an
    existing DataFusion table-provider or UDTF API.
 3. **Result cache breadth.** Memory producer/split caching, conditional
-   revalidation, diagnostics, flush/reap, and compatible event inspection work.
+   revalidation, per-key single-flight, diagnostics, flush/reap, and compatible event inspection work.
    Exchange/per-value caching, disk persistence/spilling, compression,
-   single-flight, worker-log forwarding, and DataFusion-native EXPLAIN/metrics
+   stale-while-revalidate, worker-log forwarding, and DataFusion-native EXPLAIN/metrics
    remain. Cache execution improved from 297/710 to 533/710 records.
 4. **Table-in/out engine boundary.** Correlated LATERAL calls account for 53
    explicit failures. Wide table subqueries account for at least another 70.
@@ -221,21 +227,21 @@ engine work to a minimum:
    not candidates for new DataFusion engine work in this project.
 5. **Catalog objects.** The focused scalar/table macro slice and the complete
    function/native-format multi-branch slice now pass. Catalog-table source
-   arms, custom formats without a registered DataFusion factory, broader views,
+   arms now resolve existing DataFusion providers; custom formats without a registered DataFusion factory, broader views,
    database metadata adaptations, and same-schema qualification for
    unqualified objects inside macro definitions remain. Function inventory,
    overloads, argument docs/constraints, tags, categories, and global
    nominations use retained worker metadata. The committed full baseline still
    records 64/90 for catalog, 4/19 for macros, and 5/14 for views until the next
    promotion run.
-6. **Secrets and authenticated fixtures.** Twenty-four failures explicitly lack
-   a `VgiSecretResolver`. Add deterministic corpus resolvers before judging the
-   worker behavior; keep real OAuth and external-service tests in the blocked
-   fixture lane.
-7. **Aggregate correctness.** Aggregate execution is broad, but the baseline
-   exposes a real window result mismatch (expected moving values, received
-   NULLs) and remaining zero-argument/ANY/varargs signatures. These are bugs or
-   adapter gaps, not dialect exclusions.
+6. **Secrets and authenticated fixtures.** Deterministic tests now cover two
+   same-type scopes in one bind and duplicate-name rejection. Add corpus-wide
+   resolvers before judging the remaining 24 fixture-dependent records; keep
+   real OAuth and external-service tests in the blocked fixture lane.
+7. **Aggregate correctness.** The callback-only median window mismatch is fixed;
+   every applicable `aggregate/window.test` record now executes and agrees.
+   Zero-argument/ANY/varargs signatures remain adapter gaps, while window
+   `EXCLUDE` and aggregate-local `ORDER BY` are classified DataFusion boundaries.
 8. **COPY and mutations.** COPY FROM/TO partially executes after syntax
    translation. Writable tables (`INSERT`, `UPDATE`, `DELETE`, `RETURNING`) need
    mutation RPC wrappers and transaction/cache invalidation semantics and are

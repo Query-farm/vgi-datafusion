@@ -432,6 +432,15 @@ async fn const_parameters_are_typed_and_overload_aware() -> datafusion::error::R
     let error = error.to_string();
     assert!(error.contains("cannot be cast"), "{error}");
     assert!(error.contains("Int64"), "{error}");
+
+    // `concat_values` has Int64 and Utf8 varargs overloads. Boolean columns
+    // match neither: the adapter must preserve their type so the worker rejects
+    // the bind, rather than picking the first arm and casting true/false to 1/0.
+    let error = vgi_datafusion::sql(&ctx, "SELECT ex.concat_values(true, false)")
+        .await
+        .expect_err("incompatible varargs must not be cast into an overload")
+        .to_string();
+    assert!(error.contains("No matching overload"), "{error}");
     Ok(())
 }
 

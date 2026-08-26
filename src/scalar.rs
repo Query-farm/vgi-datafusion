@@ -203,14 +203,15 @@ impl VgiScalarUdf {
         specs: &ArgSpecs,
         types: &[DataType],
         values: &[Option<ArgValue>],
+        coerce_to_declared_types: bool,
     ) -> (Arguments, Vec<Field>) {
         let mut arguments = Arguments::new();
         let mut columns = Vec::new();
         for (i, ty) in types.iter().enumerate() {
             if specs.positional_is_const(i) {
-                let declared_type = specs
-                    .positional()
-                    .nth(i)
+                let declared_type = coerce_to_declared_types
+                    .then(|| Self::positional_spec(specs, i))
+                    .flatten()
                     .map(|spec| spec.data_type.clone())
                     .filter(|ty| *ty != DataType::Null)
                     .unwrap_or_else(|| ty.clone());
@@ -221,7 +222,9 @@ impl VgiScalarUdf {
                     .unwrap_or_else(|| ArgValue::Null(declared_type));
                 arguments = arguments.positional(value);
             } else {
-                let column_type = Self::positional_spec(specs, i)
+                let column_type = coerce_to_declared_types
+                    .then(|| Self::positional_spec(specs, i))
+                    .flatten()
                     .map(|spec| spec.data_type.clone())
                     .filter(|declared| *declared != DataType::Null)
                     .unwrap_or_else(|| ty.clone());
@@ -239,8 +242,9 @@ impl VgiScalarUdf {
     /// this call. The worker remains the final overload authority at bind; this
     /// selection only decides which arguments are constants and therefore must
     /// be removed from the input batch.
-    fn select_specs(&self, types: &[DataType]) -> &ArgSpecs {
+    fn select_specs(&self, types: &[DataType]) -> (&ArgSpecs, bool) {
         let mut best: Option<(&ArgSpecs, i64)> = None;
+        let mut arity_fallback: Option<&ArgSpecs> = None;
         for specs in &self.overloads {
             let positional: Vec<_> = specs.positional().collect();
             let varargs = positional.iter().position(|spec| spec.is_varargs);
@@ -251,8 +255,10 @@ impl VgiScalarUdf {
             if !arity_matches {
                 continue;
             }
+            arity_fallback.get_or_insert(specs);
 
             let mut score = 0i64;
+            let mut compatible = true;
             for (index, actual) in types.iter().enumerate() {
                 let Some(spec) = positional
                     .get(index)
@@ -261,14 +267,29 @@ impl VgiScalarUdf {
                 else {
                     continue;
                 };
-                score += scalar_type_score(actual, &spec.data_type);
+                match scalar_type_score(actual, &spec.data_type) {
+                    Some(value) => score += value,
+                    // DataFusion permits useful literal coercions for bind-time
+                    // constants (for example `'5'` to an Int64 ConstParam).
+                    // Keep such a candidate in play; the value conversion will
+                    // still fail with a precise planning error if Arrow cannot
+                    // perform the cast.
+                    None if spec.is_const => score -= 1,
+                    None => {
+                        compatible = false;
+                        break;
+                    }
+                }
             }
-            if best.is_none_or(|(_, current)| score > current) {
+            if compatible && best.is_none_or(|(_, current)| score > current) {
                 best = Some((specs, score));
             }
         }
-        best.map(|(specs, _)| specs)
-            .unwrap_or_else(|| &self.overloads[0])
+        best.map(|(specs, _)| (specs, true))
+            // Preserve an overload's const/column layout so the worker can
+            // produce its authoritative bind error, but do not cast the call
+            // into an overload that did not actually accept its column types.
+            .unwrap_or_else(|| (arity_fallback.unwrap_or_else(|| &self.overloads[0]), false))
     }
 
     fn positional_spec(specs: &ArgSpecs, index: usize) -> Option<&vgi_client::ArgSpec> {
@@ -358,8 +379,8 @@ impl VgiScalarUdf {
         use datafusion::arrow::datatypes::Schema;
         use vgi_client::{BindSpec, FunctionType};
 
-        let specs = self.select_specs(arg_types);
-        let (arguments, columns) = self.split_arguments(specs, arg_types, values);
+        let (specs, compatible) = self.select_specs(arg_types);
+        let (arguments, columns) = self.split_arguments(specs, arg_types, values, compatible);
         let input_schema = Schema::new(columns);
 
         let conn = self.conn.clone();
@@ -424,13 +445,15 @@ impl PartialEq for VgiScalarUdf {
 
 impl Eq for VgiScalarUdf {}
 
-fn scalar_type_score(actual: &DataType, expected: &DataType) -> i64 {
+fn scalar_type_score(actual: &DataType, expected: &DataType) -> Option<i64> {
     use DataType::*;
     if actual == expected {
-        return 4;
+        return Some(4);
     }
+    // A null actual has no contradictory type information. A null declaration
+    // is VGI's Arrow representation of AnyArrow and accepts every actual type.
     if *actual == Null || *expected == Null {
-        return 0;
+        return Some(0);
     }
     let integer = |ty: &DataType| {
         matches!(
@@ -446,22 +469,21 @@ fn scalar_type_score(actual: &DataType, expected: &DataType) -> i64 {
             )
     };
     if integer(actual) && integer(expected) {
-        3
-    } else if numeric(actual) && numeric(expected) {
-        2
+        Some(3)
+    } else if numeric(actual) && numeric(expected) && !integer(actual) && !integer(expected) {
+        // VGI groups floating-point and decimal values together, but does not
+        // consider an integer column compatible with a floating-point column.
+        Some(2)
     } else if matches!(actual, Utf8 | LargeUtf8 | Utf8View)
         && matches!(expected, Utf8 | LargeUtf8 | Utf8View)
     {
-        3
+        Some(3)
     } else if matches!(actual, Binary | LargeBinary | BinaryView)
         && matches!(expected, Binary | LargeBinary | BinaryView)
     {
-        3
+        Some(3)
     } else {
-        // Keep an arity-compatible candidate in play. DataFusion/Arrow may be
-        // able to cast a const value, and the VGI worker remains the final
-        // authority for column-type overload resolution.
-        0
+        None
     }
 }
 
@@ -490,15 +512,21 @@ impl ScalarUDFImpl for VgiScalarUdf {
             .iter()
             .map(|f| f.data_type().clone())
             .collect();
-        let specs = self.select_specs(&types);
+        let (specs, compatible) = self.select_specs(&types);
         let values: Vec<Option<ArgValue>> = args
             .scalar_arguments
             .iter()
             .enumerate()
             .map(|(i, v)| {
                 if specs.positional_is_const(i) {
-                    v.map(|scalar| self.const_scalar_to_arg(specs, i, scalar))
-                        .transpose()
+                    v.map(|scalar| {
+                        if compatible {
+                            self.const_scalar_to_arg(specs, i, scalar)
+                        } else {
+                            crate::table_function::scalar_to_arg(&self.function, i, scalar)
+                        }
+                    })
+                    .transpose()
                 } else {
                     Ok(None)
                 }
@@ -533,14 +561,18 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
         // Const parameters are resolved at bind and must not be shipped as
         // columns; everything else is a column. See `split_arguments`.
         let types: Vec<DataType> = args.args.iter().map(|a| a.data_type()).collect();
-        let specs = self.select_specs(&types);
+        let (specs, compatible) = self.select_specs(&types);
         let values: Vec<Option<ArgValue>> = args
             .args
             .iter()
             .enumerate()
             .map(|(i, a)| match a {
                 ColumnarValue::Scalar(s) if specs.positional_is_const(i) => {
-                    self.const_scalar_to_arg(specs, i, s).map(Some)
+                    if compatible {
+                        self.const_scalar_to_arg(specs, i, s).map(Some)
+                    } else {
+                        crate::table_function::scalar_to_arg(&self.function, i, s).map(Some)
+                    }
                 }
                 ColumnarValue::Scalar(_) => Ok(None),
                 // A literal may arrive already expanded across the batch — the
@@ -549,12 +581,18 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
                 // Without this a const parameter silently becomes a typed null
                 // and the worker answers with NULLs.
                 ColumnarValue::Array(arr) if specs.positional_is_const(i) => {
-                    self.const_array_to_arg(specs, i, arr.as_ref()).map(Some)
+                    if compatible {
+                        self.const_array_to_arg(specs, i, arr.as_ref()).map(Some)
+                    } else {
+                        ArgValue::from_array_row0(arr.as_ref(), &self.function)
+                            .map(Some)
+                            .map_err(to_df)
+                    }
                 }
                 ColumnarValue::Array(_) => Ok(None),
             })
             .collect::<DFResult<_>>()?;
-        let (arguments, _) = self.split_arguments(specs, &types, &values);
+        let (arguments, _) = self.split_arguments(specs, &types, &values, compatible);
 
         let columns: Vec<datafusion::arrow::array::ArrayRef> = args
             .args
@@ -564,7 +602,7 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             .map(|(i, a)| {
                 let array = a.to_array(rows)?;
                 let declared = Self::positional_spec(specs, i).map(|spec| &spec.data_type);
-                match declared.filter(|ty| **ty != DataType::Null) {
+                match declared.filter(|ty| compatible && **ty != DataType::Null) {
                     Some(declared) if array.data_type() != declared => {
                         datafusion::arrow::compute::cast(array.as_ref(), declared).map_err(|error| {
                             DataFusionError::Execution(format!(
@@ -663,5 +701,101 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             out.column(0).clone()
         };
         Ok(ColumnarValue::Array(output))
+    }
+}
+
+#[cfg(test)]
+mod overload_tests {
+    use super::*;
+    use vgi_client::ArgSpec;
+
+    fn positional(data_type: DataType) -> ArgSpec {
+        ArgSpec {
+            name: "value".to_string(),
+            data_type,
+            is_const: false,
+            is_named: false,
+            is_varargs: false,
+            doc: None,
+        }
+    }
+
+    fn varargs(data_type: DataType) -> ArgSpecs {
+        let mut spec = positional(data_type);
+        spec.is_varargs = true;
+        ArgSpecs(vec![spec])
+    }
+
+    fn udf(overloads: Vec<ArgSpecs>) -> VgiScalarUdf {
+        VgiScalarUdf::discovered_overloads_with_volatility(
+            VgiConnection::http("http://127.0.0.1:1"),
+            "example",
+            "main",
+            "overloaded",
+            "overloaded",
+            overloads,
+            Volatility::Immutable,
+        )
+    }
+
+    #[test]
+    fn any_varargs_beats_an_incompatible_typed_arm() {
+        let typed = varargs(DataType::Int64);
+        let any = varargs(DataType::Null);
+        let udf = udf(vec![typed, any.clone()]);
+
+        let (selected, compatible) = udf.select_specs(&[DataType::Boolean, DataType::Boolean]);
+        assert!(compatible);
+        assert_eq!(selected, &any);
+    }
+
+    #[test]
+    fn integer_columns_do_not_match_float_overloads() {
+        let float = ArgSpecs(vec![positional(DataType::Float64)]);
+        let any = ArgSpecs(vec![positional(DataType::Null)]);
+        let udf = udf(vec![float, any.clone()]);
+
+        let (selected, compatible) = udf.select_specs(&[DataType::Int64]);
+        assert!(compatible);
+        assert_eq!(selected, &any);
+    }
+
+    #[test]
+    fn no_compatible_arm_preserves_types_for_the_worker_error() {
+        let only = varargs(DataType::Int64);
+        let udf = udf(vec![only.clone()]);
+
+        let (selected, compatible) = udf.select_specs(&[DataType::Boolean]);
+        assert!(!compatible);
+        assert_eq!(selected, &only);
+
+        let (_, fields) = udf.split_arguments(selected, &[DataType::Boolean], &[None], compatible);
+        assert_eq!(fields[0].data_type(), &DataType::Boolean);
+    }
+
+    #[test]
+    fn incompatible_fallback_still_uses_the_matching_arity() {
+        let one_arg = ArgSpecs(vec![positional(DataType::Int64)]);
+        let two_args = ArgSpecs(vec![
+            positional(DataType::Int64),
+            positional(DataType::Int64),
+        ]);
+        let udf = udf(vec![one_arg, two_args.clone()]);
+
+        let (selected, compatible) = udf.select_specs(&[DataType::Boolean, DataType::Boolean]);
+        assert!(!compatible);
+        assert_eq!(selected, &two_args);
+    }
+
+    #[test]
+    fn const_arguments_remain_eligible_for_literal_coercion() {
+        let mut spec = positional(DataType::Int64);
+        spec.is_const = true;
+        let specs = ArgSpecs(vec![spec]);
+        let udf = udf(vec![specs.clone()]);
+
+        let (selected, compatible) = udf.select_specs(&[DataType::Utf8]);
+        assert!(compatible);
+        assert_eq!(selected, &specs);
     }
 }
