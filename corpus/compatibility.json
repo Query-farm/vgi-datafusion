@@ -23,7 +23,7 @@
       "title": "Table functions and scans",
       "status": "partial",
       "groups": ["table"],
-      "remaining": ["ORDER BY hints", "late materialization", "transaction storage", "DuckDB-only virtual rowid forms", "correlated scalar subqueries containing VGI aggregates"]
+      "remaining": ["late materialization", "transaction storage", "DuckDB-only virtual rowid forms", "correlated scalar subqueries containing VGI aggregates"]
     },
     {
       "id": "scalar_functions",

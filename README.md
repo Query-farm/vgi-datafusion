@@ -337,12 +337,18 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   `LATERAL m.main.forecast_hourly(g.latitude, g.longitude)` is therefore not yet
   representable; run the geocoder first and pass its coordinates as constants
   in a second statement.
-- **Sampling and remaining planner-only hints.** VGI `TABLESAMPLE SYSTEM`
+- **Planner-only hints.** VGI `TABLESAMPLE SYSTEM`
   percentage/seed hints use DataFusion 55's relation-planner extension and are
   included in split planning, scan initialization, and cache identity.
   `BERNOULLI(100 PERCENT)` remains a host-owned identity operation and sends no
-  VGI hint. Transactions, mutations, custom COPY formats, and ORDER BY hints do
-  not yet have an end-to-end adapter path. Table-level
+  VGI hint. A session-builder extension conservatively maps direct-column
+  `ORDER BY ... LIMIT/OFFSET` into VGI planning and scan hints while retaining
+  DataFusion's Sort/Top-K and limit semantics as the correctness boundary. Computed sort keys
+  are not pushed, and worker early-stop limits are withheld for filters and
+  multi-key ordering. Hosts that install another custom QueryPlanner must use
+  the composable builder method rather than replacing this bridge afterward.
+  Transactions, mutations, and custom COPY formats do not
+  yet have an end-to-end adapter path. Table-level
   `AT (VERSION|TIMESTAMP => literal)` time travel is supported independently.
   See `docs/implementation-inventory.md` for the API boundaries and recommended
   sequence.

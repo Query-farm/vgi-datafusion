@@ -27,8 +27,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::stream::{self, StreamExt};
+use vgi_datafusion::VgiOrderPushdownSessionStateBuilderExt;
 
 /// One directive from a `.test` file.
 #[derive(Debug)]
@@ -390,6 +392,15 @@ mod rendering_tests {
     }
 
     #[test]
+    fn matches_vgi_enum_wire_case_without_ignoring_general_string_case() {
+        assert!(cells_agree("ASC", "asc"));
+        assert!(cells_agree("DESC", "desc"));
+        assert!(cells_agree("NULLS_FIRST", "nulls_first"));
+        assert!(cells_agree("NULLS_LAST", "nulls_last"));
+        assert!(!cells_agree("ROW_1", "row_1"));
+    }
+
+    #[test]
     fn matches_blob_bytes_without_masking_different_bytes() {
         assert!(cells_agree(r"\xFF\xEE\xDD", "ffeedd"));
         // DuckDB escapes the non-printable DE byte and prints the remaining
@@ -434,6 +445,18 @@ fn rows_agree(expected: &[String], got: &[String]) -> bool {
 
 fn cells_agree(expected: &str, got: &str) -> bool {
     if expected == got {
+        return true;
+    }
+    // The protocol's Rust enums use canonical lowercase wire values, while
+    // DuckDB's diagnostic fixture renders those same enum values in uppercase.
+    // Keep this narrow so ordinary string results remain case-sensitive.
+    if matches!(
+        (expected, got),
+        ("ASC", "asc")
+            | ("DESC", "desc")
+            | ("NULLS_FIRST", "nulls_first")
+            | ("NULLS_LAST", "nulls_last")
+    ) {
         return true;
     }
     if expected == "(empty)" && got.is_empty() {
@@ -949,7 +972,12 @@ async fn run_file(path: &Path, tally: &mut Tally, overlays: Option<&[RecordOverl
     // user-facing SQL surface, and the CLI enables information_schema by
     // default. Leaving it off here misclassifies supported VGI metadata as an
     // adapter failure.
-    let ctx = SessionContext::new_with_config(SessionConfig::new().with_information_schema(true));
+    let state = SessionStateBuilder::new()
+        .with_config(SessionConfig::new().with_information_schema(true))
+        .with_default_features()
+        .with_vgi_order_pushdown()
+        .build();
+    let ctx = SessionContext::new_with_state(state);
     for (record_offset, record) in records.into_iter().enumerate() {
         let record_number = record_offset + 1;
         file.records += 1;

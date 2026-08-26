@@ -76,14 +76,16 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 use vgi_client::{
-    Arguments, AttachOptions, AttachedCatalog, BindSpec, FunctionKind, PlanOptions, PooledClient,
-    Sample, ScanOptions, ScanPlan, ScanSplitInfo, VgiClient, VgiLocation, WorkerPool,
+    Arguments, AttachOptions, AttachedCatalog, BindSpec, FunctionKind, NullOrder, OrderBy,
+    PlanOptions, PooledClient, Sample, ScanOptions, ScanPlan, ScanSplitInfo, SortDirection,
+    VgiClient, VgiLocation, WorkerPool,
 };
 
 mod aggregate;
 mod catalog;
 mod diagnostics;
 mod filters;
+mod order_pushdown;
 mod runtime;
 mod sampling;
 mod scalar;
@@ -95,6 +97,7 @@ mod table_input_stream;
 
 pub use aggregate::VgiAggregateUdf;
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};
+pub use order_pushdown::VgiOrderPushdownSessionStateBuilderExt;
 pub use runtime::{
     DiskCacheCodec, ExchangeCacheStats, PlanCacheStats, VgiDurableCacheOptions, VgiEvent,
     VgiEventSink, VgiLocalityHook, VgiResolvedSecret, VgiRuntime, VgiSecretResolver,
@@ -558,6 +561,31 @@ fn sample_cache_identity(sample: Sample) -> Vec<u8> {
     identity
 }
 
+/// Versioned, unambiguous cache identity for the wire ordering hint.
+fn encode_order_by(order: &OrderBy) -> Vec<u8> {
+    let column = order.column.as_bytes();
+    let mut encoded = Vec::with_capacity(1 + 8 + column.len() + 3 + 8);
+    encoded.push(1);
+    encoded.extend_from_slice(&(column.len() as u64).to_le_bytes());
+    encoded.extend_from_slice(column);
+    encoded.push(match order.direction {
+        SortDirection::Ascending => 0,
+        SortDirection::Descending => 1,
+    });
+    encoded.push(match order.null_order {
+        NullOrder::First => 0,
+        NullOrder::Last => 1,
+    });
+    match order.limit {
+        Some(limit) => {
+            encoded.push(1);
+            encoded.extend_from_slice(&limit.to_le_bytes());
+        }
+        None => encoded.push(0),
+    }
+    encoded
+}
+
 /// Capabilities that affect how a table scan is planned.
 #[derive(Debug, Clone, Copy, Default)]
 struct FunctionCapabilities {
@@ -957,6 +985,8 @@ pub struct VgiTableProvider {
     secret_dependent: bool,
     /// Explicit historical coordinate for this catalog-table scan.
     at: Option<vgi_client::At>,
+    /// Advisory Top-N ordering installed before physical scan planning.
+    order_by: Option<OrderBy>,
     /// Primary-key and unique constraints advertised for catalog tables.
     /// DataFusion has no native representation for VGI check, foreign-key, or
     /// standalone NOT NULL metadata.
@@ -1146,6 +1176,7 @@ impl VgiTableProvider {
             catalog_version,
             secret_dependent,
             at: None,
+            order_by: None,
             constraints: None,
             column_mapping: None,
             max_workers: 1,
@@ -1265,6 +1296,7 @@ impl VgiTableProvider {
             catalog_version,
             secret_dependent,
             at,
+            order_by: None,
             constraints,
             column_mapping: None,
             max_workers: 1,
@@ -1321,6 +1353,7 @@ impl VgiTableProvider {
             catalog_version,
             secret_dependent,
             at: None,
+            order_by: None,
             constraints: None,
             column_mapping: None,
             max_workers: 1,
@@ -1397,6 +1430,7 @@ impl VgiTableProvider {
             catalog_version,
             secret_dependent,
             at: None,
+            order_by: None,
             constraints: None,
             column_mapping: None,
             max_workers,
@@ -1470,6 +1504,23 @@ impl VgiTableProvider {
         Ok(provider)
     }
 
+    fn remote_column_name(&self, public_name: &str) -> Option<String> {
+        self.output_schema.field_with_name(public_name).ok()?;
+        Some(
+            self.column_mapping
+                .as_deref()
+                .and_then(|mapping| mapping.get(public_name))
+                .cloned()
+                .unwrap_or_else(|| public_name.to_string()),
+        )
+    }
+
+    fn with_order_by(&self, order_by: Option<OrderBy>) -> Self {
+        let mut provider = self.clone();
+        provider.order_by = order_by;
+        provider
+    }
+
     /// Divide the scan into splits and pack them into partitions.
     ///
     /// Returns `None` when this scan is not split-capable, which keeps the
@@ -1512,6 +1563,7 @@ impl VgiTableProvider {
                         projection: projection.clone(),
                         filters: pushdown.cache_identity(),
                         row_limit: limit.and_then(|value| i64::try_from(value).ok()),
+                        ordering: self.order_by.as_ref().map(encode_order_by),
                         sample: self.sample.map(sample_cache_identity),
                         target_partitions,
                         catalog_version: self.catalog_version,
@@ -1536,6 +1588,7 @@ impl VgiTableProvider {
         let raw_arguments = self.raw_arguments.clone();
         let at = self.at.clone();
         let sample = self.sample;
+        let order_by = self.order_by.clone();
 
         // The client is blocking, so planning runs on a blocking thread rather
         // than a tokio worker — a blocking call on the runtime would stall every
@@ -1584,6 +1637,7 @@ impl VgiTableProvider {
                         // and the engine re-applies the limit above the coalesce, while
                         // dividing by N would under-produce under skew.
                         row_limit: limit.map(|l| l as i64),
+                        order_by,
                         sample,
                         ..Default::default()
                     };
@@ -2001,6 +2055,7 @@ impl TableProvider for VgiTableProvider {
             self.filter_pushdown,
             pushdown,
             limit,
+            self.order_by.clone(),
             projected,
             self.output_schema.clone(),
             remote_bind_schema,
@@ -2039,6 +2094,8 @@ pub struct VgiScanExec {
     /// tightening comparison bounds.
     dynamic_filters: Vec<Arc<DynamicFilterPhysicalExpr>>,
     limit: Option<usize>,
+    /// Advisory worker ordering; DataFusion still retains its SortExec.
+    order_by: Option<OrderBy>,
     /// DataFusion-facing full table schema, before scan projection. Runtime
     /// physical column indexes may be projection-relative, so names are
     /// resolved against this schema instead.
@@ -2386,6 +2443,78 @@ impl VgiPartitionMetrics {
 }
 
 impl VgiScanExec {
+    fn remote_column_name(&self, public_name: &str) -> Option<String> {
+        self.filter_schema.field_with_name(public_name).ok()?;
+        Some(
+            self.column_mapping
+                .as_deref()
+                .and_then(|mapping| mapping.get(public_name))
+                .cloned()
+                .unwrap_or_else(|| public_name.to_string()),
+        )
+    }
+
+    fn with_order_by(&self, order_by: OrderBy) -> Option<Self> {
+        if self.order_by.as_ref().map(encode_order_by) != Some(encode_order_by(&order_by)) {
+            // Split planning already happened with the provider-level hint. A
+            // physical rule may validate and clone that hint, but must never
+            // retrofit a different one after the split RPC.
+            return None;
+        }
+        let metrics = ExecutionPlanMetricsSet::new();
+        let cache_metrics = VgiCacheMetrics::new(&metrics);
+        let cache_capture = self.cache_key.as_ref().map(|key| {
+            Arc::new(ScanCacheCapture::new(
+                Arc::clone(self.conn.runtime.result_cache()),
+                Arc::clone(&self.conn.runtime),
+                key.clone(),
+                self.partition_statistics.len().max(1),
+                self.cache_storage_schema.clone(),
+                true,
+                cache_metrics.clone(),
+            ))
+        });
+        Some(Self {
+            conn: self.conn.clone(),
+            catalog: self.catalog.clone(),
+            schema_name: self.schema_name.clone(),
+            function: self.function.clone(),
+            arguments: self.arguments.clone(),
+            raw_arguments: self.raw_arguments.clone(),
+            projection: self.projection.clone(),
+            projection_pushdown: self.projection_pushdown,
+            filter_pushdown: self.filter_pushdown,
+            pushdown: self.pushdown.clone(),
+            dynamic_filters: self.dynamic_filters.clone(),
+            limit: self.limit,
+            order_by: Some(order_by),
+            filter_schema: self.filter_schema.clone(),
+            remote_bind_schema: self.remote_bind_schema.clone(),
+            schema: self.schema.clone(),
+            cache_storage_schema: self.cache_storage_schema.clone(),
+            properties: self.properties.clone(),
+            split_groups: self.split_groups.clone(),
+            statistics: self.statistics.clone(),
+            partition_statistics: self.partition_statistics.clone(),
+            metrics,
+            cache_metrics,
+            cache_key: self.cache_key.clone(),
+            cache_ineligible_reason: self.cache_ineligible_reason,
+            cache_probe: OnceLock::new(),
+            disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
+            disk_cache_revalidation_probe: Arc::new(tokio::sync::OnceCell::new()),
+            cache_revalidation_probe: Arc::new(OnceLock::new()),
+            cache_observation: Arc::new(ExecutionObservation::default()),
+            cache_flight: Arc::new(OnceLock::new()),
+            cache_flight_probe: Arc::new(OnceLock::new()),
+            cache_flight_disk_probe: Arc::new(tokio::sync::OnceCell::new()),
+            cache_capture,
+            at: self.at.clone(),
+            sample: self.sample,
+            column_mapping: self.column_mapping.clone(),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         conn: VgiConnection,
@@ -2399,6 +2528,7 @@ impl VgiScanExec {
         filter_pushdown: Option<bool>,
         pushdown: filters::Pushdown,
         limit: Option<usize>,
+        order_by: Option<OrderBy>,
         schema: SchemaRef,
         filter_schema: SchemaRef,
         remote_bind_schema: SchemaRef,
@@ -2504,7 +2634,7 @@ impl VgiScanExec {
                     settings: conn.runtime.session_settings_identity(&catalog),
                     attach_options: conn.cache_attach_context(&catalog),
                     row_limit: limit.and_then(|value| i64::try_from(value).ok()),
-                    ordering: None,
+                    ordering: order_by.as_ref().map(encode_order_by),
                     sample: sample.map(sample_cache_identity),
                     plan: None,
                 }),
@@ -2563,6 +2693,7 @@ impl VgiScanExec {
             pushdown,
             dynamic_filters: Vec::new(),
             limit,
+            order_by,
             filter_schema,
             remote_bind_schema,
             schema,
@@ -2606,6 +2737,7 @@ impl VgiScanExec {
             pushdown: self.pushdown.clone(),
             dynamic_filters,
             limit: self.limit,
+            order_by: self.order_by.clone(),
             filter_schema: self.filter_schema.clone(),
             remote_bind_schema: self.remote_bind_schema.clone(),
             schema: self.schema.clone(),
@@ -3844,6 +3976,12 @@ impl DisplayAs for VgiScanExec {
                 write!(f, ", sample_seed={seed}")?;
             }
         }
+        if let Some(order) = &self.order_by {
+            write!(f, ", order_by={}", order.column)?;
+            if let Some(limit) = order.limit {
+                write!(f, ", top_n={limit}")?;
+            }
+        }
         if !self.dynamic_filters.is_empty() {
             write!(f, ", dynamic_filters={}", self.dynamic_filters.len())?;
         }
@@ -4024,6 +4162,7 @@ impl ExecutionPlan for VgiScanExec {
         let filter_schema = self.filter_schema.clone();
         let remote_bind_schema = self.remote_bind_schema.clone();
         let limit = self.limit;
+        let order_by = self.order_by.clone();
         let out_schema = self.schema.clone();
         // The tokens this partition redeems. An empty group is legal — a plan
         // can pack fewer splits than partitions — and reads as no work.
@@ -4145,6 +4284,7 @@ impl ExecutionPlan for VgiScanExec {
                     // worker evaluates the predicate against the wrong column.
                     filter_columns: Some(initial_pushdown.columns.clone()),
                     row_limit: limit.map(|l| l as i64),
+                    order_by: order_by.clone(),
                     sample,
                     if_none_match: conditional.and_then(ScanCacheRevalidation::etag),
                     if_modified_since: conditional.and_then(ScanCacheRevalidation::last_modified),

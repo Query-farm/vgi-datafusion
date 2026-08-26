@@ -245,7 +245,7 @@ replay remains physically present until release and a later reap.
 | Correlated scalar subqueries with VGI aggregates | Not wired | DataFusion 55 leaves a `ScalarSubquery` expression that its physical planner cannot lower; uncorrelated scalar aggregates and correlated IN/EXISTS paths work |
 | Dynamic join filters | Partial | Single-column `IN` and same-column equality-OR sets use VGI v2 side IPC at init, with exact scalar types preserved. Small multi-column hash-join tuple sets are safely decomposed into per-column marginal sets for worker pruning while DataFusion retains the exact tuple join locally. Later constant/range generations use `vgi_pushdown_filters` over subprocess, Unix/TCP, and plain or authenticated HTTP continuations; large hash/Bloom state and tuple-correlated protocol expressions remain local |
 | TABLESAMPLE hints | Supported | DataFusion's relation-planner API maps VGI `SYSTEM` percentage/seed sampling into split planning and scan initialization; plan/result cache identities include the exact hint, while host-owned Bernoulli sampling is not misrepresented as VGI SYSTEM sampling |
-| ORDER BY hints | Not wired | Current provider scan callback does not carry the query's ordering request |
+| ORDER BY / Top-N hints | Supported | An opt-in session-builder extension recognizes direct-column DataFusion Sort/Top-K/GlobalLimit plans, sends advisory ordering through split planning and scan initialization, and keys plan/result caches by the hint. DataFusion retains host Sort/Top-K and limit semantics; computed expressions are rejected and early-stop limits are withheld for filters and multi-key ordering |
 | Table time travel | Supported | Fully-qualified VGI tables accept literal `AT (VERSION => …)` and `AT (TIMESTAMP => …)`; historical schemas and cache identities are isolated |
 | Catalog metadata | Supported | `SHOW TABLES`, `SHOW COLUMNS`, `SHOW FUNCTIONS`, and DataFusion `information_schema` expose VGI tables, views, columns, schemata, and routines without eager scan-function binds |
 | Table constraints | Partial | Primary-key and unique metadata feed `TableProvider::constraints()`; DataFusion has no check, foreign-key, standalone NOT NULL, or `duckdb_constraints()` metadata surface |
@@ -276,8 +276,8 @@ replay remains physically present until release and a later reap.
 
 ## Deliberately deferred boundaries
 
-Correlated LATERAL table functions, multi-column streaming table inputs,
-late-materialization rewrites and VGI ordering hints do not map
+Correlated LATERAL table functions, multi-column streaming table inputs, and
+late-materialization rewrites do not map
 cleanly onto the current `TableProvider` callback. They should remain explicit
 gaps unless DataFusion exposes a suitable API or the project chooses to own a
 custom logical/physical extension. That keeps the integration focused on

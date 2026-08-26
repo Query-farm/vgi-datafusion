@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 4,
+      "original_sql": "SELECT * FROM example.order_echo(100) ORDER BY n DESC LIMIT 2;",
+      "replacement_sql": "SELECT * FROM example.order_echo(100) ORDER BY n DESC NULLS LAST LIMIT 2;",
+      "kind": "equivalent_sql",
+      "reason": "DuckDB defaults DESC to NULLS LAST while DataFusion follows PostgreSQL-style NULLS FIRST; the explicit clause preserves the source corpus's intended null policy."
+    }
+  ]
+}

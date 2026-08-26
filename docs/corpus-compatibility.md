@@ -359,7 +359,12 @@ engine work to a minimum:
    identity. Exact supported Arrow scalar types and same-column equality `OR`
    membership are also covered. `TABLESAMPLE SYSTEM` percentage/seed hints now
    use DataFusion's relation-planner API and pass all ten focused records after
-   the reviewed `%`-to-`PERCENT` syntax adaptation. ORDER BY, late materialization,
+   the reviewed `%`-to-`PERCENT` syntax adaptation. Direct-column ORDER BY with
+   LIMIT/OFFSET now uses an opt-in DataFusion physical-planner bridge and keeps
+   host Sort/Top-K verification. Filtered Top-N and multi-key ordering receive
+   no unsafe early-stop limit, while computed expressions remain local; these
+   deliberate safety differences mean the DuckDB diagnostic expectation for a
+   multi-key early-stop limit is not copied verbatim. Late materialization,
    continued refinement after an init-time membership set, tuple-correlated
    multi-column membership, and very large/Bloom join-key state remain explicit
    partial features. Small multi-column hash-join tuple sets now reach workers
