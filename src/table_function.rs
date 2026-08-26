@@ -99,6 +99,10 @@ impl TableFunctionImpl for VgiTableFunction {
             let schema_name = self.schema_name.clone();
             let function = self.function.clone();
             let buffered = self.metadata.as_ref().is_some_and(|m| m.buffered);
+            let stream_cache_eligible = self
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.stream_cache_eligible);
             return crate::run_blocking_planner_call(move || {
                 crate::table_input::VgiTableInputProvider::bind_blocking(
                     conn,
@@ -108,6 +112,7 @@ impl TableFunctionImpl for VgiTableFunction {
                     arguments,
                     table_arg,
                     buffered,
+                    stream_cache_eligible,
                 )
             })
             .map(|p| p as Arc<dyn TableProvider>);

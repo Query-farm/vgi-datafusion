@@ -25,9 +25,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
-};
+use datafusion::arrow::array::{ArrayRef, RecordBatch, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{Result as DFResult, ScalarValue};
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
@@ -37,43 +35,79 @@ use datafusion::physical_expr::expressions::{
 };
 use datafusion::physical_expr::PhysicalExpr;
 
-/// A constant hoisted out of a predicate, to become its own column.
-enum Constant {
-    Int(i64),
-    Float(f64),
-    Text(String),
-    Bool(bool),
-}
+/// A constant hoisted out of a predicate, to become its own typed Arrow column.
+///
+/// VGI's wire format carries Arrow arrays, so normalizing all integers to
+/// `Int64`, floats to `Float64`, and strings to `Utf8` needlessly lost unsigned
+/// ranges, decimal scale, timestamp time zones, and dictionary identity. Keep
+/// the DataFusion scalar intact for every type VGI's Arrow comparison path can
+/// evaluate losslessly.
+struct Constant(ScalarValue);
 
 impl Constant {
     fn from_scalar(v: &ScalarValue) -> Option<Self> {
-        Some(match v {
-            ScalarValue::Int8(Some(x)) => Self::Int(i64::from(*x)),
-            ScalarValue::Int16(Some(x)) => Self::Int(i64::from(*x)),
-            ScalarValue::Int32(Some(x)) => Self::Int(i64::from(*x)),
-            ScalarValue::Int64(Some(x)) => Self::Int(*x),
-            ScalarValue::UInt8(Some(x)) => Self::Int(i64::from(*x)),
-            ScalarValue::UInt16(Some(x)) => Self::Int(i64::from(*x)),
-            ScalarValue::UInt32(Some(x)) => Self::Int(i64::from(*x)),
-            ScalarValue::Float32(Some(x)) => Self::Float(f64::from(*x)),
-            ScalarValue::Float64(Some(x)) => Self::Float(*x),
-            ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => Self::Text(s.clone()),
-            ScalarValue::Boolean(Some(b)) => Self::Bool(*b),
-            // A NULL constant is deliberately unsupported: `col = NULL` is not
-            // `col IS NULL`, and pushing it as an equality would ask the worker
-            // for the wrong rows.
-            _ => return None,
-        })
+        // `col = NULL` is not `col IS NULL`, and pushing it as an equality
+        // would ask the worker for the wrong rows.
+        if v.is_null() || !supported_constant_type(&v.data_type()) {
+            return None;
+        }
+        Some(Self(v.clone()))
     }
 
-    fn to_array(&self) -> ArrayRef {
-        match self {
-            Self::Int(v) => Arc::new(Int64Array::from(vec![*v])),
-            Self::Float(v) => Arc::new(Float64Array::from(vec![*v])),
-            Self::Text(v) => Arc::new(StringArray::from(vec![v.clone()])),
-            Self::Bool(v) => Arc::new(BooleanArray::from(vec![*v])),
-        }
+    fn to_array(&self) -> DFResult<ArrayRef> {
+        self.0.to_array_of_size(1)
     }
+}
+
+/// Types handled losslessly by both Arrow IPC and VGI's Arrow comparison
+/// evaluator. Nested list/struct/map/union values remain local because Arrow's
+/// scalar comparison kernel deliberately has no nested null semantics.
+fn supported_constant_type(data_type: &DataType) -> bool {
+    use DataType::*;
+
+    match data_type {
+        Boolean
+        | Float16
+        | Float32
+        | Float64
+        | Decimal32(_, _)
+        | Decimal64(_, _)
+        | Decimal128(_, _)
+        | Decimal256(_, _)
+        | Int8
+        | Int16
+        | Int32
+        | Int64
+        | UInt8
+        | UInt16
+        | UInt32
+        | UInt64
+        | Utf8
+        | Utf8View
+        | LargeUtf8
+        | Binary
+        | BinaryView
+        | FixedSizeBinary(_)
+        | LargeBinary
+        | Date32
+        | Date64
+        | Time32(_)
+        | Time64(_)
+        | Timestamp(_, _)
+        | Interval(_)
+        | Duration(_) => true,
+        Dictionary(key, value) => {
+            matches!(
+                key.as_ref(),
+                Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64
+            ) && supported_dictionary_value_type(value)
+        }
+        _ => false,
+    }
+}
+
+fn supported_dictionary_value_type(data_type: &DataType) -> bool {
+    !matches!(data_type, DataType::Dictionary(_, _)) && supported_constant_type(data_type)
 }
 
 /// Accumulates specs and their constants while walking the expression tree.
@@ -111,6 +145,25 @@ impl<'a> Builder<'a> {
         self.constants.truncate(checkpoint.0);
         self.referenced_columns.truncate(checkpoint.1);
         self.join_keys.truncate(checkpoint.2);
+    }
+
+    /// Serialize a non-empty, single-column membership set as a VGI v2 side
+    /// join-key batch. Validation and IPC construction happen before mutating
+    /// the builder, so an unsupported value cannot leak a projected column or
+    /// a partial side batch into a different pushable predicate.
+    fn membership(&mut self, name: String, values: Vec<ScalarValue>) -> Option<serde_json::Value> {
+        if values.is_empty() || values.iter().any(|v| Constant::from_scalar(v).is_none()) {
+            return None;
+        }
+        let keys = join_keys_ipc(&name, values).ok()?;
+        let index = self.column_index(&name)?;
+        self.join_keys.push(keys);
+        Some(serde_json::json!({
+            "type": "join_keys",
+            "column_name": name,
+            "column_index": index,
+            "keys_column": name,
+        }))
     }
 
     /// The column's position in the table's bind-time schema.
@@ -160,24 +213,11 @@ impl<'a> Builder<'a> {
                     return None;
                 }
                 let name = column_name(&list.expr)?;
-                let index = self.column_index(&name)?;
                 let mut values = Vec::with_capacity(list.list.len());
                 for item in &list.list {
-                    let Expr::Literal(v, _) = item else {
-                        return None;
-                    };
-                    // Keep the same supported scalar set as ordinary
-                    // comparisons, including its deliberate NULL rejection.
-                    Constant::from_scalar(v)?;
-                    values.push(v.clone());
+                    values.push(literal(item)?);
                 }
-                self.join_keys.push(join_keys_ipc(&name, values).ok()?);
-                Some(serde_json::json!({
-                    "type": "join_keys",
-                    "column_name": name,
-                    "column_index": index,
-                    "keys_column": name,
-                }))
+                self.membership(name, values)
             }
             _ => None,
         }
@@ -215,20 +255,13 @@ impl<'a> Builder<'a> {
                 return None;
             }
             let name = physical_column_name(list.expr().as_ref())?;
-            let index = self.column_index(&name)?;
             let values = list
                 .list()
                 .iter()
                 .map(|value| physical_literal(value.as_ref()))
                 .collect::<Option<Vec<_>>>()?;
             if side_join_keys {
-                self.join_keys.push(join_keys_ipc(&name, values).ok()?);
-                return Some(serde_json::json!({
-                    "type": "join_keys",
-                    "column_name": name,
-                    "column_index": index,
-                    "keys_column": name,
-                }));
+                return self.membership(name, values);
             }
             // Join-key side batches cannot ride continuation metadata. The
             // initial snapshot uses the side batch above; later snapshots keep
@@ -268,6 +301,11 @@ impl<'a> Builder<'a> {
         side_join_keys: bool,
     ) -> Option<serde_json::Value> {
         let op = *binary.op();
+        if op == Operator::Or && side_join_keys {
+            if let Some((name, values)) = physical_or_equalities(binary) {
+                return self.membership(name, values);
+            }
+        }
         if op == Operator::And || op == Operator::Or {
             let checkpoint = self.checkpoint();
             let left = self.build_physical(binary.left().as_ref(), side_join_keys);
@@ -371,6 +409,9 @@ impl<'a> Builder<'a> {
         // result — the worker would omit rows the predicate accepts, and no
         // amount of re-filtering above the scan brings them back.
         if op == Operator::Or {
+            if let Some((name, values)) = logical_or_equalities(left, right) {
+                return self.membership(name, values);
+            }
             let checkpoint = self.checkpoint();
             let combined = self
                 .build(left)
@@ -429,7 +470,7 @@ fn column_name(e: &Expr) -> Option<String> {
 fn literal(e: &Expr) -> Option<ScalarValue> {
     match e {
         Expr::Literal(v, _) => Some(v.clone()),
-        Expr::Cast(c) => literal(&c.expr),
+        Expr::Cast(c) => literal(&c.expr).and_then(|v| v.cast_to(c.field.data_type()).ok()),
         _ => None,
     }
 }
@@ -446,8 +487,88 @@ fn physical_literal(expr: &dyn PhysicalExpr) -> Option<ScalarValue> {
     if let Some(literal) = expr.downcast_ref::<Literal>() {
         return Some(literal.value().clone());
     }
-    expr.downcast_ref::<CastExpr>()
-        .and_then(|cast| physical_literal(cast.expr.as_ref()))
+    expr.downcast_ref::<CastExpr>().and_then(|cast| {
+        physical_literal(cast.expr.as_ref()).and_then(|v| v.cast_to(cast.cast_type()).ok())
+    })
+}
+
+/// Flatten `column = literal OR ...` on one column into a typed membership
+/// set. This is the only disjunction shape that VGI's existing `join_keys`
+/// representation can express without inventing tuple or expression-filter
+/// protocol semantics.
+fn logical_or_equalities(left: &Expr, right: &Expr) -> Option<(String, Vec<ScalarValue>)> {
+    let mut terms = Vec::new();
+    collect_logical_or_equalities(left, &mut terms)?;
+    collect_logical_or_equalities(right, &mut terms)?;
+    same_column_membership(terms)
+}
+
+fn collect_logical_or_equalities(expr: &Expr, out: &mut Vec<(String, ScalarValue)>) -> Option<()> {
+    let Expr::BinaryExpr(binary) = expr else {
+        return None;
+    };
+    if binary.op == Operator::Or {
+        collect_logical_or_equalities(&binary.left, out)?;
+        collect_logical_or_equalities(&binary.right, out)?;
+        return Some(());
+    }
+    if binary.op != Operator::Eq {
+        return None;
+    }
+    let term = match (column_name(&binary.left), literal(&binary.right)) {
+        (Some(name), Some(value)) => (name, value),
+        _ => match (literal(&binary.left), column_name(&binary.right)) {
+            (Some(value), Some(name)) => (name, value),
+            _ => return None,
+        },
+    };
+    out.push(term);
+    Some(())
+}
+
+fn physical_or_equalities(binary: &PhysicalBinaryExpr) -> Option<(String, Vec<ScalarValue>)> {
+    let mut terms = Vec::new();
+    collect_physical_or_equalities(binary.left().as_ref(), &mut terms)?;
+    collect_physical_or_equalities(binary.right().as_ref(), &mut terms)?;
+    same_column_membership(terms)
+}
+
+fn collect_physical_or_equalities(
+    expr: &dyn PhysicalExpr,
+    out: &mut Vec<(String, ScalarValue)>,
+) -> Option<()> {
+    let binary = expr.downcast_ref::<PhysicalBinaryExpr>()?;
+    if *binary.op() == Operator::Or {
+        collect_physical_or_equalities(binary.left().as_ref(), out)?;
+        collect_physical_or_equalities(binary.right().as_ref(), out)?;
+        return Some(());
+    }
+    if *binary.op() != Operator::Eq {
+        return None;
+    }
+    let term = match (
+        physical_column_name(binary.left().as_ref()),
+        physical_literal(binary.right().as_ref()),
+    ) {
+        (Some(name), Some(value)) => (name, value),
+        _ => match (
+            physical_literal(binary.left().as_ref()),
+            physical_column_name(binary.right().as_ref()),
+        ) {
+            (Some(value), Some(name)) => (name, value),
+            _ => return None,
+        },
+    };
+    out.push(term);
+    Some(())
+}
+
+fn same_column_membership(terms: Vec<(String, ScalarValue)>) -> Option<(String, Vec<ScalarValue>)> {
+    let name = terms.first()?.0.clone();
+    if terms.iter().any(|(term_name, _)| term_name != &name) {
+        return None;
+    }
+    Some((name, terms.into_iter().map(|(_, value)| value).collect()))
 }
 
 /// The VGI op token for a comparison, or `None` for anything else.
@@ -594,7 +715,7 @@ fn finish_pushdown(
     ];
     let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![json]))];
     for (i, c) in constants.iter().enumerate() {
-        let arr = c.to_array();
+        let arr = c.to_array()?;
         fields.push(Field::new(
             format!("value_{i}"),
             arr.data_type().clone(),
@@ -754,7 +875,7 @@ fn shift_value_refs(value: &mut serde_json::Value, offset: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::Array;
+    use datafusion::arrow::array::{Array, Int64Array};
     use datafusion::logical_expr::{col, lit};
     use datafusion::physical_expr::expressions::{
         col as physical_col, lit as physical_lit, BinaryExpr as PhysicalBinaryExpr, InListExpr,
@@ -764,6 +885,28 @@ mod tests {
         Arc::new(Schema::new(vec![
             Field::new("n", DataType::Int64, true),
             Field::new("name", DataType::Utf8, true),
+        ]))
+    }
+
+    fn wide_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("u", DataType::UInt64, true),
+            Field::new("d", DataType::Date32, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(
+                    datafusion::arrow::datatypes::TimeUnit::Nanosecond,
+                    Some("America/New_York".into()),
+                ),
+                true,
+            ),
+            Field::new("amount", DataType::Decimal128(24, 6), true),
+            Field::new("bytes", DataType::Binary, true),
+            Field::new(
+                "dict",
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+                true,
+            ),
         ]))
     }
 
@@ -801,6 +944,90 @@ mod tests {
         let v = batch.column(vr + 1);
         assert_eq!(v.len(), 1);
         assert_eq!(v.as_any().downcast_ref::<Int64Array>().unwrap().value(0), 5);
+    }
+
+    #[test]
+    fn typed_constants_retain_their_arrow_types_on_the_wire() {
+        let timezone: Arc<str> = "America/New_York".into();
+        let dict = ScalarValue::Dictionary(
+            Box::new(DataType::Int8),
+            Box::new(ScalarValue::Utf8(Some("alpha".to_string()))),
+        );
+        let expressions = vec![
+            col("u").eq(lit(ScalarValue::UInt64(Some(u64::MAX)))),
+            col("d").eq(lit(ScalarValue::Date32(Some(20_000)))),
+            col("ts").eq(lit(ScalarValue::TimestampNanosecond(
+                Some(1_700_000_000_123_456_789),
+                Some(timezone.clone()),
+            ))),
+            col("amount").eq(lit(ScalarValue::Decimal128(Some(12_345_678), 24, 6))),
+            col("bytes").eq(lit(ScalarValue::Binary(Some(vec![0, 1, 255])))),
+            col("dict").eq(lit(dict)),
+        ];
+        let pushdown = serialize(&expressions, &wide_schema()).unwrap();
+        let (_, batch) = decode(pushdown.blob.as_deref().unwrap());
+        assert_eq!(batch.column(1).data_type(), &DataType::UInt64);
+        assert_eq!(batch.column(2).data_type(), &DataType::Date32);
+        assert_eq!(
+            batch.column(3).data_type(),
+            &DataType::Timestamp(
+                datafusion::arrow::datatypes::TimeUnit::Nanosecond,
+                Some(timezone)
+            )
+        );
+        assert_eq!(batch.column(4).data_type(), &DataType::Decimal128(24, 6));
+        assert_eq!(batch.column(5).data_type(), &DataType::Binary);
+        assert_eq!(
+            batch.column(6).data_type(),
+            &DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8))
+        );
+    }
+
+    #[test]
+    fn literal_casts_are_materialized_before_serialization() {
+        let decimal_schema = Arc::new(Schema::new(vec![Field::new(
+            "amount",
+            DataType::Decimal128(18, 2),
+            true,
+        )]));
+        let cast = Expr::Cast(datafusion::logical_expr::expr::Cast::new(
+            Box::new(lit(1_250_i64)),
+            DataType::Decimal128(18, 2),
+        ));
+        let pushdown = serialize(&[col("amount").eq(cast)], &decimal_schema).unwrap();
+        let (_, batch) = decode(pushdown.blob.as_deref().unwrap());
+        assert_eq!(batch.column(1).data_type(), &DataType::Decimal128(18, 2));
+
+        let cast = Arc::new(CastExpr::new(
+            physical_lit(1_250_i64),
+            DataType::Decimal128(18, 2),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+        let expression = Arc::new(PhysicalBinaryExpr::new(
+            physical_col("amount", &decimal_schema).unwrap(),
+            Operator::Eq,
+            cast,
+        )) as Arc<dyn PhysicalExpr>;
+        let pushdown = serialize_physical(&[expression], &decimal_schema, false).unwrap();
+        let (_, batch) = decode(pushdown.blob.as_deref().unwrap());
+        assert_eq!(batch.column(1).data_type(), &DataType::Decimal128(18, 2));
+    }
+
+    #[test]
+    fn nested_constants_remain_local() {
+        let list = ScalarValue::List(ScalarValue::new_list_nullable(
+            &[ScalarValue::Int64(Some(1))],
+            &DataType::Int64,
+        ));
+        let nested_schema = Arc::new(Schema::new(vec![Field::new(
+            "items",
+            list.data_type(),
+            true,
+        )]));
+        assert!(serialize(&[col("items").eq(lit(list))], &nested_schema)
+            .unwrap()
+            .blob
+            .is_none());
     }
 
     #[test]
@@ -886,6 +1113,57 @@ mod tests {
             keys.schema().metadata().get("vgi_join_keys_version"),
             Some(&"2".to_string())
         );
+    }
+
+    #[test]
+    fn typed_in_values_retain_decimal_precision_and_scale() {
+        let values = vec![
+            lit(ScalarValue::Decimal128(Some(1_250_000), 24, 6)),
+            lit(ScalarValue::Decimal128(Some(2_500_000), 24, 6)),
+        ];
+        let pushdown = serialize(&[col("amount").in_list(values, false)], &wide_schema()).unwrap();
+        let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&pushdown.join_keys[0]),
+            None,
+        )
+        .unwrap();
+        let keys = reader.next().unwrap().unwrap();
+        assert_eq!(keys.column(0).data_type(), &DataType::Decimal128(24, 6));
+        assert_eq!(keys.num_rows(), 2);
+    }
+
+    #[test]
+    fn same_column_equality_or_becomes_one_membership_batch() {
+        let expression = col("n")
+            .eq(lit(1_i64))
+            .or(lit(3_i64).eq(col("n")))
+            .or(col("n").eq(lit(5_i64)));
+        let pushdown = serialize(&[expression], &schema()).unwrap();
+        let (specs, batch) = decode(pushdown.blob.as_deref().unwrap());
+        assert_eq!(specs[0]["type"], "join_keys");
+        assert_eq!(batch.num_columns(), 1);
+        assert_eq!(pushdown.join_keys.len(), 1);
+
+        let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&pushdown.join_keys[0]),
+            None,
+        )
+        .unwrap();
+        let keys = reader.next().unwrap().unwrap();
+        let values = keys
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.values(), &[1, 3, 5]);
+    }
+
+    #[test]
+    fn equality_or_on_different_columns_is_not_tuple_membership() {
+        let expression = col("n").eq(lit(1_i64)).or(col("name").eq(lit("one")));
+        let pushdown = serialize(&[expression], &schema()).unwrap();
+        assert!(pushdown.blob.is_none());
+        assert!(pushdown.join_keys.is_empty());
     }
 
     #[test]
@@ -1079,6 +1357,43 @@ mod tests {
             keys.schema().metadata().get("vgi_join_keys_version"),
             Some(&"2".to_string())
         );
+    }
+
+    #[test]
+    fn physical_equality_or_uses_the_existing_join_key_channel() {
+        let equality = |value| {
+            Arc::new(PhysicalBinaryExpr::new(
+                physical_col("n", &schema()).unwrap(),
+                Operator::Eq,
+                physical_lit(value),
+            )) as Arc<dyn PhysicalExpr>
+        };
+        let expression = Arc::new(PhysicalBinaryExpr::new(
+            Arc::new(PhysicalBinaryExpr::new(
+                equality(2_i64),
+                Operator::Or,
+                equality(4_i64),
+            )),
+            Operator::Or,
+            equality(6_i64),
+        )) as Arc<dyn PhysicalExpr>;
+        let dynamic = serialize_physical(&[expression], &schema(), true).unwrap();
+        let (specs, _) = decode(dynamic.blob.as_deref().unwrap());
+        assert_eq!(specs[0]["type"], "join_keys");
+        assert_eq!(dynamic.join_keys.len(), 1);
+
+        let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&dynamic.join_keys[0]),
+            None,
+        )
+        .unwrap();
+        let keys = reader.next().unwrap().unwrap();
+        let values = keys
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.values(), &[2, 4, 6]);
     }
 
     #[test]

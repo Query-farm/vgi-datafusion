@@ -2,7 +2,7 @@
 
 //! Session-scoped services shared by every VGI attachment.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -147,6 +147,11 @@ pub struct VgiRuntime {
     plan_cache: Mutex<HashMap<PlanCacheKey, CachedPlan>>,
     plan_cache_stats: Mutex<PlanCacheStats>,
     result_flights: Arc<ResultFlightRegistry>,
+    exchange_cache_stats: Mutex<ExchangeCacheStats>,
+    /// Function identities that have advertised `vgi.cache.per_value` on a
+    /// live exchange. This avoids row-by-row IPC hashing for ordinary scalars
+    /// that never opted into that cache tier.
+    per_value_opt_ins: Mutex<HashSet<Vec<u8>>>,
     catalog_metadata: Mutex<HashMap<String, VgiCatalogMetadata>>,
     event_sink: Option<Arc<dyn VgiEventSink>>,
     secret_resolver: Option<Arc<dyn VgiSecretResolver>>,
@@ -181,6 +186,8 @@ impl VgiRuntime {
             plan_cache: Mutex::new(HashMap::new()),
             plan_cache_stats: Mutex::new(PlanCacheStats::default()),
             result_flights: Arc::new(ResultFlightRegistry::default()),
+            exchange_cache_stats: Mutex::new(ExchangeCacheStats::default()),
+            per_value_opt_ins: Mutex::new(HashSet::new()),
             catalog_metadata: Mutex::new(HashMap::new()),
             event_sink: None,
             secret_resolver: None,
@@ -289,6 +296,32 @@ impl VgiRuntime {
 
     pub(crate) fn locality_hook(&self) -> Option<&Arc<dyn VgiLocalityHook>> {
         self.locality_hook.as_ref()
+    }
+
+    pub(crate) fn has_per_value_opt_in(&self, identity: &[u8]) -> bool {
+        self.per_value_opt_ins.lock().unwrap().contains(identity)
+    }
+
+    pub(crate) fn note_per_value_opt_in(&self, identity: Vec<u8>) {
+        self.per_value_opt_ins.lock().unwrap().insert(identity);
+    }
+
+    pub(crate) fn note_exchange_cache_hit(&self, bytes_served: usize) {
+        let mut stats = self.exchange_cache_stats.lock().unwrap();
+        stats.hits = stats.hits.saturating_add(1);
+        stats.bytes_served = stats
+            .bytes_served
+            .saturating_add(u64::try_from(bytes_served).unwrap_or(u64::MAX));
+    }
+
+    pub(crate) fn note_exchange_cache_store(&self) {
+        let mut stats = self.exchange_cache_stats.lock().unwrap();
+        stats.stores = stats.stores.saturating_add(1);
+    }
+
+    /// Snapshot cache activity attributable to scalar/table-input exchanges.
+    pub fn exchange_cache_stats(&self) -> ExchangeCacheStats {
+        *self.exchange_cache_stats.lock().unwrap()
     }
 
     pub(crate) fn secret_resolver(&self) -> Option<&Arc<dyn VgiSecretResolver>> {
@@ -514,9 +547,37 @@ pub struct PlanCacheStats {
     pub entries: usize,
 }
 
+/// Session-lifetime counters for worker-opted-in exchange result caching.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExchangeCacheStats {
+    /// Exchange input units served from cache.
+    pub hits: u64,
+    /// Exchange output units inserted into cache.
+    pub stores: u64,
+    /// Approximate retained Arrow bytes returned by exchange cache hits.
+    pub bytes_served: u64,
+}
+
 #[cfg(test)]
 mod result_flight_tests {
     use super::*;
+
+    #[test]
+    fn exchange_cache_counters_are_session_scoped_and_cumulative() {
+        let runtime = VgiRuntime::default();
+        runtime.note_exchange_cache_store();
+        runtime.note_exchange_cache_store();
+        runtime.note_exchange_cache_hit(40);
+        runtime.note_exchange_cache_hit(2);
+        assert_eq!(
+            runtime.exchange_cache_stats(),
+            ExchangeCacheStats {
+                hits: 2,
+                stores: 2,
+                bytes_served: 42,
+            }
+        );
+    }
 
     fn key(function: &str) -> vgi_client::CacheKey {
         vgi_client::CacheKey {

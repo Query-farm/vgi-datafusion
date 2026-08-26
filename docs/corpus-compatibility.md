@@ -201,6 +201,14 @@ VGI window callback. Four SQL forms unsupported by DataFusion 55—three frame
 `EXCLUDE` variants and aggregate-local `ORDER BY` in a window—are retained as
 reviewed `out_of_scope` records rather than adapter failures.
 
+The 2026-08-26 promotion slice covers 13 aggregate, macro/catalog, typed-filter,
+and cache files over both Unix sockets and HTTP. Both transports execute
+145/173 measured records, and all 113 comparable queries agree (109 exact,
+four rendering-only differences). Aggregate is 42/42, macro/catalog is 24/24,
+and the cache slice is 30/38. The remaining 28 records are classified
+DataFusion SQL/type or table-expression boundaries; neither transport has a
+unique failure.
+
 ## What remains
 
 The following order maximizes useful coverage while keeping new DataFusion
@@ -216,10 +224,13 @@ engine work to a minimum:
    the remainder by capability area, prioritizing functions that map to an
    existing DataFusion table-provider or UDTF API.
 3. **Result cache breadth.** Memory producer/split caching, conditional
-   revalidation, per-key single-flight, diagnostics, flush/reap, and compatible event inspection work.
-   Exchange/per-value caching, disk persistence/spilling, compression,
-   stale-while-revalidate, worker-log forwarding, and DataFusion-native EXPLAIN/metrics
-   remain. Cache execution improved from 297/710 to 533/710 records.
+   revalidation, per-key single-flight, streaming per-input-batch caching,
+   stable scalar per-value caching, diagnostics, flush/reap, compatible event
+   inspection, and native DataFusion scan metrics work. Buffered whole-input
+   caching, correlated 1:N per-value entries, exchange revalidation/single-flight,
+   disk persistence/spilling, compression, stale-while-revalidate, and
+   worker-log forwarding remain. Cache execution improved from 297/710 to
+   533/710 records before this focused promotion.
 4. **Table-in/out engine boundary.** Correlated LATERAL calls account for 53
    explicit failures. Wide table subqueries account for at least another 70.
    The adapter accepts the single-column expression shape DataFusion exposes
@@ -227,32 +238,40 @@ engine work to a minimum:
    not candidates for new DataFusion engine work in this project.
 5. **Catalog objects.** The focused scalar/table macro slice and the complete
    function/native-format multi-branch slice now pass. Catalog-table source
-   arms now resolve existing DataFusion providers; custom formats without a registered DataFusion factory, broader views,
-   database metadata adaptations, and same-schema qualification for
-   unqualified objects inside macro definitions remain. Function inventory,
+   arms now have a real companion-worker fixture and resolve existing DataFusion
+   providers with cycle/ambiguity checks. Catalog-owned macro/view SQL qualifies
+   worker objects inside the attachment. Custom formats without a registered
+   DataFusion factory, broader views, and database metadata adaptations remain.
+   Function inventory,
    overloads, argument docs/constraints, tags, categories, and global
    nominations use retained worker metadata. The committed full baseline still
    records 64/90 for catalog, 4/19 for macros, and 5/14 for views until the next
    promotion run.
-6. **Secrets and authenticated fixtures.** Deterministic tests now cover two
-   same-type scopes in one bind and duplicate-name rejection. Add corpus-wide
-   resolvers before judging the remaining 24 fixture-dependent records; keep
-   real OAuth and external-service tests in the blocked fixture lane.
-7. **Aggregate correctness.** The callback-only median window mismatch is fixed;
-   every applicable `aggregate/window.test` record now executes and agrees.
-   Zero-argument/ANY/varargs signatures remain adapter gaps, while window
-   `EXCLUDE` and aggregate-local `ORDER BY` are classified DataFusion boundaries.
-8. **COPY and mutations.** COPY FROM/TO partially executes after syntax
-   translation. Writable tables (`INSERT`, `UPDATE`, `DELETE`, `RETURNING`) need
-   mutation RPC wrappers and transaction/cache invalidation semantics and are
-   currently `not_started`.
+6. **Secrets and authenticated fixtures.** Deterministic read-only consumer
+   tests cover table, lazy table, scalar, aggregate, and streaming binds; two
+   same-type scopes; duplicate-name rejection; Bearer/OAuth identity isolation;
+   and cache bypass for secret-derived results. External OAuth
+   discovery/device/refresh lifecycle and CLI secret mapping remain in the
+   blocked/host-policy lane.
+7. **Aggregate correctness.** Zero-argument, named-only, ANY, and variadic
+   signatures now reach authoritative worker validation, including grouped and
+   window execution over empty/nonempty inputs. Every comparable result in the
+   focused ordinary aggregate slice agrees. Nested tensor/struct and correlated
+   inputs remain, while window `EXCLUDE` and aggregate-local `ORDER BY` are
+   classified DataFusion boundaries.
+8. **COPY and mutations.** Some shared COPY records can be adapted to
+   DataFusion-native host file reads/writes, but the adapter does not implement
+   VGI COPY RPCs. Writable tables (`INSERT`, `UPDATE`, `DELETE`, `RETURNING`)
+   likewise remain outside this read/query-focused effort.
 9. **Remaining optimizer hints.** Catalog and bound-function min/max pruning
    now use DataFusion's existing pruning builder. Static SQL membership and the
    initial DataFusion runtime membership snapshot use VGI v2 `join_keys`, with
    the side IPC included in split planning, scan initialization, and cache
-   identity. ORDER BY, TABLESAMPLE, late materialization, continued refinement
-   after an init-time membership set, OR membership pushdown, and very large
-   join-key state sizing remain explicit partial features.
+   identity. Exact supported Arrow scalar types and same-column equality `OR`
+   membership are also covered. ORDER BY, TABLESAMPLE, late materialization,
+   continued refinement after an init-time membership set, multi-column
+   membership, and very large/Bloom join-key state remain explicit partial
+   features.
 
 Focused regression contracts for projection pushdown, narrow-bind mismatch,
 and unary error propagation are already marked `complete`; they establish the

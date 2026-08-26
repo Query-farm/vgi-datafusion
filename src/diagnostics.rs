@@ -482,6 +482,7 @@ fn plan_cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
 
 fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let stats = runtime.result_cache().stats();
+    let exchange = runtime.exchange_cache_stats();
     let schema = Arc::new(Schema::new(vec![
         Field::new("hits", DataType::UInt64, false),
         Field::new("misses", DataType::UInt64, false),
@@ -494,6 +495,9 @@ fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         Field::new("stale_serves", DataType::UInt64, false),
         Field::new("entries", DataType::UInt64, false),
         Field::new("total_bytes", DataType::UInt64, false),
+        Field::new("exchange_hits", DataType::UInt64, false),
+        Field::new("exchange_stores", DataType::UInt64, false),
+        Field::new("exchange_bytes_served", DataType::UInt64, false),
     ]));
     let values = [
         stats.hits,
@@ -507,6 +511,9 @@ fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         stats.stale_serves,
         stats.entries as u64,
         stats.total_bytes as u64,
+        exchange.hits,
+        exchange.stores,
+        exchange.bytes_served,
     ];
     Ok(RecordBatch::try_new(
         schema,
@@ -1848,8 +1855,7 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ("vgi_logs", DiagnosticsKind::Logs),
         ("vgi_log_stats", DiagnosticsKind::LogStats),
         // DuckDB-extension compatibility aliases backed by the same
-        // session-scoped DataFusion cache. These deliberately do not emulate
-        // disk/exchange cache fields the adapter has not implemented.
+        // session-scoped DataFusion cache.
         ("vgi_result_cache_stats", DiagnosticsKind::CacheStats),
         ("vgi_result_cache", DiagnosticsKind::DuckDbCacheEntries),
         ("vgi_result_cache_flush", DiagnosticsKind::CacheFlush),
@@ -1960,12 +1966,28 @@ mod tests {
             .await?;
         assert_eq!(flush[0].num_rows(), 1);
 
-        let stats = ctx
-            .sql("SELECT entries, total_bytes FROM vgi_result_cache_stats()")
-            .await?
-            .collect()
-            .await?;
-        assert_eq!(stats[0].num_rows(), 1);
+        for function in ["vgi_cache_stats", "vgi_result_cache_stats"] {
+            let stats = ctx
+                .sql(&format!(
+                    "SELECT entries, total_bytes, exchange_hits, exchange_stores, \
+                     exchange_bytes_served FROM {function}()"
+                ))
+                .await?
+                .collect()
+                .await?;
+            assert_eq!(stats[0].num_rows(), 1);
+            for column in 2..5 {
+                assert_eq!(
+                    stats[0]
+                        .column(column)
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .expect("exchange counter is UInt64")
+                        .value(0),
+                    0
+                );
+            }
+        }
 
         let entries = ctx
             .sql("SELECT key_hash, function, num_rows FROM vgi_result_cache()")

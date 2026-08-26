@@ -72,9 +72,9 @@ use datafusion::logical_expr::AggregateUDF;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName, Query,
-    SelectItem, SetExpr, Statement as SQLStatement, TableFactor, Value, ValueWithSpan, VisitMut,
-    Visitor, VisitorMut,
+    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName,
+    ObjectNamePart, Query, SelectItem, SetExpr, Statement as SQLStatement, TableFactor, Value,
+    ValueWithSpan, VisitMut, Visitor, VisitorMut,
 };
 use datafusion::sql::sqlparser::dialect::SnowflakeDialect;
 
@@ -113,6 +113,25 @@ enum SqlMacroBody {
     Scalar(Expr),
     Table(Box<Query>),
     Invalid(String),
+}
+
+/// Names from one worker schema that an unqualified SQL macro reference may
+/// resolve to. Keeping the sets separate prevents a table name from changing a
+/// scalar call (or a scalar name from changing a CTE/table reference).
+#[derive(Debug, Default)]
+struct SqlMacroNamespace {
+    expression_functions: HashSet<String>,
+    relation_functions: HashSet<String>,
+    relations: HashSet<String>,
+}
+
+/// Every object namespace advertised by one attached VGI catalog, keyed by
+/// worker schema. Catalog-owned SQL may use either `object` (owning schema) or
+/// `schema.object` (cross-schema); both must resolve independently of the
+/// caller's current DataFusion catalog/schema.
+#[derive(Debug, Default)]
+struct SqlCatalogNamespace {
+    schemas: HashMap<String, SqlMacroNamespace>,
 }
 
 type SessionMacros = HashMap<String, HashMap<String, Arc<SqlMacro>>>;
@@ -162,6 +181,177 @@ fn parse_macro_body(kind: SqlMacroKind, definition: &str) -> SqlMacroBody {
         );
     }
     SqlMacroBody::Scalar(expression.clone())
+}
+
+struct CatalogSqlQualifier<'a> {
+    catalog: &'a str,
+    owning_schema: &'a str,
+    namespace: &'a SqlCatalogNamespace,
+    cte_scopes: Vec<HashSet<String>>,
+}
+
+impl CatalogSqlQualifier<'_> {
+    /// Resolve a one-part name in the owning schema or a two-part name in its
+    /// explicit worker schema. Three-part names are already catalog-qualified.
+    fn object_key(&self, name: &ObjectName) -> Option<(String, String)> {
+        let identifiers = name
+            .0
+            .iter()
+            .map(ObjectNamePart::as_ident)
+            .collect::<Option<Vec<_>>>()?;
+        match identifiers.as_slice() {
+            [object] => Some((
+                self.owning_schema.to_ascii_lowercase(),
+                object.value.to_ascii_lowercase(),
+            )),
+            [schema, object] => Some((
+                schema.value.to_ascii_lowercase(),
+                object.value.to_ascii_lowercase(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn qualify_name(&self, name: &mut ObjectName) {
+        let catalog =
+            ObjectNamePart::Identifier(datafusion::sql::sqlparser::ast::Ident::new(self.catalog));
+        match name.0.len() {
+            1 => {
+                let Some(local) = name.0.pop() else {
+                    return;
+                };
+                name.0 = vec![
+                    catalog,
+                    ObjectNamePart::Identifier(datafusion::sql::sqlparser::ast::Ident::new(
+                        self.owning_schema,
+                    )),
+                    local,
+                ];
+            }
+            2 => name.0.insert(0, catalog),
+            _ => {}
+        }
+    }
+
+    fn cte_in_scope(&self, name: &str) -> bool {
+        self.cte_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(&name.to_ascii_lowercase()))
+    }
+}
+
+impl VisitorMut for CatalogSqlQualifier<'_> {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &mut Query) -> ControlFlow<Self::Break> {
+        self.cte_scopes.push(HashSet::new());
+        let Some(with) = &mut query.with else {
+            return ControlFlow::Continue(());
+        };
+        if with.recursive {
+            self.cte_scopes
+                .last_mut()
+                .expect("query scope was just pushed")
+                .extend(
+                    with.cte_tables
+                        .iter()
+                        .map(|cte| cte.alias.name.value.to_ascii_lowercase()),
+                );
+            return ControlFlow::Continue(());
+        }
+
+        // sqlparser's generic visitor enters every CTE only after this
+        // callback. Walk non-recursive definitions once here, in order, while
+        // exposing only preceding aliases. The later generic traversal is
+        // harmless because qualification is idempotent.
+        for cte in &mut with.cte_tables {
+            if let ControlFlow::Break(()) = cte.query.visit(self) {
+                return ControlFlow::Break(());
+            }
+            self.cte_scopes
+                .last_mut()
+                .expect("query scope remains active")
+                .insert(cte.alias.name.value.to_ascii_lowercase());
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &mut Query) -> ControlFlow<Self::Break> {
+        self.cte_scopes.pop();
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        let TableFactor::Table { name, args, .. } = factor else {
+            return ControlFlow::Continue(());
+        };
+        let Some((schema, object)) = self.object_key(name) else {
+            return ControlFlow::Continue(());
+        };
+        let Some(namespace) = self.namespace.schemas.get(&schema) else {
+            return ControlFlow::Continue(());
+        };
+        let worker_object = if args.is_some() {
+            namespace.relation_functions.contains(&object)
+        } else {
+            (name.0.len() != 1 || !self.cte_in_scope(&object))
+                && namespace.relations.contains(&object)
+        };
+        if worker_object {
+            self.qualify_name(name);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+        let Expr::Function(function) = expr else {
+            return ControlFlow::Continue(());
+        };
+        let Some((schema, object)) = self.object_key(&function.name) else {
+            return ControlFlow::Continue(());
+        };
+        if self
+            .namespace
+            .schemas
+            .get(&schema)
+            .is_some_and(|namespace| namespace.expression_functions.contains(&object))
+        {
+            self.qualify_name(&mut function.name);
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn qualify_catalog_sql<T: VisitMut>(
+    sql: &mut T,
+    catalog: &str,
+    owning_schema: &str,
+    namespace: &SqlCatalogNamespace,
+) {
+    let _ = sql.visit(&mut CatalogSqlQualifier {
+        catalog,
+        owning_schema,
+        namespace,
+        cte_scopes: Vec::new(),
+    });
+}
+
+fn qualify_macro_body(
+    body: &mut SqlMacroBody,
+    catalog: &str,
+    schema: &str,
+    namespace: &SqlCatalogNamespace,
+) {
+    match body {
+        SqlMacroBody::Scalar(expression) => {
+            qualify_catalog_sql(expression, catalog, schema, namespace);
+        }
+        SqlMacroBody::Table(query) => {
+            qualify_catalog_sql(query.as_mut(), catalog, schema, namespace);
+        }
+        SqlMacroBody::Invalid(_) => {}
+    }
 }
 
 fn macro_key(name: &ObjectName) -> Option<String> {
@@ -470,7 +660,10 @@ fn runtime_registry() -> &'static Mutex<HashMap<String, Weak<VgiRuntime>>> {
 #[derive(Default)]
 struct RegisteredNames {
     scalar: HashSet<String>,
-    aggregate: HashSet<String>,
+    /// Published aggregate name -> whether its minimum positional arity is
+    /// zero. Such invocations need a private row-witness argument because
+    /// DataFusion's empty accumulator input does not carry a row count.
+    aggregate: HashMap<String, bool>,
     /// Published table-function name -> worker-declared named arguments.
     ///
     /// Besides DETACH bookkeeping, this lets the SQL compatibility pass
@@ -521,7 +714,7 @@ fn remove_default_schema(ctx: &SessionContext, alias: &str) {
 
 enum RegistrationKind {
     Scalar,
-    Aggregate,
+    Aggregate { nullary: bool },
     Table(HashSet<String>),
 }
 
@@ -534,7 +727,9 @@ fn record_registration(ctx: &SessionContext, alias: &str, kind: RegistrationKind
         .or_default();
     match kind {
         RegistrationKind::Scalar => registered.scalar.insert(name),
-        RegistrationKind::Aggregate => registered.aggregate.insert(name),
+        RegistrationKind::Aggregate { nullary } => {
+            registered.aggregate.insert(name, nullary).is_none()
+        }
         RegistrationKind::Table(named_arguments) => {
             registered.table.insert(name, named_arguments).is_none()
         }
@@ -571,6 +766,23 @@ fn is_declared_named_table_argument(
         .unwrap_or(false)
 }
 
+fn is_declared_nullary_aggregate(ctx: &SessionContext, function_name: &str) -> bool {
+    registration_registry()
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions.get(&ctx.session_id()).map(|aliases| {
+                aliases.values().any(|registered| {
+                    registered
+                        .aggregate
+                        .iter()
+                        .any(|(name, nullary)| *nullary && name.eq_ignore_ascii_case(function_name))
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn deregister_alias_functions(ctx: &SessionContext, alias: &str) {
     let registered = registration_registry()
         .lock()
@@ -586,7 +798,7 @@ fn deregister_alias_functions(ctx: &SessionContext, alias: &str) {
     for name in registered.scalar {
         ctx.deregister_udf(&name);
     }
-    for name in registered.aggregate {
+    for name in registered.aggregate.into_keys() {
         ctx.deregister_udaf(&name);
     }
     for name in registered.table.into_keys() {
@@ -1275,6 +1487,44 @@ fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResul
                 Ok(None) => {}
                 Err(error) => return ControlFlow::Break(Box::new(error)),
             }
+            // DataFusion supplies `&[]` to a zero-argument accumulator, with
+            // no batch row count. Inject a reserved one-field struct as a row
+            // witness. Its type marks this invocation (rather than the whole
+            // UDAF) so an aggregate with all-default positional parameters can
+            // still distinguish `f()` from the real one-argument call `f(x)`.
+            if let SQLExpr::Function(function) = expr {
+                let function_name = function.name.to_string();
+                // DataFusion gives scalar UDFs precedence when a scalar and
+                // aggregate share a registry key (even when SQL includes an
+                // OVER clause). Preserve that resolution rule rather than
+                // turning an invalid zero-argument scalar call into a valid
+                // one-argument call.
+                let scalar_collision = self
+                    .ctx
+                    .state()
+                    .scalar_functions()
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case(&function_name));
+                if !scalar_collision && is_declared_nullary_aggregate(self.ctx, &function_name) {
+                    if let FunctionArguments::List(arguments) = &mut function.args {
+                        if arguments.args.is_empty() {
+                            arguments
+                                .args
+                                .push(FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                                    SQLExpr::Struct {
+                                        values: vec![SQLExpr::Named {
+                                            expr: Box::new(SQLExpr::Value(
+                                                Value::Number("1".into(), false).into(),
+                                            )),
+                                            name: Ident::new(crate::aggregate::ROW_WITNESS_FIELD),
+                                        }],
+                                        fields: vec![],
+                                    },
+                                )));
+                        }
+                    }
+                }
+            }
             ControlFlow::Continue(())
         }
     }
@@ -1702,40 +1952,66 @@ async fn attach_one(
     Ok(provider.companion_catalogs().to_vec())
 }
 
+/// Build the complete namespace used to resolve catalog-owned SQL without
+/// guessing whether an arbitrary identifier belongs to the worker.
+fn sql_catalog_namespace(provider: &VgiCatalogProvider) -> SqlCatalogNamespace {
+    let schemas = provider
+        .vgi_schemas()
+        .map(|(schema_name, schema)| {
+            let mut namespace = SqlMacroNamespace::default();
+            namespace.expression_functions.extend(
+                schema
+                    .scalars()
+                    .iter()
+                    .map(|(name, _, _)| name.to_ascii_lowercase()),
+            );
+            namespace.expression_functions.extend(
+                schema
+                    .aggregates()
+                    .iter()
+                    .map(|(name, ..)| name.to_ascii_lowercase()),
+            );
+            namespace.relation_functions.extend(
+                schema
+                    .table_function_names()
+                    .map(|name| name.to_ascii_lowercase()),
+            );
+            namespace.relations.extend(
+                schema
+                    .table_names_only()
+                    .into_iter()
+                    .map(|name| name.to_ascii_lowercase()),
+            );
+            namespace
+                .relations
+                .extend(schema.views().map(|(name, _)| name.to_ascii_lowercase()));
+            for info in schema.metadata_macros() {
+                match sql_macro_kind(&info.macro_type.0) {
+                    Ok(SqlMacroKind::Scalar) => {
+                        namespace
+                            .expression_functions
+                            .insert(info.name.to_ascii_lowercase());
+                    }
+                    Ok(SqlMacroKind::Table) => {
+                        namespace
+                            .relation_functions
+                            .insert(info.name.to_ascii_lowercase());
+                    }
+                    Err(_) => {}
+                }
+            }
+            (schema_name.to_ascii_lowercase(), namespace)
+        })
+        .collect();
+    SqlCatalogNamespace { schemas }
+}
+
 /// Plan worker-declared views against their owning schema and install ordinary
 /// DataFusion `ViewTable`s. A broken definition does not make ATTACH fail: the
 /// view remains discoverable and reports its retained error when queried.
 async fn register_views(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalogProvider) {
     use datafusion::datasource::ViewTable;
-    use datafusion::sql::sqlparser::ast::{
-        Ident, ObjectName, ObjectNamePart, TableFactor, VisitorMut,
-    };
-
-    struct Qualify<'a> {
-        catalog: &'a str,
-        schema: &'a str,
-    }
-
-    impl VisitorMut for Qualify<'_> {
-        type Break = Box<datafusion::common::DataFusionError>;
-
-        fn pre_visit_table_factor(&mut self, factor: &mut TableFactor) -> ControlFlow<Self::Break> {
-            let TableFactor::Table { name, .. } = factor else {
-                return ControlFlow::Continue(());
-            };
-            if name.0.len() == 1 {
-                let Some(local) = name.0[0].as_ident().map(|ident| ident.value.clone()) else {
-                    return ControlFlow::Continue(());
-                };
-                *name = ObjectName(vec![
-                    ObjectNamePart::Identifier(Ident::new(self.catalog)),
-                    ObjectNamePart::Identifier(Ident::new(self.schema)),
-                    ObjectNamePart::Identifier(Ident::new(local)),
-                ]);
-            }
-            ControlFlow::Continue(())
-        }
-    }
+    let namespace = sql_catalog_namespace(provider);
 
     for (schema_name, schema) in provider.vgi_schemas() {
         for (view_name, info) in schema.views() {
@@ -1745,12 +2021,7 @@ async fn register_views(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiC
                     let dialect = state.config_options().sql_parser.dialect;
                     let mut statement = state.sql_to_statement(&info.definition, &dialect)?;
                     if let DFStatement::Statement(inner) = &mut statement {
-                        if let ControlFlow::Break(error) = inner.as_mut().visit(&mut Qualify {
-                            catalog: &spec.alias,
-                            schema: schema_name,
-                        }) {
-                            return Err(*error);
-                        }
+                        qualify_catalog_sql(inner.as_mut(), &spec.alias, schema_name, &namespace);
                     }
                     rewrite_vgi_sql(ctx, &mut statement)?;
                     let plan = state.statement_to_plan(statement).await?;
@@ -1840,6 +2111,7 @@ fn register_global_functions(
             }
             "aggregate" => {
                 let specs = vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?;
+                let nullary = specs.minimum_positional_arity() == 0;
                 ctx.register_udaf(AggregateUDF::new_from_impl(
                     VgiAggregateUdf::new_with_volatility(
                         conn.clone(),
@@ -1853,13 +2125,19 @@ fn register_global_functions(
                     .with_window_support(info.supports_window)
                     .with_required_secrets(metadata_secrets(info)),
                 ));
-                record_registration(ctx, &spec.alias, RegistrationKind::Aggregate, name);
+                record_registration(
+                    ctx,
+                    &spec.alias,
+                    RegistrationKind::Aggregate { nullary },
+                    name,
+                );
             }
             "table" | "table_buffering" => {
                 let metadata = crate::catalog::TableFunctionMetadata {
                     specs: vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?,
                     buffered: kind == "table_buffering",
                     input_from_args: info.input_from_args,
+                    stream_cache_eligible: info.max_workers != Some(1) && !info.has_finalize,
                 };
                 let named_arguments = named_arguments(&metadata.specs);
                 ctx.register_udtf(
@@ -2106,6 +2384,7 @@ fn blob_literal(raw: &str) -> DFResult<Option<Vec<u8>>> {
 }
 
 fn register_macros(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalogProvider) {
+    let namespace = sql_catalog_namespace(provider);
     let Ok(mut sessions) = macro_registry().lock() else {
         return;
     };
@@ -2117,6 +2396,7 @@ fn register_macros(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalo
             Ok(kind) => (kind, parse_macro_body(kind, &info.definition)),
             Err(error) => (SqlMacroKind::Scalar, SqlMacroBody::Invalid(error)),
         };
+        qualify_macro_body(&mut body, &spec.alias, &info.schema_name, &namespace);
         let defaults = match vgi_client::decode_macro_defaults(info) {
             Ok(defaults) => defaults
                 .into_iter()
@@ -2339,7 +2619,14 @@ fn register_aggregate_functions(
                     .with_window_support(*supports_window)
                     .with_required_secrets(required_secrets.clone()),
                 ));
-                record_registration(ctx, &spec.alias, RegistrationKind::Aggregate, name);
+                record_registration(
+                    ctx,
+                    &spec.alias,
+                    RegistrationKind::Aggregate {
+                        nullary: specs.minimum_positional_arity() == 0,
+                    },
+                    name,
+                );
             }
         }
     }
@@ -2373,6 +2660,10 @@ fn detach(ctx: &SessionContext, alias: &str) -> DFResult<()> {
     ctx.register_catalog(alias, Arc::new(MemoryCatalogProvider::new()));
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "session_macro_tests.rs"]
+mod macro_qualification_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2581,6 +2872,36 @@ mod tests {
         assert!(
             equality.contains("other = 10"),
             "equality was lost: {equality}"
+        );
+    }
+
+    #[test]
+    fn zero_argument_aggregate_gets_an_invocation_marked_row_witness() {
+        let ctx = SessionContext::new();
+        record_registration(
+            &ctx,
+            "example",
+            RegistrationKind::Aggregate { nullary: true },
+            "example.main.defaulted_count".to_string(),
+        );
+        let parse_and_rewrite = |sql: &str| {
+            let state = ctx.state();
+            let dialect = state.config_options().sql_parser.dialect;
+            let mut statement = state.sql_to_statement(sql, &dialect).expect("parses");
+            rewrite_vgi_sql(&ctx, &mut statement).expect("rewrites");
+            statement.to_string()
+        };
+
+        let omitted = parse_and_rewrite("SELECT example.main.defaulted_count() FROM range(3)");
+        assert!(
+            omitted.contains(crate::aggregate::ROW_WITNESS_FIELD),
+            "zero-argument invocation was not marked: {omitted}"
+        );
+
+        let supplied = parse_and_rewrite("SELECT example.main.defaulted_count(7) FROM range(3)");
+        assert!(
+            !supplied.contains(crate::aggregate::ROW_WITNESS_FIELD),
+            "a real positional argument was mistaken for a witness: {supplied}"
         );
     }
 

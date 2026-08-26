@@ -16,7 +16,8 @@ use datafusion::arrow::datatypes::{Field, FieldRef};
 use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::async_udf::AsyncScalarUDFImpl;
 use datafusion::logical_expr::{
-    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
+    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature,
+    Volatility,
 };
 use vgi_client::{ArgSpecs, ArgValue, Arguments};
 
@@ -158,13 +159,28 @@ impl VgiScalarUdf {
         overloads: Vec<ArgSpecs>,
         volatility: Volatility,
     ) -> Self {
+        let accepts_zero_arguments = overloads.is_empty()
+            || overloads
+                .iter()
+                .any(|specs| specs.minimum_positional_arity() == 0);
         Self {
             conn,
             catalog: catalog.into(),
             schema_name: schema_name.into(),
             function: function.into(),
             registered_name: registered_name.into(),
-            signature: Signature::variadic_any(volatility),
+            signature: if accepts_zero_arguments {
+                // VariadicAny has a minimum arity of one in DataFusion. Admit
+                // zero only when a worker overload explicitly declares it;
+                // every other arity still reaches the worker through the
+                // permissive variadic arm for authoritative validation.
+                Signature::one_of(
+                    vec![TypeSignature::Nullary, TypeSignature::VariadicAny],
+                    volatility,
+                )
+            } else {
+                Signature::variadic_any(volatility)
+            },
             volatility,
             return_type: None,
             overloads: if overloads.is_empty() {
@@ -248,9 +264,10 @@ impl VgiScalarUdf {
         for specs in &self.overloads {
             let positional: Vec<_> = specs.positional().collect();
             let varargs = positional.iter().position(|spec| spec.is_varargs);
+            let minimum = specs.minimum_positional_arity();
             let arity_matches = match varargs {
-                Some(index) => types.len() >= index,
-                None => types.len() == positional.len(),
+                Some(_) => types.len() >= minimum,
+                None => (minimum..=positional.len()).contains(&types.len()),
             };
             if !arity_matches {
                 continue;
@@ -394,14 +411,14 @@ impl VgiScalarUdf {
             spec.function_type = FunctionType::Scalar;
             spec.arguments = arguments;
 
-            let bound = crate::bind_with_input_secrets(
+            let (bound, used_resolved_secrets) = crate::bind_with_input_secrets_status(
                 &conn,
                 &mut client,
                 &attached,
                 &spec,
                 &input_schema,
             )?;
-            bound
+            let output_type = bound
                 .output_schema()
                 .fields()
                 .first()
@@ -410,13 +427,16 @@ impl VgiScalarUdf {
                     DataFusionError::Plan(format!(
                         "VGI scalar `{function}` bound to an output schema with no columns"
                     ))
-                })
+                })?;
+            Ok((output_type, used_resolved_secrets))
         })?;
 
-        if let Ok(mut cache) = self.resolved.lock() {
-            cache.insert(key, out.clone());
+        if !out.1 {
+            if let Ok(mut cache) = self.resolved.lock() {
+                cache.insert(key, out.0.clone());
+            }
         }
-        Ok(out)
+        Ok(out.0)
     }
 
     /// Ask DataFusion to hand over this many rows per call.
@@ -651,30 +671,19 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             self.function.clone(),
         );
         let input_schema = Schema::new(fields);
+        let cacheable = self.volatility != Volatility::Volatile;
 
         let out = tokio::task::spawn_blocking(move || {
-            use vgi_client::{BindSpec, FunctionType, ScanOptions};
-            let mut client = conn.connect()?;
-            let attached = conn.attach(&mut client, &cat)?;
-            let mut spec = BindSpec::table(&name).in_schema(&sch);
-            spec.function_type = FunctionType::Scalar;
-            spec.arguments = arguments;
-
-            let bound = crate::bind_with_input_secrets(
+            run_scalar_exchange(
                 &conn,
-                &mut client,
-                &attached,
-                &spec,
+                &cat,
+                &sch,
+                &name,
+                arguments,
                 &input_schema,
-            )?;
-            let mut ex = client
-                .open_exchange(&bound, &ScanOptions::default())
-                .map_err(to_df)?;
-            let answer = ex.send(&input).map_err(to_df)?;
-            let _ = ex.close();
-            answer.ok_or_else(|| {
-                DataFusionError::Execution(format!("{name} returned no answer for its input"))
-            })
+                input,
+                cacheable,
+            )
         })
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
@@ -704,6 +713,368 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
     }
 }
 
+/// Bounded function-level identity for a live `per_value` advertisement.
+/// Arguments and principals deliberately stay out: they remain dimensions of
+/// every result key, while including them here would grow this small capability
+/// registry without bound.
+fn per_value_opt_in_identity(
+    conn: &VgiConnection,
+    catalog: &str,
+    schema_name: &str,
+    function: &str,
+    catalog_version: i64,
+) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+
+    let attach = conn.cache_attach_context(catalog);
+    let mut digest = Sha256::new();
+    for field in [
+        b"scalar_per_value_opt_in_v1".as_slice(),
+        conn.label().as_bytes(),
+        catalog.as_bytes(),
+        schema_name.as_bytes(),
+        function.as_bytes(),
+        attach.as_slice(),
+    ] {
+        digest.update((field.len() as u64).to_le_bytes());
+        digest.update(field);
+    }
+    digest.update(catalog_version.to_le_bytes());
+    digest.finalize().to_vec()
+}
+
+// Matches DuckDB's `vgi_result_cache_per_value_max_stores_per_chunk` default.
+// Bound only new stores; hits and result assembly remain complete.
+const PER_VALUE_MAX_NEW_STORES_PER_CALL: usize = 256;
+
+/// Copy a single output row into independently owned Arrow buffers before it
+/// enters the cache. `RecordBatch::slice` is zero-copy and would otherwise keep
+/// the entire RPC response alive for each one-row cache entry.
+fn materialize_output_row(
+    batch: &datafusion::arrow::array::RecordBatch,
+    row: usize,
+) -> DFResult<datafusion::arrow::array::RecordBatch> {
+    use datafusion::arrow::array::UInt32Array;
+    use datafusion::arrow::compute::take;
+
+    let row = u32::try_from(row).map_err(|_| {
+        DataFusionError::Internal("scalar output row index exceeds Arrow's u32 limit".to_string())
+    })?;
+    let indices = UInt32Array::from(vec![row]);
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| take(column.as_ref(), &indices, None).map_err(DataFusionError::from))
+        .collect::<DFResult<Vec<_>>>()?;
+    Ok(datafusion::arrow::array::RecordBatch::try_new(
+        batch.schema(),
+        columns,
+    )?)
+}
+
+/// Execute a scalar exchange with worker-opted-in per-value memoization.
+///
+/// A stable scalar is a 1:1 map. Distinct input tuples are therefore safe to
+/// send once, cache independently, and gather back into the caller's original
+/// row order. Volatile functions bypass this path completely: equal inputs may
+/// intentionally produce different answers.
+#[allow(clippy::too_many_arguments)]
+fn run_scalar_exchange(
+    conn: &VgiConnection,
+    catalog: &str,
+    schema_name: &str,
+    function: &str,
+    arguments: Arguments,
+    input_schema: &datafusion::arrow::datatypes::Schema,
+    input: datafusion::arrow::array::RecordBatch,
+    cacheable: bool,
+) -> DFResult<datafusion::arrow::array::RecordBatch> {
+    use datafusion::arrow::array::{RecordBatch, UInt32Array};
+    use datafusion::arrow::compute::{concat_batches, take};
+    use vgi_client::{BindSpec, FunctionType, ScanOptions};
+
+    let mut client = conn.connect()?;
+    let attached = conn.attach(&mut client, catalog)?;
+    let catalog_version = attached.info().catalog_version;
+    let argument_bytes = arguments.to_ipc().map_err(to_df)?.0;
+    let mut spec = BindSpec::table(function).in_schema(schema_name);
+    spec.function_type = FunctionType::Scalar;
+    spec.arguments = arguments;
+    let (bound, used_resolved_secrets) =
+        crate::bind_with_input_secrets_status(conn, &mut client, &attached, &spec, input_schema)?;
+
+    let direct = |client: &mut vgi_client::VgiClient,
+                  input: &RecordBatch|
+     -> DFResult<(RecordBatch, Option<vgi_client::CacheControl>)> {
+        let mut exchange = client
+            .open_exchange(&bound, &ScanOptions::default())
+            .map_err(to_df)?;
+        let answer = exchange.send(input).map_err(to_df)?;
+        let control = exchange.cache_control().cloned();
+        exchange.close().map_err(to_df)?;
+        answer.map(|answer| (answer, control)).ok_or_else(|| {
+            DataFusionError::Execution(format!("{function} returned no answer for its input"))
+        })
+    };
+
+    if !cacheable || used_resolved_secrets || input.num_rows() == 0 {
+        return direct(&mut client, &input).map(|(answer, _)| answer);
+    }
+
+    if !conn.cache_enabled
+        || !conn.runtime.options().cache_enabled
+        || conn.cache_identity_scope(catalog).is_none()
+    {
+        return direct(&mut client, &input).map(|(answer, _)| answer);
+    }
+    let opt_in_identity =
+        per_value_opt_in_identity(conn, catalog, schema_name, function, catalog_version);
+
+    // Cache capability is advertised on an output batch, not during catalog
+    // discovery. Until this exact function identity opts in, make the ordinary
+    // one-batch RPC: non-cacheable scalars must not pay row-by-row IPC hashing
+    // forever. If the response opts in, populate its distinct rows after the
+    // fact so the very first call still warms the per-value tier.
+    if !conn.runtime.has_per_value_opt_in(&opt_in_identity) {
+        let (answer, control) = direct(&mut client, &input)?;
+        let per_value = control.as_ref().is_some_and(|control| control.per_value);
+        let shape_is_scalar = answer.num_rows() == input.num_rows() && answer.num_columns() == 1;
+        let mut stored = 0usize;
+        if per_value && shape_is_scalar {
+            let template = crate::table_input::exchange_cache_key_template(
+                conn,
+                catalog,
+                schema_name,
+                function,
+                &argument_bytes,
+                catalog_version,
+                bound.output_schema().as_ref(),
+                b"scalar_per_value_v2",
+            )?
+            .expect("cache availability was checked above");
+            let mut seen = std::collections::HashSet::<[u8; 32]>::new();
+            for row in 0..input.num_rows() {
+                if seen.len() >= PER_VALUE_MAX_NEW_STORES_PER_CALL {
+                    break;
+                }
+                let input_row = input.slice(row, 1);
+                let input_digest = template.input_digest(&input_row)?;
+                if !seen.insert(input_digest) {
+                    continue;
+                }
+                let key = template.key_for_digest(input_digest);
+                let output = materialize_output_row(&answer, row)?;
+                let bytes = output
+                    .columns()
+                    .iter()
+                    .map(|array| array.get_array_memory_size())
+                    .sum();
+                if let Ok(ttl) = crate::table_input::exchange_cache_ttl(
+                    conn.runtime.result_cache(),
+                    control.as_ref(),
+                    &key.identity_scope,
+                    bytes,
+                ) {
+                    conn.runtime
+                        .result_cache()
+                        .insert(key, vec![output], ttl, control.as_ref());
+                    conn.runtime.note_exchange_cache_store();
+                    stored += 1;
+                }
+            }
+        }
+        if stored > 0 {
+            conn.runtime.note_per_value_opt_in(opt_in_identity);
+            crate::table_input::emit_exchange_cache_event(
+                conn,
+                catalog,
+                schema_name,
+                function,
+                "cache.store",
+                Some(format!("tier=per_value tuples={stored}")),
+            );
+        }
+        return Ok(answer);
+    }
+
+    // Build one cache unit per distinct input tuple. If the attachment cannot
+    // be cached (disabled or unresolved identity), retain the old one-exchange
+    // path and avoid doing dedup/gather work solely for a cache that is off.
+    let template = crate::table_input::exchange_cache_key_template(
+        conn,
+        catalog,
+        schema_name,
+        function,
+        &argument_bytes,
+        catalog_version,
+        bound.output_schema().as_ref(),
+        b"scalar_per_value_v2",
+    )?
+    .expect("cache availability was checked above");
+    let mut unique_by_digest = HashMap::<[u8; 32], usize>::new();
+    let mut uniques = Vec::<(vgi_client::CacheKey, RecordBatch)>::new();
+    let mut row_to_unique = Vec::<usize>::with_capacity(input.num_rows());
+    for row in 0..input.num_rows() {
+        let row_batch = input.slice(row, 1);
+        let input_digest = template.input_digest(&row_batch)?;
+        let unique = match unique_by_digest.get(&input_digest).copied() {
+            Some(index) => index,
+            None => {
+                let index = uniques.len();
+                unique_by_digest.insert(input_digest, index);
+                uniques.push((template.key_for_digest(input_digest), row_batch));
+                index
+            }
+        };
+        row_to_unique.push(unique);
+    }
+
+    let cache = conn.runtime.result_cache();
+    let mut outputs = vec![None::<RecordBatch>; uniques.len()];
+    let mut misses = Vec::<usize>::new();
+    let mut hit_count = 0usize;
+    for (index, (key, _)) in uniques.iter().enumerate() {
+        let hit = cache.get(key).and_then(|entry| {
+            let [batch] = entry.batches() else {
+                return None;
+            };
+            (batch.num_rows() == 1
+                && batch.num_columns() == 1
+                && batch.schema().as_ref() == bound.output_schema().as_ref())
+            .then(|| (batch.clone(), entry.bytes()))
+        });
+        match hit {
+            Some((batch, bytes)) => {
+                conn.runtime.note_exchange_cache_hit(bytes);
+                outputs[index] = Some(batch);
+                hit_count += 1;
+            }
+            None => misses.push(index),
+        }
+    }
+    if hit_count > 0 {
+        crate::table_input::emit_exchange_cache_event(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            if misses.is_empty() {
+                "cache.hit"
+            } else {
+                "cache.partial_hit"
+            },
+            Some(format!(
+                "tier=per_value reused_tuples={hit_count} computed_tuples={}",
+                misses.len()
+            )),
+        );
+    } else {
+        crate::table_input::emit_exchange_cache_event(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            "cache.miss",
+            Some(format!("tier=per_value distinct_tuples={}", uniques.len())),
+        );
+    }
+
+    if !misses.is_empty() {
+        let miss_batches = misses
+            .iter()
+            .map(|index| &uniques[*index].1)
+            .collect::<Vec<_>>();
+        let miss_input = concat_batches(&input.schema(), miss_batches)?;
+        let mut exchange = client
+            .open_exchange(&bound, &ScanOptions::default())
+            .map_err(to_df)?;
+        let fresh = exchange.send(&miss_input).map_err(to_df)?.ok_or_else(|| {
+            DataFusionError::Execution(format!("{function} returned no answer for its input"))
+        })?;
+        let control = exchange.cache_control().cloned();
+        exchange.close().map_err(to_df)?;
+        if fresh.num_rows() != misses.len() || fresh.num_columns() != 1 {
+            return Err(DataFusionError::Execution(format!(
+                "{function} answered {} rows and {} columns for {} distinct scalar inputs; expected a 1:1, one-column result",
+                fresh.num_rows(),
+                fresh.num_columns(),
+                misses.len()
+            )));
+        }
+
+        let per_value = control.as_ref().is_some_and(|control| control.per_value);
+        let mut stored = 0usize;
+        let mut store_attempts = 0usize;
+        for (fresh_row, unique_index) in misses.into_iter().enumerate() {
+            let output = fresh.slice(fresh_row, 1);
+            if per_value && store_attempts < PER_VALUE_MAX_NEW_STORES_PER_CALL {
+                store_attempts += 1;
+                let cached_output = materialize_output_row(&fresh, fresh_row)?;
+                let bytes = cached_output
+                    .columns()
+                    .iter()
+                    .map(|array| array.get_array_memory_size())
+                    .sum();
+                let key = &uniques[unique_index].0;
+                match crate::table_input::exchange_cache_ttl(
+                    cache,
+                    control.as_ref(),
+                    &key.identity_scope,
+                    bytes,
+                ) {
+                    Ok(ttl) => {
+                        cache.insert(key.clone(), vec![cached_output], ttl, control.as_ref());
+                        conn.runtime.note_exchange_cache_store();
+                        stored += 1;
+                    }
+                    Err(reason) => crate::table_input::emit_exchange_cache_event(
+                        conn,
+                        catalog,
+                        schema_name,
+                        function,
+                        "cache.refused",
+                        Some(format!("tier=per_value {reason:?}")),
+                    ),
+                }
+            }
+            outputs[unique_index] = Some(output);
+        }
+        if stored > 0 {
+            crate::table_input::emit_exchange_cache_event(
+                conn,
+                catalog,
+                schema_name,
+                function,
+                "cache.store",
+                Some(format!("tier=per_value tuples={stored}")),
+            );
+        }
+    }
+
+    let unique_outputs = outputs
+        .into_iter()
+        .map(|batch| {
+            batch.ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "{function} per-value cache assembly left an input unanswered"
+                ))
+            })
+        })
+        .collect::<DFResult<Vec<_>>>()?;
+    let distinct = concat_batches(bound.output_schema(), &unique_outputs)?;
+    let indices = UInt32Array::from(
+        row_to_unique
+            .into_iter()
+            .map(|index| index as u32)
+            .collect::<Vec<_>>(),
+    );
+    let output = take(distinct.column(0).as_ref(), &indices, None)?;
+    Ok(RecordBatch::try_new(
+        bound.output_schema().clone(),
+        vec![output],
+    )?)
+}
+
 #[cfg(test)]
 mod overload_tests {
     use super::*;
@@ -716,6 +1087,7 @@ mod overload_tests {
             is_const: false,
             is_named: false,
             is_varargs: false,
+            default: None,
             doc: None,
         }
     }
@@ -788,6 +1160,31 @@ mod overload_tests {
     }
 
     #[test]
+    fn omitted_trailing_defaults_match_the_advertised_overload() {
+        let required = positional(DataType::Int64);
+        let mut optional = positional(DataType::Utf8);
+        optional.default = Some(r#""fallback""#.to_string());
+        let defaulted = ArgSpecs(vec![required, optional]);
+        let other = ArgSpecs(vec![
+            positional(DataType::Boolean),
+            positional(DataType::Boolean),
+        ]);
+        let selected_udf = udf(vec![other, defaulted.clone()]);
+
+        let (selected, compatible) = selected_udf.select_specs(&[DataType::Int64]);
+        assert!(compatible);
+        assert_eq!(selected, &defaulted);
+
+        let mut only = positional(DataType::Int64);
+        only.default = Some("0".to_string());
+        let all_defaulted = udf(vec![ArgSpecs(vec![only])]);
+        assert!(matches!(
+            &all_defaulted.signature().type_signature,
+            TypeSignature::OneOf(variants) if variants.contains(&TypeSignature::Nullary)
+        ));
+    }
+
+    #[test]
     fn const_arguments_remain_eligible_for_literal_coercion() {
         let mut spec = positional(DataType::Int64);
         spec.is_const = true;
@@ -797,5 +1194,68 @@ mod overload_tests {
         let (selected, compatible) = udf.select_specs(&[DataType::Utf8]);
         assert!(compatible);
         assert_eq!(selected, &specs);
+    }
+
+    #[test]
+    fn nullary_named_only_and_varargs_overloads_reach_zero_argument_bind() {
+        let nullary = udf(vec![ArgSpecs::default()]);
+        assert!(matches!(
+            &nullary.signature().type_signature,
+            TypeSignature::OneOf(variants)
+                if variants.contains(&TypeSignature::Nullary)
+                    && variants.contains(&TypeSignature::VariadicAny)
+        ));
+
+        let mut named = positional(DataType::Utf8);
+        named.is_named = true;
+        let named_only = udf(vec![ArgSpecs(vec![named])]);
+        assert!(matches!(
+            &named_only.signature().type_signature,
+            TypeSignature::OneOf(variants) if variants.contains(&TypeSignature::Nullary)
+        ));
+
+        let varargs = udf(vec![varargs(DataType::Int64)]);
+        assert!(matches!(
+            &varargs.signature().type_signature,
+            TypeSignature::OneOf(variants) if variants.contains(&TypeSignature::Nullary)
+        ));
+
+        let unary = udf(vec![ArgSpecs(vec![positional(DataType::Int64)])]);
+        assert_eq!(unary.signature().type_signature, TypeSignature::VariadicAny);
+    }
+
+    #[test]
+    fn cached_scalar_row_owns_only_its_materialized_buffers() {
+        use std::sync::Arc;
+
+        use datafusion::arrow::array::{Array, RecordBatch, StringArray};
+        use datafusion::arrow::datatypes::{Field, Schema};
+
+        let values = (0..1024)
+            .map(|index| format!("row-{index:04}-{}", "x".repeat(128)))
+            .collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(values.clone()))],
+        )
+        .unwrap();
+
+        let row = materialize_output_row(&batch, 777).unwrap();
+        let value = row
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(value.value(0), values[777]);
+        assert_eq!(row.num_rows(), 1);
+        assert!(
+            row.column(0).get_array_memory_size() * 100 < batch.column(0).get_array_memory_size(),
+            "one cached row should not retain the full RPC response"
+        );
+        assert_eq!(PER_VALUE_MAX_NEW_STORES_PER_CALL, 256);
     }
 }

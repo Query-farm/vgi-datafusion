@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
-use datafusion::arrow::array::{Array, StringArray};
+use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use vgi_datafusion::{VgiConnection, VgiTableProvider};
 
@@ -148,6 +148,92 @@ async fn hash_join_keys_reach_vgi_init_and_results_stay_exact() -> datafusion::e
         pushed.contains("n IN (1, 3, 5)"),
         "worker did not receive the join-key set: {pushed:?}"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn static_equality_or_reaches_vgi_as_membership() -> datafusion::error::Result<()> {
+    let Some(worker) = example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    let connection = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);
+    let Some(schema) = filter_echo_schema(&connection).await else {
+        eprintln!("skipping: filter_echo_table_scan not in this catalog");
+        return Ok(());
+    };
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+    ctx.register_table(
+        "echo",
+        VgiTableProvider::bind(connection, "example", &schema, "filter_echo_table_scan").await?,
+    )?;
+
+    let batches = ctx
+        .sql(
+            "SELECT n, pushed_filters
+             FROM echo
+             WHERE n = 2 OR n = 4 OR n = 6
+             ORDER BY n",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3
+    );
+    let pushed = batches
+        .iter()
+        .find_map(|batch| {
+            let index = batch.schema().index_of("pushed_filters").ok()?;
+            let strings = batch.column(index).as_any().downcast_ref::<StringArray>()?;
+            (!strings.is_empty() && !strings.is_null(0)).then(|| strings.value(0).to_string())
+        })
+        .unwrap_or_default();
+    assert!(
+        pushed.contains("n IN (2, 4, 6)"),
+        "worker did not receive equality OR as membership: {pushed:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dictionary_column_filter_executes_in_the_worker() -> datafusion::error::Result<()> {
+    let Some(worker) = example_worker() else {
+        eprintln!("skipping: vgi-example-worker not built");
+        return Ok(());
+    };
+    let ctx = SessionContext::new();
+    let location = worker.to_string_lossy().replace('\'', "''");
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={location}' AS ex")).await?;
+
+    // The worker emits dictionary<int8, utf8>. DataFusion plans the literal at
+    // the column type, and the worker auto-applies the pushed predicate using
+    // Arrow's dictionary comparison path. A mismatched/undecoded dictionary
+    // errors here rather than silently succeeding through DataFusion's Inexact
+    // re-filter above the scan.
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT n FROM ex.main.dict_filter_echo(6) WHERE s = 'green' ORDER BY n",
+    )
+    .await?
+    .collect()
+    .await?;
+    let values = batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("n is Int64")
+                .values()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![1, 4]);
     Ok(())
 }
 

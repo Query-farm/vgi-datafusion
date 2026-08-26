@@ -40,7 +40,24 @@ use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::logical_expr::{Expr, LogicalPlan};
 use datafusion::physical_plan::ExecutionPlan;
 
-use crate::{to_df, VgiConnection};
+use crate::{to_df, VgiConnection, VgiEvent};
+
+/// Exchange tiers do not yet send conditional validators back to a worker.
+/// Refuse immediately-stale policies here instead of retaining bytes that a
+/// plain lookup can never reuse. Producer scans have a separate revalidation
+/// path and continue to accept this policy through `ResultCache` directly.
+pub(crate) fn exchange_cache_ttl(
+    cache: &vgi_client::ResultCache,
+    control: Option<&vgi_client::CacheControl>,
+    identity_scope: &str,
+    bytes: usize,
+) -> Result<std::time::Duration, vgi_client::cache::Ineligible> {
+    let ttl = cache.eligibility(control, Some(identity_scope), bytes)?;
+    if ttl.is_zero() {
+        return Err(vgi_client::cache::Ineligible::NoFreshness);
+    }
+    Ok(ttl)
+}
 
 /// The subquery behind a TABLE argument, plus where it sat in the call.
 #[derive(Debug, Clone)]
@@ -117,22 +134,121 @@ pub(crate) fn run_exchange(
     arguments: vgi_client::Arguments,
     input_schema: &Schema,
     inputs: Vec<datafusion::arrow::array::RecordBatch>,
+    stream_cache_eligible: bool,
 ) -> DFResult<Vec<datafusion::arrow::array::RecordBatch>> {
     use vgi_client::{BindSpec, ScanOptions};
 
     let mut client = conn.connect()?;
     let attached = conn.attach(&mut client, catalog)?;
+    let catalog_version = attached.info().catalog_version;
+    let argument_bytes = arguments.to_ipc().map_err(to_df)?.0;
     let spec = BindSpec::table(function)
         .in_schema(schema_name)
         .with_arguments(arguments);
-    let bound = crate::bind_with_input_secrets(conn, &mut client, &attached, &spec, input_schema)?;
+    let (bound, used_resolved_secrets) =
+        crate::bind_with_input_secrets_status(conn, &mut client, &attached, &spec, input_schema)?;
+    let stream_cache_eligible = stream_cache_eligible && !used_resolved_secrets;
+    let cache_key_template = if stream_cache_eligible {
+        exchange_cache_key_template(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            &argument_bytes,
+            catalog_version,
+            bound.output_schema().as_ref(),
+            b"table_in_out_batch_v2",
+        )?
+    } else {
+        None
+    };
 
-    let mut ex = client
+    // Probe every input unit before borrowing the client for an exchange. A
+    // fully warm call must not initialize a worker conversation, and doing the
+    // classification up front also keeps one clean mutable borrow for all
+    // misses that remain.
+    let mut units = Vec::with_capacity(inputs.len());
+    let mut has_miss = false;
+    for batch in inputs {
+        let cache_key = cache_key_template
+            .as_ref()
+            .map(|template| template.key_for_input(&batch))
+            .transpose()?;
+        let cached = cache_key
+            .as_ref()
+            .and_then(|key| conn.runtime.result_cache().get(key))
+            .map(|entry| {
+                conn.runtime.note_exchange_cache_hit(entry.bytes());
+                entry.batches().to_vec()
+            });
+        if cached.is_some() {
+            emit_exchange_cache_event(conn, catalog, schema_name, function, "cache.hit", None);
+        } else if cache_key.is_some() {
+            emit_exchange_cache_event(conn, catalog, schema_name, function, "cache.miss", None);
+            has_miss = true;
+        } else {
+            has_miss = true;
+        }
+        units.push((batch, cache_key, cached));
+    }
+
+    let mut out = Vec::new();
+    if !has_miss {
+        for (_, _, cached) in units {
+            out.extend(cached.expect("all units were cache hits"));
+        }
+        return Ok(out);
+    }
+
+    let mut exchange = client
         .open_exchange(&bound, &ScanOptions::default())
         .map_err(to_df)?;
-    let mut out = Vec::new();
-    for batch in inputs {
-        if let Some(answer) = ex.send(&batch).map_err(to_df)? {
+    for (batch, cache_key, cached) in units {
+        if let Some(cached) = cached {
+            out.extend(cached);
+            continue;
+        }
+        if let Some(answer) = exchange.send(&batch).map_err(to_df)? {
+            if let Some(key) = cache_key {
+                let control = exchange.cache_control().cloned();
+                let bytes = answer
+                    .columns()
+                    .iter()
+                    .map(|array| array.get_array_memory_size())
+                    .sum();
+                match exchange_cache_ttl(
+                    conn.runtime.result_cache(),
+                    control.as_ref(),
+                    &key.identity_scope,
+                    bytes,
+                ) {
+                    Ok(ttl) => {
+                        conn.runtime.result_cache().insert(
+                            key,
+                            vec![answer.clone()],
+                            ttl,
+                            control.as_ref(),
+                        );
+                        conn.runtime.note_exchange_cache_store();
+                        emit_exchange_cache_event(
+                            conn,
+                            catalog,
+                            schema_name,
+                            function,
+                            "cache.store",
+                            None,
+                        );
+                    }
+                    Err(reason) => emit_exchange_cache_event(
+                        conn,
+                        catalog,
+                        schema_name,
+                        function,
+                        "cache.refused",
+                        Some(format!("exchange batch: {reason:?}")),
+                    ),
+                }
+            }
             out.push(answer);
         }
     }
@@ -140,8 +256,133 @@ pub(crate) fn run_exchange(
     // this, through `finalize_table_in_out`; that shape is not wired up yet, so
     // a buffered function reached this way returns nothing rather than wrong
     // rows.
-    ex.close().map_err(to_df)?;
+    exchange.close().map_err(to_df)?;
     Ok(out)
+}
+
+/// Static portion of an exchange cache key.
+///
+/// Arguments, schemas, and attachment context can be much larger than one
+/// cached result. Hash them once per call rather than cloning them into every
+/// per-input key (where key memory is outside the result-cache byte accounting).
+pub(crate) struct ExchangeCacheKeyTemplate {
+    catalog: String,
+    identity_scope: String,
+    worker_label: String,
+    function: String,
+    catalog_version: i64,
+    static_digest: [u8; 32],
+}
+
+impl ExchangeCacheKeyTemplate {
+    pub(crate) fn input_digest(
+        &self,
+        input: &datafusion::arrow::array::RecordBatch,
+    ) -> DFResult<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+
+        let input = vgi_protocol::ipc::write_batch(input).map_err(to_df)?;
+        let mut digest = Sha256::new();
+        hash_exchange_field(&mut digest, b"vgi_exchange_input_v2");
+        hash_exchange_field(&mut digest, &self.static_digest);
+        hash_exchange_field(&mut digest, &input);
+        Ok(digest.finalize().into())
+    }
+
+    pub(crate) fn key_for_digest(&self, input_digest: [u8; 32]) -> vgi_client::CacheKey {
+        vgi_client::CacheKey {
+            catalog: self.catalog.clone(),
+            identity_scope: self.identity_scope.clone(),
+            worker_label: self.worker_label.clone(),
+            function: self.function.clone(),
+            // Keep both variable-sized regions compact. The static digest
+            // covers the canonical arguments, output schema, and attach
+            // context; plan is the domain-separated digest of this input row.
+            arguments: self.static_digest.to_vec(),
+            projection: None,
+            filters: None,
+            catalog_version: self.catalog_version,
+            at: None,
+            settings: Vec::new(),
+            attach_options: Vec::new(),
+            row_limit: None,
+            ordering: None,
+            sample: None,
+            plan: Some(input_digest.to_vec()),
+        }
+    }
+
+    pub(crate) fn key_for_input(
+        &self,
+        input: &datafusion::arrow::array::RecordBatch,
+    ) -> DFResult<vgi_client::CacheKey> {
+        self.input_digest(input)
+            .map(|digest| self.key_for_digest(digest))
+    }
+}
+
+fn hash_exchange_field(digest: &mut sha2::Sha256, field: &[u8]) {
+    use sha2::Digest;
+
+    digest.update((field.len() as u64).to_le_bytes());
+    digest.update(field);
+}
+
+/// Build the compact static portion of exchange cache keys once per call.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exchange_cache_key_template(
+    conn: &VgiConnection,
+    catalog: &str,
+    schema_name: &str,
+    function: &str,
+    arguments: &[u8],
+    catalog_version: i64,
+    output_schema: &Schema,
+    kind: &[u8],
+) -> DFResult<Option<ExchangeCacheKeyTemplate>> {
+    if !conn.cache_enabled || !conn.runtime.options().cache_enabled {
+        return Ok(None);
+    }
+    let Some(identity_scope) = conn.cache_identity_scope(catalog) else {
+        return Ok(None);
+    };
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    hash_exchange_field(&mut digest, b"vgi_exchange_static_v2");
+    hash_exchange_field(&mut digest, kind);
+    hash_exchange_field(&mut digest, catalog.as_bytes());
+    hash_exchange_field(&mut digest, identity_scope.as_bytes());
+    hash_exchange_field(&mut digest, conn.label().as_bytes());
+    hash_exchange_field(&mut digest, format!("{schema_name}.{function}").as_bytes());
+    hash_exchange_field(&mut digest, arguments);
+    hash_exchange_field(&mut digest, &catalog_version.to_le_bytes());
+    hash_exchange_field(&mut digest, &conn.cache_attach_context(catalog));
+    let output_schema = vgi_protocol::ipc::write_schema(output_schema).map_err(to_df)?;
+    hash_exchange_field(&mut digest, &output_schema);
+    Ok(Some(ExchangeCacheKeyTemplate {
+        catalog: catalog.to_string(),
+        identity_scope,
+        worker_label: conn.label().to_string(),
+        function: format!("{schema_name}.{function}"),
+        catalog_version,
+        static_digest: digest.finalize().into(),
+    }))
+}
+
+pub(crate) fn emit_exchange_cache_event(
+    conn: &VgiConnection,
+    catalog: &str,
+    schema_name: &str,
+    function: &str,
+    kind: &str,
+    message: Option<String>,
+) {
+    let mut event = VgiEvent::new(kind);
+    event.catalog = Some(catalog.to_string());
+    event.function = Some(format!("{schema_name}.{function}"));
+    event.message = message;
+    conn.runtime.emit(event);
 }
 
 /// A childless blended table-in/out call whose literal arguments form one
@@ -235,6 +476,7 @@ impl datafusion::catalog::TableProvider for VgiLiteralInputProvider {
                 arguments,
                 input_schema.as_ref(),
                 vec![input],
+                false,
             )
         })
         .await
@@ -330,6 +572,7 @@ pub struct VgiTableInputProvider {
     /// Whether the worker declared this a `TableBufferingFunction`, which is a
     /// different protocol rather than a variation on the streaming one.
     buffered: bool,
+    stream_cache_eligible: bool,
 }
 
 impl VgiTableInputProvider {
@@ -342,6 +585,7 @@ impl VgiTableInputProvider {
         arguments: vgi_client::Arguments,
         table_arg: TableArgument,
         buffered: bool,
+        stream_cache_eligible: bool,
     ) -> DFResult<Arc<Self>> {
         use vgi_client::BindSpec;
 
@@ -365,6 +609,7 @@ impl VgiTableInputProvider {
             input_schema,
             output_schema,
             buffered,
+            stream_cache_eligible,
         }))
     }
 }
@@ -424,11 +669,21 @@ impl datafusion::catalog::TableProvider for VgiTableInputProvider {
         let for_worker = input_schema.clone();
 
         let buffered = self.buffered;
+        let stream_cache_eligible = self.stream_cache_eligible;
         let out = tokio::task::spawn_blocking(move || {
             if buffered {
                 run_buffered(&conn, &cat, &sch, &func, args, &for_worker, inputs)
             } else {
-                run_exchange(&conn, &cat, &sch, &func, args, &for_worker, inputs)
+                run_exchange(
+                    &conn,
+                    &cat,
+                    &sch,
+                    &func,
+                    args,
+                    &for_worker,
+                    inputs,
+                    stream_cache_eligible,
+                )
             }
         })
         .await
@@ -446,5 +701,73 @@ impl datafusion::catalog::TableProvider for VgiTableInputProvider {
             schema,
             projection.cloned(),
         )?)
+    }
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::{Int64Array, RecordBatch};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+    use super::*;
+
+    fn one_row(schema: &Arc<Schema>, value: i64) -> RecordBatch {
+        RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![value]))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn exchange_keys_hash_static_context_once_and_input_per_unit() {
+        let conn = VgiConnection::subprocess(["unused"]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let large_arguments = vec![0x5a; 1024 * 1024];
+        let template = exchange_cache_key_template(
+            &conn,
+            "example",
+            "main",
+            "echo",
+            &large_arguments,
+            7,
+            schema.as_ref(),
+            b"scalar_per_value_v2",
+        )
+        .unwrap()
+        .unwrap();
+
+        let first = template.key_for_input(&one_row(&schema, 1)).unwrap();
+        let first_again = template.key_for_input(&one_row(&schema, 1)).unwrap();
+        let second = template.key_for_input(&one_row(&schema, 2)).unwrap();
+
+        assert_eq!(first, first_again);
+        assert_ne!(first, second);
+        assert_eq!(first.arguments.len(), 32);
+        assert_eq!(first.plan.as_ref().unwrap().len(), 32);
+        assert!(first.attach_options.is_empty());
+        assert_ne!(first.arguments.as_slice(), large_arguments.as_slice());
+
+        let different_static = exchange_cache_key_template(
+            &conn,
+            "example",
+            "main",
+            "echo",
+            b"different arguments",
+            7,
+            schema.as_ref(),
+            b"scalar_per_value_v2",
+        )
+        .unwrap()
+        .unwrap()
+        .key_for_input(&one_row(&schema, 1))
+        .unwrap();
+        assert_ne!(first, different_static);
     }
 }

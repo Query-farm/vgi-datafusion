@@ -205,9 +205,15 @@ that timeout.
   standalone DataFusion CLI has no distributed scheduler-affinity implementation.
 - **Cache breadth.** Complete, worker-opted producer and split results have a
   safe bounded memory tier with conditional revalidation and per-key
-  single-flight for concurrent misses. Exchange/per-value
-  results, disk persistence, stale-while-revalidate, compression, and
-  persistent cross-process sharing are not implemented.
+  single-flight for concurrent misses. Stateless streaming table-in/out calls
+  additionally memoize complete input batches, and stable scalar functions may
+  opt into bounded per-value memoization. Secret-consuming calls bypass these
+  caches, and native DataFusion metrics expose producer cache/worker activity in
+  `EXPLAIN ANALYZE`. Cache diagnostics distinguish exchange hits, stores, and
+  bytes served. Buffered whole-input results, correlated 1:N per-value
+  calls, exchange conditional revalidation/single-flight, disk persistence,
+  stale-while-revalidate, compression, and persistent cross-process sharing
+  remain unimplemented.
 - **Dynamic filters and join keys.** DataFusion 55 hash-join filters are linked
   to VGI scans. Completed single-column `IN` sets use `join_keys` side IPC at
   init (`vgi_join_keys_version=2`), while later range/constant refinements ride
@@ -216,7 +222,9 @@ that timeout.
   between-tick updates. The join remains DataFusion's correctness boundary, so
   older workers may ignore the hint safely, and dynamically filtered scans
   bypass the result cache.
-  DataFusion's hash-table lookup expression for very large joins and
+  Static and initial runtime predicates preserve supported Arrow scalar types,
+  and same-column equality `OR` trees use the same join-key side batch as `IN`.
+  DataFusion's hash-table/Bloom lookup expression for very large joins and
   multi-column struct membership are not serializable to VGI yet; dynamic
   filters also prune within already-planned splits rather than changing the
   split set.

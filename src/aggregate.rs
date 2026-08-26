@@ -40,11 +40,25 @@ use datafusion::arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::{
-    Accumulator, AggregateUDFImpl, ColumnarValue, Signature, Volatility,
+    Accumulator, AggregateUDFImpl, ColumnarValue, Signature, TypeSignature, Volatility,
 };
 use vgi_client::{ArgSpecs, ArgValue, Arguments};
 
 use crate::{to_df, VgiConnection};
+
+/// Reserved struct field carried by the SQL compatibility pass when a
+/// zero-argument aggregate needs a private row-count witness.
+pub(crate) const ROW_WITNESS_FIELD: &str = "__vgi_datafusion_row_witness__";
+
+fn is_invocation_row_witness(arg_types: &[DataType]) -> bool {
+    matches!(
+        arg_types,
+        [DataType::Struct(fields)]
+            if fields.len() == 1
+                && fields[0].name() == ROW_WITNESS_FIELD
+                && fields[0].data_type() == &DataType::Int64
+    )
+}
 
 /// A remote aggregate function.
 #[derive(Debug, Clone)]
@@ -61,6 +75,12 @@ pub struct VgiAggregateUdf {
     /// arguments, even though DataFusion evaluates every aggregate expression
     /// into an array for `update_batch`.
     specs: ArgSpecs,
+    /// A strictly nullary worker aggregate is exposed to DataFusion with one
+    /// private row-witness argument. DataFusion's accumulator API supplies
+    /// only `&[]` for a genuine nullary call, which loses the input batch's row
+    /// count. The SQL compatibility pass injects a literal `1`; this flag makes
+    /// sure it is retained as local state but never sent to the worker.
+    row_witness: bool,
     /// Whether the worker provides the dedicated VGI window callback.
     ///
     /// DataFusion asks for a sliding accumulator separately from an ordinary
@@ -110,12 +130,50 @@ impl VgiAggregateUdf {
             registered_name: registered_name.into(),
             signature: Signature::variadic_any(volatility),
             specs: ArgSpecs::default(),
+            row_witness: false,
             supports_window: false,
             required_secrets: Vec::new(),
         }
     }
 
     pub(crate) fn with_arg_specs(mut self, specs: ArgSpecs) -> Self {
+        let positional = specs.positional().collect::<Vec<_>>();
+        self.row_witness = specs.positional().next().is_none();
+        // A declared positional parameter distinguishes a real one-argument
+        // call from the private row witness used by a truly nullary aggregate.
+        // Until that witness can carry an invocation-arity marker, an
+        // all-default positional aggregate must still receive at least one
+        // argument; admitting zero would silently aggregate zero rows.
+        let minimum_arity = specs.minimum_positional_arity().max(1);
+        self.signature = if self.row_witness {
+            // SQL rewrites the worker's nullary call to one private literal so
+            // every accumulator update carries the number of input rows.
+            Signature::any(1, self.signature.volatility)
+        } else if positional.iter().any(|spec| spec.is_varargs) {
+            // VariadicAny alone rejects zero arguments before VGI can return
+            // its authoritative minimum-arity diagnostic.
+            Signature::one_of(
+                vec![TypeSignature::Nullary, TypeSignature::VariadicAny],
+                self.signature.volatility,
+            )
+        } else if minimum_arity == positional.len() {
+            // VGI AnyArrow means any concrete Arrow type, not arbitrary arity.
+            Signature::any(positional.len(), self.signature.volatility)
+        } else {
+            // A VGI default is applied by the worker at bind. DataFusion must
+            // admit every arity that can omit a trailing default, but should
+            // not synthesize or serialize that default itself.
+            let signatures = (minimum_arity..=positional.len())
+                .map(|arity| {
+                    if arity == 0 {
+                        TypeSignature::Nullary
+                    } else {
+                        TypeSignature::Any(arity)
+                    }
+                })
+                .collect();
+            Signature::one_of(signatures, self.signature.volatility)
+        };
         self.specs = specs;
         self
     }
@@ -168,7 +226,11 @@ impl AggregateUDFImpl for VgiAggregateUdf {
         let catalog = self.catalog.clone();
         let schema_name = self.schema_name.clone();
         let function = self.function.clone();
-        let arg_types = arg_types.to_vec();
+        let arg_types = if self.row_witness || is_invocation_row_witness(arg_types) {
+            Vec::new()
+        } else {
+            arg_types.to_vec()
+        };
         let specs = self.specs.clone();
         let required_secrets = self.required_secrets.clone();
         crate::run_blocking_planner_call(move || {
@@ -218,20 +280,28 @@ impl VgiAggregateUdf {
         args: AccumulatorArgs,
         use_window_callback: bool,
     ) -> DFResult<Box<dyn Accumulator>> {
+        let arg_types = args
+            .expr_fields
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>();
+        let row_witness = self.row_witness || is_invocation_row_witness(&arg_types);
+        let arguments = if row_witness {
+            Arguments::new()
+        } else {
+            aggregate_arguments(&self.function, &self.specs, args.exprs)?
+        };
         Ok(Box::new(VgiAccumulator {
             conn: self.conn.clone(),
             catalog: self.catalog.clone(),
             schema_name: self.schema_name.clone(),
             function: self.function.clone(),
-            arg_types: args
-                .exprs
-                .iter()
-                .map(|e| e.data_type(args.schema))
-                .collect::<DFResult<Vec<_>>>()?,
+            arg_types,
             specs: self.specs.clone(),
-            arguments: aggregate_arguments(&self.function, &self.specs, args.exprs)?,
+            arguments,
             required_secrets: self.required_secrets.clone(),
             use_window_callback,
+            row_witness,
             buffered: Vec::new(),
         }))
     }
@@ -350,6 +420,9 @@ struct VgiAccumulator {
     /// Evaluate the current sliding frame with the worker's dedicated window
     /// callback instead of its ordinary aggregate finalize implementation.
     use_window_callback: bool,
+    /// Whether argument zero exists only to preserve DataFusion's input row
+    /// count for a nullary worker aggregate.
+    row_witness: bool,
     /// One buffer per argument; `buffered[i]` are the chunks seen for argument
     /// `i`, concatenated only when needed.
     buffered: Vec<Vec<ArrayRef>>,
@@ -480,18 +553,22 @@ impl Accumulator for VgiAccumulator {
         use datafusion::arrow::array::RecordBatch;
         use datafusion::arrow::datatypes::Schema;
 
-        let columns = self
-            .collected()?
+        let collected = self.collected()?;
+        let row_count = collected.first().map(|column| column.len()).unwrap_or(0);
+        let columns = collected
             .into_iter()
             .enumerate()
-            .filter(|(i, _)| !self.specs.positional_is_const(*i))
+            .filter(|(i, _)| !self.row_witness && !self.specs.positional_is_const(*i))
             .map(|(_, column)| column)
             .collect();
-        let schema = Arc::new(Schema::new(column_input_fields(
-            &self.arg_types,
-            &self.specs,
-        )));
-        let batch = RecordBatch::try_new(schema.clone(), columns)?;
+        let schema = Arc::new(Schema::new(if self.row_witness {
+            Vec::new()
+        } else {
+            column_input_fields(&self.arg_types, &self.specs)
+        }));
+        let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
+            .with_row_count(Some(row_count));
+        let batch = RecordBatch::try_new_with_options(schema.clone(), columns, &options)?;
         let conn = self.conn.clone();
         let catalog = self.catalog.clone();
         let schema_name = self.schema_name.clone();
@@ -601,4 +678,104 @@ fn aggregate_bind(
     client
         .aggregate_bind_with_resolved_secrets(attached, spec, input_schema, secrets)
         .map_err(to_df)
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::datatypes::DataType;
+    use vgi_client::{ArgSpec, ArgSpecs};
+
+    use super::*;
+
+    fn argument(name: &str, is_named: bool, is_const: bool) -> ArgSpec {
+        ArgSpec {
+            name: name.to_string(),
+            data_type: DataType::Int64,
+            is_const,
+            is_named,
+            is_varargs: false,
+            default: None,
+            doc: None,
+        }
+    }
+
+    #[test]
+    // Regression: an all-named declaration still has no row-bearing input,
+    // while an all-ConstParam positional declaration retains its old arity.
+    fn named_only_signature_is_nullary_but_positional_const_is_not() {
+        let aggregate = VgiAggregateUdf::new(
+            VgiConnection::subprocess(["unused"]),
+            "example",
+            "main",
+            "named_default",
+            "named_default",
+        )
+        .with_arg_specs(ArgSpecs(vec![argument("option", true, true)]));
+        assert!(aggregate.row_witness);
+
+        let aggregate = VgiAggregateUdf::new(
+            VgiConnection::subprocess(["unused"]),
+            "example",
+            "main",
+            "positional_const",
+            "positional_const",
+        )
+        .with_arg_specs(ArgSpecs(vec![argument("option", false, true)]));
+        assert!(!aggregate.row_witness);
+    }
+
+    #[test]
+    fn trailing_defaults_expand_the_accepted_aggregate_arities() {
+        let required = argument("value", false, false);
+        let mut first_default = argument("precision", false, true);
+        first_default.default = Some("2".to_string());
+        let mut second_default = argument("ignore_nulls", false, true);
+        second_default.default = Some("true".to_string());
+
+        let aggregate = VgiAggregateUdf::new(
+            VgiConnection::subprocess(["unused"]),
+            "example",
+            "main",
+            "defaulted",
+            "defaulted",
+        )
+        .with_arg_specs(ArgSpecs(vec![required, first_default, second_default]));
+
+        assert_eq!(
+            aggregate.signature.type_signature,
+            TypeSignature::OneOf(vec![
+                TypeSignature::Any(1),
+                TypeSignature::Any(2),
+                TypeSignature::Any(3),
+            ])
+        );
+        assert!(!aggregate.row_witness);
+    }
+
+    #[test]
+    fn reserved_struct_type_marks_only_the_zero_argument_invocation() {
+        let marker = DataType::Struct(
+            vec![Arc::new(Field::new(
+                ROW_WITNESS_FIELD,
+                DataType::Int64,
+                false,
+            ))]
+            .into(),
+        );
+        assert!(is_invocation_row_witness(&[marker]));
+        assert!(!is_invocation_row_witness(&[DataType::Int64]));
+
+        let mut defaulted = argument("value", false, true);
+        defaulted.default = Some("1".to_string());
+        let aggregate = VgiAggregateUdf::new(
+            VgiConnection::subprocess(["unused"]),
+            "example",
+            "main",
+            "defaulted",
+            "defaulted",
+        )
+        .with_arg_specs(ArgSpecs(vec![defaulted]));
+        assert_eq!(aggregate.signature.type_signature, TypeSignature::Any(1));
+        assert!(!aggregate.row_witness, "the marker is per invocation");
+    }
 }

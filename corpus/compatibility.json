@@ -30,14 +30,14 @@
       "title": "Scalar functions and overloads",
       "status": "partial",
       "groups": ["scalar", "overload"],
-      "remaining": ["DuckDB ANY/unsigned type spellings", "struct field syntax", "remaining varargs and null-coercion cases"]
+      "remaining": ["DuckDB unsigned type spellings", "struct field syntax", "remaining null-coercion cases"]
     },
     {
       "id": "aggregates",
       "title": "Aggregates, windows, and accumulation",
       "status": "partial",
       "groups": ["aggregate", "accumulate"],
-      "remaining": ["zero-argument aggregate signatures", "remaining ANY/varargs forms", "DataFusion-only window EXCLUDE and aggregate ORDER BY syntax"]
+      "remaining": ["nested tensor/struct inputs", "correlated aggregate inputs", "DataFusion-only window EXCLUDE and aggregate ORDER BY syntax"]
     },
     {
       "id": "table_input",
@@ -51,7 +51,7 @@
       "title": "Static and dynamic filter pushdown",
       "status": "partial",
       "groups": ["filter_pushdown"],
-      "remaining": ["wide and engine-specific scalar types", "continued runtime refinement after an init-time membership set", "OR membership pushdown and very large join-key state sizing"]
+      "remaining": ["continued runtime refinement after an init-time membership set", "very large/Bloom join-key state", "multi-column struct membership"]
     },
     {
       "id": "splits",
@@ -65,14 +65,14 @@
       "title": "VGI result cache",
       "status": "partial",
       "groups": ["cache"],
-      "remaining": ["exchange/per-value caching", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events", "DataFusion-native EXPLAIN and metrics"]
+      "remaining": ["buffered whole-input result caching", "correlated 1:N per-value caching", "exchange conditional revalidation and single-flight", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events"]
     },
     {
       "id": "catalog_metadata",
       "title": "Catalogs, views, macros, and global functions",
       "status": "partial",
       "groups": ["catalog", "view", "macro", "global_functions", "schema_reconcile.test"],
-      "remaining": ["custom formats without a registered DataFusion factory", "broader view translation", "database metadata adaptations", "same-schema qualification for unqualified objects inside macro definitions", "real companion-catalog source fixture coverage"]
+      "remaining": ["custom formats without a registered DataFusion factory", "broader view translation", "database metadata adaptations"]
     },
     {
       "id": "attach_settings",
@@ -86,14 +86,14 @@
       "title": "Authentication and secrets",
       "status": "partial",
       "groups": ["bearer_auth", "secret"],
-      "remaining": ["corpus-wide secret resolver fixtures", "OAuth identity fixture coverage", "CLI secret mapping policy"]
+      "remaining": ["external OAuth discovery/device/refresh lifecycle fixture", "CLI secret mapping policy", "shared SQL CREATE SECRET adaptation"]
     },
     {
       "id": "copy",
       "title": "COPY FROM and COPY TO functions",
       "status": "partial",
       "groups": ["copy_from", "copy_to"],
-      "remaining": ["DataFusion COPY syntax adaptation", "secret-backed files", "parallel and ordered output semantics"]
+      "remaining": ["VGI COPY RPCs are not wired; only equivalent host-owned DataFusion file operations may be adapted", "secret-backed files", "parallel and ordered output semantics"]
     },
     {
       "id": "writes",

@@ -1520,6 +1520,10 @@ pub(crate) struct TableFunctionMetadata {
     pub specs: vgi_client::ArgSpecs,
     pub buffered: bool,
     pub input_from_args: bool,
+    /// Per-input-batch memoization is valid only for the parallel streaming
+    /// map shape. A serial worker or FINALIZE callback may carry state across
+    /// batches, so identical batches are not independent cache units.
+    pub stream_cache_eligible: bool,
 }
 
 /// One VGI schema.
@@ -1612,6 +1616,7 @@ impl VgiSchemaProvider {
                         let metadata = TableFunctionMetadata {
                             buffered: f.function_type.0.eq_ignore_ascii_case("table_buffering"),
                             input_from_args: f.input_from_args,
+                            stream_cache_eligible: f.max_workers != Some(1) && !f.has_finalize,
                             specs,
                         };
                         Ok::<_, DataFusionError>((f.name.clone(), metadata))

@@ -351,6 +351,187 @@ async fn const_parameters_reach_the_worker() -> datafusion::error::Result<()> {
     Ok(())
 }
 
+async fn result_cache_counters(ctx: &SessionContext) -> datafusion::error::Result<(u64, u64, u64)> {
+    let batches = vgi_datafusion::sql(ctx, "SELECT hits, inserts, entries FROM vgi_cache_stats()")
+        .await?
+        .collect()
+        .await?;
+    let value = |column: usize| {
+        batches[0]
+            .column(column)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+            .expect("cache counter is UInt64")
+            .value(0)
+    };
+    Ok((value(0), value(1), value(2)))
+}
+
+async fn exchange_cache_counters(
+    ctx: &SessionContext,
+) -> datafusion::error::Result<(u64, u64, u64)> {
+    let batches = vgi_datafusion::sql(
+        ctx,
+        "SELECT exchange_hits, exchange_stores, exchange_bytes_served \
+         FROM vgi_result_cache_stats()",
+    )
+    .await?
+    .collect()
+    .await?;
+    let value = |column: usize| {
+        batches[0]
+            .column(column)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+            .expect("exchange cache counter is UInt64")
+            .value(0)
+    };
+    Ok((value(0), value(1), value(2)))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_exchange_results_are_cached_per_input_batch() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    let query = "SELECT x FROM ex.main.cached_echo(\
+                 (SELECT x FROM range(5) t(x))) ORDER BY x";
+    let first = vgi_datafusion::sql(&ctx, query).await?.collect().await?;
+    let first = datafusion::arrow::util::pretty::pretty_format_batches(&first)?.to_string();
+    for value in 0..5 {
+        assert!(
+            first.contains(&format!("| {value} ")),
+            "missing {value}:\n{first}"
+        );
+    }
+    let (_, first_inserts, first_entries) = result_cache_counters(&ctx).await?;
+    assert!(first_inserts > 0 && first_entries > 0);
+    let (cold_exchange_hits, cold_exchange_stores, cold_exchange_bytes) =
+        exchange_cache_counters(&ctx).await?;
+    assert_eq!(cold_exchange_hits, 0);
+    assert!(cold_exchange_stores > 0);
+    assert_eq!(cold_exchange_bytes, 0);
+
+    let second = vgi_datafusion::sql(&ctx, query).await?.collect().await?;
+    let second = datafusion::arrow::util::pretty::pretty_format_batches(&second)?.to_string();
+    assert_eq!(second, first);
+    let (hits, second_inserts, second_entries) = result_cache_counters(&ctx).await?;
+    assert!(hits > 0, "the warm exchange did not probe a cached batch");
+    assert_eq!(second_inserts, first_inserts, "a hit must not store again");
+    assert_eq!(second_entries, first_entries);
+    let (warm_exchange_hits, warm_exchange_stores, warm_exchange_bytes) =
+        exchange_cache_counters(&ctx).await?;
+    assert!(warm_exchange_hits > cold_exchange_hits);
+    assert_eq!(warm_exchange_stores, cold_exchange_stores);
+    assert!(warm_exchange_bytes > cold_exchange_bytes);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scalar_per_value_cache_serves_full_and_partial_hits() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    let scalar_sum = |sql: &'static str| {
+        let ctx = ctx.clone();
+        async move {
+            let batches = vgi_datafusion::sql(&ctx, sql).await?.collect().await?;
+            Ok::<i64, datafusion::error::DataFusionError>(
+                batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                    .expect("sum is Int64")
+                    .value(0),
+            )
+        }
+    };
+
+    // The first call exchanges all nine rows because cache capability is only
+    // visible on its answer, then stores the three distinct tuple outputs.
+    assert_eq!(
+        scalar_sum("SELECT sum(ex.cached_double_scalar(x % 3)) FROM range(9) t(x)").await?,
+        18
+    );
+    let (_, cold_inserts, cold_entries) = result_cache_counters(&ctx).await?;
+    assert_eq!(cold_inserts, 3);
+    assert_eq!(cold_entries, 3);
+    assert_eq!(exchange_cache_counters(&ctx).await?, (0, 3, 0));
+
+    // A differently sized batch over the same values is a full per-value hit.
+    assert_eq!(
+        scalar_sum("SELECT sum(ex.cached_double_scalar(x % 3)) FROM range(6) t(x)").await?,
+        12
+    );
+    let (warm_hits, warm_inserts, _) = result_cache_counters(&ctx).await?;
+    assert!(warm_hits >= 3);
+    assert_eq!(warm_inserts, cold_inserts);
+    let (warm_exchange_hits, warm_exchange_stores, warm_exchange_bytes) =
+        exchange_cache_counters(&ctx).await?;
+    assert!(warm_exchange_hits >= 3);
+    assert_eq!(warm_exchange_stores, 3);
+    assert!(warm_exchange_bytes > 0);
+
+    // Reuse {0,1,2}, compute only the new tuple {3}, and preserve duplicate
+    // row order/cardinality while assembling the partial hit.
+    assert_eq!(
+        scalar_sum("SELECT sum(ex.cached_double_scalar(x % 4)) FROM range(8) t(x)").await?,
+        24
+    );
+    let (partial_hits, partial_inserts, partial_entries) = result_cache_counters(&ctx).await?;
+    assert!(partial_hits >= warm_hits + 3);
+    assert_eq!(partial_inserts, cold_inserts + 1);
+    assert_eq!(partial_entries, cold_entries + 1);
+    let (partial_exchange_hits, partial_exchange_stores, partial_exchange_bytes) =
+        exchange_cache_counters(&ctx).await?;
+    assert!(partial_exchange_hits >= warm_exchange_hits + 3);
+    assert_eq!(partial_exchange_stores, warm_exchange_stores + 1);
+    assert!(partial_exchange_bytes > warm_exchange_bytes);
+
+    // Bind-time constants are a cache-key dimension, so +20 cannot cross-serve
+    // the +10 values even though their row inputs are identical.
+    assert_eq!(
+        scalar_sum("SELECT sum(ex.cached_add_const(x % 3, 10)) FROM range(6) t(x)").await?,
+        66
+    );
+    assert_eq!(
+        scalar_sum("SELECT sum(ex.cached_add_const(x % 3, 20)) FROM range(6) t(x)").await?,
+        126
+    );
+
+    // Heap strings and NULLs survive the one-row cache slices and warm gather.
+    let labels = "SELECT ex.cached_label(x - 1) AS label FROM range(4) t(x) ORDER BY x";
+    let cold = vgi_datafusion::sql(&ctx, labels).await?.collect().await?;
+    let cold = datafusion::arrow::util::pretty::pretty_format_batches(&cold)?.to_string();
+    let hits_before = result_cache_counters(&ctx).await?.0;
+    let warm = vgi_datafusion::sql(&ctx, labels).await?.collect().await?;
+    let warm = datafusion::arrow::util::pretty::pretty_format_batches(&warm)?.to_string();
+    assert_eq!(warm, cold);
+    assert!(cold.contains("lbl-0") && cold.contains("lbl-2"));
+    assert!(result_cache_counters(&ctx).await?.0 >= hits_before + 4);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_argument_varargs_reaches_worker_validation() -> datafusion::error::Result<()> {
+    let Some(w) = worker() else { return Ok(()) };
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(&ctx, &format!("ATTACH 'example?location={w}' AS ex")).await?;
+
+    let error = vgi_datafusion::sql(&ctx, "SELECT ex.main.sum_values()")
+        .await?
+        .collect()
+        .await
+        .expect_err("the worker rejects an empty variadic tail");
+    assert!(
+        error.to_string().contains("requires at least 1 value"),
+        "worker validation was not preserved: {error}"
+    );
+    Ok(())
+}
+
 /// ConstParams use their declared types and the overload matching this call.
 ///
 /// This covers three distinct failure modes: an all-const scalar needs a
