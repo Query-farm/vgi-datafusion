@@ -1619,6 +1619,17 @@ impl TableProvider for VgiCatalogTableProvider {
         TableType::Base
     }
 
+    fn statistics(&self) -> Option<Statistics> {
+        if self.at.is_some() {
+            return None;
+        }
+        crate::cardinality_statistics(
+            &self.output_schema,
+            self.info.cardinality_estimate.0,
+            self.info.cardinality_max.0,
+        )
+    }
+
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
@@ -1636,6 +1647,25 @@ impl TableProvider for VgiCatalogTableProvider {
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         self.enforce_required_filters(filters)?;
+        if self.at.is_none()
+            && (self.info.cardinality_estimate.0.is_some() || self.info.cardinality_max.0.is_some())
+        {
+            let mut event = crate::VgiEvent::new("vgi.cardinality.inlined");
+            event.catalog = Some(self.catalog.clone());
+            event.function = Some(format!("{}.{}", self.schema_name, self.info.name));
+            event.message = Some(format!(
+                "estimate={} max={}",
+                self.info
+                    .cardinality_estimate
+                    .0
+                    .map_or_else(|| "unknown".to_string(), |value| value.to_string()),
+                self.info
+                    .cardinality_max
+                    .0
+                    .map_or_else(|| "unknown".to_string(), |value| value.to_string())
+            ));
+            self.conn.runtime().emit(event);
+        }
         if self.filters_prune_table(state, filters).await? {
             let schema = match projection {
                 Some(indices) => Arc::new(self.output_schema.project(indices)?),

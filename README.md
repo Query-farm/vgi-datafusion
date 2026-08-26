@@ -263,9 +263,10 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
 - **Streaming positions.** A split that names a start position without an end
   now declares `Boundedness::Unbounded`. Checkpoint/resume policy, reconnect,
   backpressure, and long-running soak coverage still need production hardening.
-- **Partitioning and locality.** Partition bounds and column statistics feed
-  DataFusion statistics, and within-split ordering is advertised when a physical
-  partition contains exactly one split. VGI partition transforms are not mapped
+- **Partitioning and locality.** Catalog-inlined cardinality, partition bounds,
+  and column statistics feed DataFusion's provider and physical statistics APIs,
+  and within-split ordering is advertised when a physical partition contains
+  exactly one split. VGI partition transforms are not mapped
   blindly to DataFusion hash partitioning because their hash and partition-number
   semantics differ. A host locality hook receives worker location hints, but the
   standalone DataFusion CLI has no distributed scheduler-affinity implementation.

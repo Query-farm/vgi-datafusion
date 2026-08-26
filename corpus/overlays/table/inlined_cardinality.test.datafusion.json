@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 4,
+      "original_sql": "EXPLAIN (FORMAT JSON) SELECT * FROM example.data.cardinality_inlined_table;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 exposes provider and physical cardinality through TableProvider::statistics and StatisticsContext, but its EXPLAIN formats do not render estimated cardinality; the focused cardinality test asserts Exact(10000) through both native APIs."
+    },
+    {
+      "record": 8,
+      "original_sql": "EXPLAIN (FORMAT JSON) SELECT * FROM example.data.ten_thousand_table;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 does not support DuckDB's EXPLAIN JSON format or render estimated cardinality in its other EXPLAIN formats; this is an engine presentation boundary, not a VGI protocol adaptation."
+    }
+  ]
+}

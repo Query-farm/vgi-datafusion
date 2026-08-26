@@ -945,6 +945,9 @@ pub struct VgiTableProvider {
     sample: Option<Sample>,
     /// Whether DataFusion may omit its local copy of a pushed filter.
     filters_exactly_applied: bool,
+    /// Catalog-discovery cardinality inlined on this table, if present.
+    cardinality_estimate: Option<i64>,
+    cardinality_max: Option<i64>,
     /// Catalog version captured by the bind and included in cache identity.
     catalog_version: i64,
     /// Whether the planning bind declared a secret dependency. Secret resolvers
@@ -1138,6 +1141,8 @@ impl VgiTableProvider {
             sampling_pushdown: capabilities.sampling_pushdown,
             sample: None,
             filters_exactly_applied: capabilities.filters_exactly_applied,
+            cardinality_estimate: None,
+            cardinality_max: None,
             catalog_version,
             secret_dependent,
             at: None,
@@ -1160,6 +1165,11 @@ impl VgiTableProvider {
         let bind_at = at.clone();
         let primary_keys = info.primary_key_constraints.clone();
         let unique_keys = info.unique_constraints.clone();
+        let cardinality_estimate = at
+            .is_none()
+            .then_some(info.cardinality_estimate.0)
+            .flatten();
+        let cardinality_max = at.is_none().then_some(info.cardinality_max.0).flatten();
 
         let (
             function,
@@ -1250,6 +1260,8 @@ impl VgiTableProvider {
             sampling_pushdown: capabilities.sampling_pushdown,
             sample: None,
             filters_exactly_applied: capabilities.filters_exactly_applied,
+            cardinality_estimate,
+            cardinality_max,
             catalog_version,
             secret_dependent,
             at,
@@ -1304,6 +1316,8 @@ impl VgiTableProvider {
             sampling_pushdown: capabilities.sampling_pushdown,
             sample: None,
             filters_exactly_applied: capabilities.filters_exactly_applied,
+            cardinality_estimate: None,
+            cardinality_max: None,
             catalog_version,
             secret_dependent,
             at: None,
@@ -1378,6 +1392,8 @@ impl VgiTableProvider {
             sampling_pushdown: capabilities.sampling_pushdown,
             sample: None,
             filters_exactly_applied: capabilities.filters_exactly_applied,
+            cardinality_estimate: None,
+            cardinality_max: None,
             catalog_version,
             secret_dependent,
             at: None,
@@ -1869,6 +1885,14 @@ impl TableProvider for VgiTableProvider {
         TableType::Base
     }
 
+    fn statistics(&self) -> Option<Statistics> {
+        cardinality_statistics(
+            &self.output_schema,
+            self.cardinality_estimate,
+            self.cardinality_max,
+        )
+    }
+
     /// A pushable filter is at least `Inexact`, so DataFusion supplies it to
     /// [`scan`](Self::scan) for local statistics pruning and re-applies it above
     /// the scan. Workers that did not advertise filter pushdown receive no wire
@@ -1986,6 +2010,8 @@ impl TableProvider for VgiTableProvider {
             self.catalog_version,
             self.at.clone(),
             self.sample,
+            self.cardinality_estimate,
+            self.cardinality_max,
             self.column_mapping.clone(),
             result_cache_ineligible,
         )))
@@ -2382,6 +2408,8 @@ impl VgiScanExec {
         catalog_version: i64,
         at: Option<vgi_client::At>,
         sample: Option<Sample>,
+        cardinality_estimate: Option<i64>,
+        cardinality_max: Option<i64>,
         column_mapping: Option<Arc<HashMap<String, String>>>,
         result_cache_ineligible: Option<crate::runtime::CacheIneligibleReason>,
     ) -> Self {
@@ -2436,8 +2464,11 @@ impl VgiScanExec {
                 (overall, partitions)
             }
             None => {
-                let unknown = Arc::new(Statistics::new_unknown(&schema));
-                (Arc::clone(&unknown), vec![unknown; partitions.max(1)])
+                let declared = Arc::new(
+                    cardinality_statistics(&schema, cardinality_estimate, cardinality_max)
+                        .unwrap_or_else(|| Statistics::new_unknown(&schema)),
+                );
+                (Arc::clone(&declared), vec![declared; partitions.max(1)])
             }
         };
         let mut cache_ineligible_reason = result_cache_ineligible
@@ -3652,15 +3683,8 @@ pub(crate) fn statistics_for_catalog_table(
     maximum: Option<i64>,
     column_mapping: Option<&HashMap<String, String>>,
 ) -> Statistics {
-    let num_rows = match (
-        estimate.and_then(|value| usize::try_from(value).ok()),
-        maximum.and_then(|value| usize::try_from(value).ok()),
-    ) {
-        (Some(estimate), Some(maximum)) if estimate == maximum => Precision::Exact(estimate),
-        (Some(estimate), _) => Precision::Inexact(estimate),
-        _ => Precision::Absent,
-    };
-    let mut statistics = statistics_with_estimates(schema, num_rows, Precision::Absent);
+    let mut statistics = cardinality_statistics(schema, estimate, maximum)
+        .unwrap_or_else(|| Statistics::new_unknown(schema));
     let mut columns = HashMap::new();
     if let Some(names) = batch
         .column_by_name("column_name")
@@ -3722,6 +3746,34 @@ pub(crate) fn statistics_for_catalog_table(
         })
         .collect();
     statistics
+}
+
+/// Convert VGI's estimate/maximum pair into DataFusion's cardinality precision.
+///
+/// An equal estimate and maximum is exact; an estimate without an equal bound
+/// remains inexact. A maximum alone is retained as an advertised metadata
+/// presence but cannot be represented as DataFusion's row-count estimate.
+pub(crate) fn cardinality_statistics(
+    schema: &SchemaRef,
+    estimate: Option<i64>,
+    maximum: Option<i64>,
+) -> Option<Statistics> {
+    if estimate.is_none() && maximum.is_none() {
+        return None;
+    }
+    let num_rows = match (
+        estimate.and_then(|value| usize::try_from(value).ok()),
+        maximum.and_then(|value| usize::try_from(value).ok()),
+    ) {
+        (Some(estimate), Some(maximum)) if estimate == maximum => Precision::Exact(estimate),
+        (Some(estimate), _) => Precision::Inexact(estimate),
+        _ => Precision::Absent,
+    };
+    Some(statistics_with_estimates(
+        schema,
+        num_rows,
+        Precision::Absent,
+    ))
 }
 
 pub(crate) fn filters_prune_statistics(
