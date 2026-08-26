@@ -4,7 +4,7 @@
 
 mod common;
 
-use datafusion::arrow::array::{Float64Array, Int64Array, StringArray, UInt16Array};
+use datafusion::arrow::array::{Array, Float64Array, Int64Array, StringArray, UInt16Array};
 use datafusion::prelude::SessionContext;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -113,5 +113,18 @@ async fn arrow_unsigned_and_named_struct_spellings_reach_scalar_overloads(
         .downcast_ref::<datafusion::arrow::array::BooleanArray>()
         .expect("IS NULL returns Boolean")
         .value(0));
+
+    // A bare NULL in an AnyArrow vararg group adopts the unambiguous type of
+    // its concrete peers before binding and remains null through the RPC.
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT example.sum_values(NULL, 2, 3), \
+                example.sum_values(1, NULL, 3)",
+    )
+    .await?
+    .collect()
+    .await?;
+    assert!(batches[0].column(0).is_null(0));
+    assert!(batches[0].column(1).is_null(0));
     Ok(())
 }

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 20,
+      "original_sql": "SELECT COUNT(*) >= 1 FROM duckdb_logs() WHERE type = 'VGI'\n    AND message LIKE '%result_cache.hit%' AND message LIKE '%tier=memory%';",
+      "kind": "out_of_scope",
+      "reason": "This assertion proves a whole-file hash crossover from the unsupported disk spill tier back into memory."
+    }
+  ]
+}

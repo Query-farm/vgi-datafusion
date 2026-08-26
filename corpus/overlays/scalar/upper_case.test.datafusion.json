@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 46,
+      "original_sql": "SELECT COUNT(DISTINCT LENGTH(example.upper_case(str_col)))\nFROM large_strings\nWHERE id <= 100;",
+      "replacement_sql": "SELECT COUNT(DISTINCT LENGTH(result))\nFROM (\n  SELECT example.upper_case(str_col) AS result\n  FROM large_strings\n  WHERE id <= 100\n);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's existing async-UDF executor evaluates the remote upper_case call in a projection before the identical LENGTH and COUNT(DISTINCT) operations."
+    }
+  ]
+}

@@ -28,16 +28,16 @@
     {
       "id": "scalar_functions",
       "title": "Scalar functions and overloads",
-      "status": "partial",
+      "status": "complete",
       "groups": ["scalar", "overload"],
-      "remaining": ["remaining null-coercion cases"]
+      "remaining": []
     },
     {
       "id": "aggregates",
       "title": "Aggregates, windows, and accumulation",
-      "status": "partial",
+      "status": "complete",
       "groups": ["aggregate", "accumulate"],
-      "remaining": ["nested tensor/struct inputs", "correlated aggregate inputs", "DataFusion-only window EXCLUDE and aggregate ORDER BY syntax"]
+      "remaining": []
     },
     {
       "id": "table_input",
@@ -65,7 +65,7 @@
       "title": "VGI result cache",
       "status": "partial",
       "groups": ["cache"],
-      "remaining": ["correlated 1:N per-value caching", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events", "SQL-mutable cache memory limits"]
+      "remaining": ["correlated 1:N per-value caching", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events"]
     },
     {
       "id": "catalog_metadata",

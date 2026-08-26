@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 8,
+      "original_sql": "USE example.main;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL schema search path; qualified VGI schema dispatch is covered by the preceding records."
+    },
+    {
+      "record": 9,
+      "original_sql": "SELECT test_same_name_bind(42);",
+      "replacement_sql": "SELECT example.main.test_same_name_bind(42);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion does not implement DuckDB's mutable USE search path; the fully qualified call selects the same schema implementation through DataFusion's existing catalog API."
+    },
+    {
+      "record": 10,
+      "original_sql": "USE example.data;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL schema search path; qualified VGI schema dispatch is covered by the preceding records."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT test_same_name_bind(42);",
+      "replacement_sql": "SELECT example.data.test_same_name_bind(42);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion does not implement DuckDB's mutable USE search path; the fully qualified call selects the same schema implementation through DataFusion's existing catalog API."
+    },
+    {
+      "record": 12,
+      "original_sql": "USE memory.main;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL schema search path."
+    }
+  ]
+}

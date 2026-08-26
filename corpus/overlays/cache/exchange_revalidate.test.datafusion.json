@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 6,
+      "original_sql": "CALL truncate_duckdb_logs();",
+      "replacement_sql": "SELECT vgi_logs_clear();",
+      "kind": "equivalent_sql",
+      "reason": "The DataFusion adapter clears its bounded SQL-visible VGI event history with vgi_logs_clear()."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'result_cache.store'\n  AND message LIKE '%cached_reval_echo%';",
+      "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'result_cache.store'\n  AND message LIKE '%cached_reval_echo%';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field."
+    },
+    {
+      "record": 9,
+      "original_sql": "CALL truncate_duckdb_logs();",
+      "replacement_sql": "SELECT vgi_logs_clear();",
+      "kind": "equivalent_sql",
+      "reason": "The DataFusion adapter clears its bounded SQL-visible VGI event history with vgi_logs_clear()."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND regexp_extract(message, '''event'': ([a-z_.]+)', 1) = 'result_cache.revalidate'\n  AND message LIKE '%cached_reval_echo%'\n  AND message LIKE '%not_modified%';",
+      "replacement_sql": "SELECT count(*) > 0\nFROM duckdb_logs()\nWHERE type = 'VGI'\n  AND array_element(regexp_match(message, '^([a-z_.]+)'), 1) = 'result_cache.revalidate'\n  AND message LIKE '%cached_reval_echo%'\n  AND message LIKE '%not_modified%';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field."
+    }
+  ]
+}

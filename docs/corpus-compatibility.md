@@ -138,7 +138,7 @@ transport equivalence is itself part of completion.
 
 ## Current baseline — 2026-08-26
 
-The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,161
+The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,207
 measured positive records. The historical `subprocess.json` filename is kept
 for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
@@ -151,17 +151,17 @@ statistics also feed DataFusion's existing pruning API.
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 3,362 / 4,161 (80.8%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,271 / 2,455 (92.5%) |
-| Exact results | 1,567 | 2,161 |
-| Rendering-equivalent results | 37 | 110 |
-| Genuine value differences | 149 | 184 |
-| Not-applicable records reported separately | 607 | 560 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,462 / 4,207 (82.3%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,315 / 2,483 (93.2%) |
+| Exact results | 1,567 | 2,199 |
+| Rendering-equivalent results | 37 | 116 |
+| Genuine value differences | 149 | 168 |
+| Not-applicable records reported separately | 607 | 514 |
 | Timeouts | 0 | 0 |
 
-The HTTP run executes the same 3,362 records with 2,161 exact, 110
-rendering-equivalent, and 184 different results. Both transports have zero
-timeouts and identical completed classifications. `cache/basic.test` is fully
+The HTTP run executes the same 3,462 records with 2,199 exact, 116
+rendering-equivalent, and 168 different results. Both transports have zero
+timeouts and byte-identical reports. `cache/basic.test` is fully
 executable with all 14 value checks
 exact. The settings slice is 42/42 with 14/14 exact, while reviewed
 required-filter files are 45/45 applicable records with 25/25 exact on both
@@ -208,8 +208,12 @@ reviewed `out_of_scope` records rather than adapter failures.
 Reviewed scalar overlays now use DataFusion-native equivalents for DuckDB SQL
 spellings rather than adapter special cases: `arrow_cast` for unsigned Arrow
 types, `named_struct` for typed struct values, `array_length` for list
-cardinality, and hex encoding for binary byte length. The exact original SQL is
-still guarded in each sidecar, so upstream drift remains visible.
+cardinality, and hex encoding for binary byte length. Untyped NULLs in AnyArrow
+varargs adopt a type only when all concrete peers have the identical Arrow type;
+mixed and all-null calls remain worker-authoritative. The scalar/overload area
+now executes 565/565 applicable records with zero failures on both transports.
+The exact original SQL is still guarded in each sidecar, so upstream drift
+remains visible.
 
 Focused operability coverage also verifies the positive `rpc_timeout` ATTACH
 override, unfinished-scan Drop cancellation and failed-stream pool poisoning,
@@ -231,7 +235,7 @@ The following order maximizes useful coverage while keeping new DataFusion
 engine work to a minimum:
 
 1. **Corpus adaptation and classification.** The current machine-readable
-   baseline records 18 DuckDB/extension-surface failures and 102 parser
+   baseline records 17 DuckDB/extension-surface failures and 101 parser
    failures. Continue with reviewable
    equivalents for metadata queries and harmless dialect differences. Keep
    DuckDB storage internals and its hidden virtual-rowid sentinel `out_of_scope`
@@ -248,9 +252,11 @@ engine work to a minimum:
    revocation eviction. Unordered buffered whole-input caching now uses a
    duplicate-preserving multiset key, atomic finalize commit, bounded capture,
    conditional revalidation, and lifecycle events over both transports.
-   Correlated 1:N per-value entries, disk persistence/spilling, compression,
-   stale-while-revalidate, worker-log forwarding, and SQL-mutable cache memory
-   limits remain. The promoted baseline executes 563/729 cache records.
+   Three SQL settings now update the live per-entry, total-byte, and entry-count
+   bounds, immediately evicting entries that no longer fit; `RESET` restores
+   the session constructor values. Correlated 1:N per-value entries, disk
+   persistence/spilling, compression, stale-while-revalidate, and worker-log
+   forwarding remain. The promoted baseline executes 629/783 cache records.
 4. **Table-in/out engine boundary.** Correlated LATERAL calls and wide table
    subqueries remain the predominant engine-boundary failures. The adapter
    accepts the single-column expression shape DataFusion exposes naturally,
@@ -266,7 +272,8 @@ engine work to a minimum:
    inventory, overloads, argument docs/constraints, tags, categories, and global
    nominations use retained worker metadata; global publication has explicit
    opt-out and alias-safe lifecycle handling. The promoted full baseline records
-   89/90 for catalog, 19/19 for macros, and 14/14 for views.
+   90/90 for catalog, 19/19 for macros, and 14/14 for views; the complete
+   catalog/metadata capability area is 151/151 applicable records.
 6. **Secrets and authenticated fixtures.** Deterministic read-only consumer
    tests cover table, lazy table, scalar, aggregate, and streaming binds; two
    same-type scopes; duplicate-name rejection; Bearer/OAuth identity isolation;
@@ -275,10 +282,11 @@ engine work to a minimum:
    blocked/host-policy lane.
 7. **Aggregate correctness.** Zero-argument, named-only, ANY, and variadic
    signatures now reach authoritative worker validation, including grouped and
-   window execution over empty/nonempty inputs. Every comparable result in the
-   focused ordinary aggregate slice agrees. Nested tensor/struct and correlated
-   inputs remain, while window `EXCLUDE` and aggregate-local `ORDER BY` are
-   classified DataFusion boundaries.
+   window execution over empty/nonempty inputs. Nested tensor/struct aggregation
+   and round trips use DataFusion's existing `named_struct`, `get_field`, and
+   SELECT-list `unnest` APIs. The aggregate/accumulation area now executes
+   208/208 applicable records; window `EXCLUDE` and aggregate-local `ORDER BY`
+   remain classified DataFusion syntax boundaries.
 8. **COPY and mutations.** Some shared COPY records can be adapted to
    DataFusion-native host file reads/writes, but the adapter does not implement
    VGI COPY RPCs. Writable tables (`INSERT`, `UPDATE`, `DELETE`, `RETURNING`)

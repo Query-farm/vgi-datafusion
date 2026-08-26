@@ -24,18 +24,30 @@ use datafusion::common::{DataFusionError, Result as DFResult, ScalarValue};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VgiSettings {
     values: BTreeMap<String, String>,
+    adapter_limit_defaults: vgi_client::CacheLimits,
 }
 
 pub(crate) const EXCHANGE_INPUT_DEDUP: &str = "vgi_exchange_input_dedup";
 pub(crate) const RESULT_CACHE_PER_VALUE: &str = "vgi_result_cache_per_value";
+pub(crate) const RESULT_CACHE_MAX_ENTRY_BYTES: &str = "vgi_result_cache_max_entry_bytes";
+pub(crate) const RESULT_CACHE_MAX_BYTES: &str = "vgi_result_cache_max_bytes";
+pub(crate) const RESULT_CACHE_MAX_ENTRIES: &str = "vgi_result_cache_max_entries";
 
 const ADAPTER_BOOLEAN_SETTINGS: [&str; 2] = [EXCHANGE_INPUT_DEDUP, RESULT_CACHE_PER_VALUE];
+const ADAPTER_USIZE_SETTINGS: [&str; 3] = [
+    RESULT_CACHE_MAX_ENTRY_BYTES,
+    RESULT_CACHE_MAX_BYTES,
+    RESULT_CACHE_MAX_ENTRIES,
+];
 
 /// Typed snapshot of settings consumed by the DataFusion adapter itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VgiAdapterSettings {
     exchange_input_dedup: bool,
     result_cache_per_value: bool,
+    result_cache_max_entry_bytes: usize,
+    result_cache_max_bytes: usize,
+    result_cache_max_entries: usize,
 }
 
 impl VgiAdapterSettings {
@@ -46,26 +58,51 @@ impl VgiAdapterSettings {
     pub(crate) fn result_cache_per_value(self) -> bool {
         self.result_cache_per_value
     }
-}
 
-impl Default for VgiSettings {
-    fn default() -> Self {
-        Self {
-            values: ADAPTER_BOOLEAN_SETTINGS
-                .into_iter()
-                .map(|name| (name.to_string(), "true".to_string()))
-                .collect(),
+    pub(crate) fn result_cache_limits(
+        self,
+        default_ttl: std::time::Duration,
+    ) -> vgi_client::CacheLimits {
+        vgi_client::CacheLimits {
+            max_entry_bytes: self.result_cache_max_entry_bytes,
+            max_total_bytes: self.result_cache_max_bytes,
+            max_entries: self.result_cache_max_entries,
+            default_ttl,
         }
     }
 }
 
+impl Default for VgiSettings {
+    fn default() -> Self {
+        Self::with_cache_limits(vgi_client::CacheLimits::default())
+    }
+}
+
 impl VgiSettings {
+    pub(crate) fn with_cache_limits(limits: vgi_client::CacheLimits) -> Self {
+        Self {
+            values: ADAPTER_BOOLEAN_SETTINGS
+                .into_iter()
+                .chain(ADAPTER_USIZE_SETTINGS)
+                .map(|name| {
+                    (
+                        name.to_string(),
+                        adapter_default(name, limits).expect("known adapter setting"),
+                    )
+                })
+                .collect(),
+            adapter_limit_defaults: limits,
+        }
+    }
+
     /// Set one VGI setting without going through SQL.
     pub fn set_value(&mut self, name: impl Into<String>, value: impl Into<String>) -> DFResult<()> {
         let name = normalize_name(&name.into())?;
         let value = value.into();
-        let value = if is_adapter_setting(&name) {
+        let value = if is_adapter_boolean_setting(&name) {
             parse_bool(&name, &value)?.to_string()
+        } else if is_adapter_usize_setting(&name) {
+            parse_usize(&name, &value)?.to_string()
         } else {
             value
         };
@@ -75,12 +112,12 @@ impl VgiSettings {
 
     /// Reset a setting to its default.
     ///
-    /// Dynamic worker settings are removed. Adapter-owned booleans are
-    /// restored to `true`.
+    /// Dynamic worker settings are removed. Adapter-owned settings are
+    /// restored to their constructor defaults.
     pub fn reset_value(&mut self, name: &str) -> bool {
         let name = name.to_ascii_lowercase();
-        if is_adapter_setting(&name) {
-            return self.values.insert(name, "true".to_string()).is_some();
+        if let Some(default) = adapter_default(&name, self.adapter_limit_defaults) {
+            return self.values.insert(name, default).is_some();
         }
         self.values.remove(&name).is_some()
     }
@@ -100,6 +137,18 @@ impl VgiSettings {
         VgiAdapterSettings {
             exchange_input_dedup: self.adapter_bool(EXCHANGE_INPUT_DEDUP),
             result_cache_per_value: self.adapter_bool(RESULT_CACHE_PER_VALUE),
+            result_cache_max_entry_bytes: self.adapter_usize(
+                RESULT_CACHE_MAX_ENTRY_BYTES,
+                self.adapter_limit_defaults.max_entry_bytes,
+            ),
+            result_cache_max_bytes: self.adapter_usize(
+                RESULT_CACHE_MAX_BYTES,
+                self.adapter_limit_defaults.max_total_bytes,
+            ),
+            result_cache_max_entries: self.adapter_usize(
+                RESULT_CACHE_MAX_ENTRIES,
+                self.adapter_limit_defaults.max_entries,
+            ),
         }
     }
 
@@ -109,6 +158,12 @@ impl VgiSettings {
         self.get(name)
             .and_then(|value| value.parse::<bool>().ok())
             .unwrap_or(true)
+    }
+
+    fn adapter_usize(&self, name: &str, default: usize) -> usize {
+        self.get(name)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(default)
     }
 }
 
@@ -160,9 +215,31 @@ fn normalize_name(name: &str) -> DFResult<String> {
 }
 
 pub(crate) fn is_adapter_setting(name: &str) -> bool {
+    is_adapter_boolean_setting(name) || is_adapter_usize_setting(name)
+}
+
+fn is_adapter_boolean_setting(name: &str) -> bool {
     ADAPTER_BOOLEAN_SETTINGS
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+fn is_adapter_usize_setting(name: &str) -> bool {
+    ADAPTER_USIZE_SETTINGS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+fn adapter_default(name: &str, limits: vgi_client::CacheLimits) -> Option<String> {
+    if is_adapter_boolean_setting(name) {
+        return Some("true".to_string());
+    }
+    match name {
+        RESULT_CACHE_MAX_ENTRY_BYTES => Some(limits.max_entry_bytes.to_string()),
+        RESULT_CACHE_MAX_BYTES => Some(limits.max_total_bytes.to_string()),
+        RESULT_CACHE_MAX_ENTRIES => Some(limits.max_entries.to_string()),
+        _ => None,
+    }
 }
 
 fn parse_bool(name: &str, value: &str) -> DFResult<bool> {
@@ -173,6 +250,14 @@ fn parse_bool(name: &str, value: &str) -> DFResult<bool> {
             "VGI adapter setting `{name}` expects a boolean, found `{value}`"
         ))),
     }
+}
+
+fn parse_usize(name: &str, value: &str) -> DFResult<usize> {
+    value.trim().parse::<usize>().map_err(|_| {
+        DataFusionError::Configuration(format!(
+            "VGI adapter setting `{name}` expects a non-negative integer that fits this host, found `{value}`"
+        ))
+    })
 }
 
 pub(crate) fn encode_settings(
@@ -307,6 +392,9 @@ mod tests {
             VgiAdapterSettings {
                 exchange_input_dedup: true,
                 result_cache_per_value: true,
+                result_cache_max_entry_bytes: 64 * 1024 * 1024,
+                result_cache_max_bytes: 256 * 1024 * 1024,
+                result_cache_max_entries: 131_072,
             }
         );
         let keys = settings
@@ -316,17 +404,39 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(keys.contains(&format!("vgi.{EXCHANGE_INPUT_DEDUP}")));
         assert!(keys.contains(&format!("vgi.{RESULT_CACHE_PER_VALUE}")));
+        assert!(keys.contains(&format!("vgi.{RESULT_CACHE_MAX_ENTRY_BYTES}")));
+        assert!(keys.contains(&format!("vgi.{RESULT_CACHE_MAX_BYTES}")));
+        assert!(keys.contains(&format!("vgi.{RESULT_CACHE_MAX_ENTRIES}")));
 
         settings.set_value(EXCHANGE_INPUT_DEDUP, "OFF").unwrap();
         settings.set_value(RESULT_CACHE_PER_VALUE, "false").unwrap();
+        settings
+            .set_value(RESULT_CACHE_MAX_ENTRY_BYTES, "4096")
+            .unwrap();
         assert!(!settings.adapter_settings().exchange_input_dedup());
         assert!(!settings.adapter_settings().result_cache_per_value());
+        assert_eq!(
+            settings
+                .adapter_settings()
+                .result_cache_limits(std::time::Duration::ZERO)
+                .max_entry_bytes,
+            4096
+        );
 
         assert!(settings.reset_value(EXCHANGE_INPUT_DEDUP));
         assert!(settings.reset_value(RESULT_CACHE_PER_VALUE));
+        assert!(settings.reset_value(RESULT_CACHE_MAX_ENTRY_BYTES));
         assert!(settings.adapter_settings().exchange_input_dedup());
         assert!(settings.adapter_settings().result_cache_per_value());
+        assert_eq!(
+            settings
+                .adapter_settings()
+                .result_cache_limits(std::time::Duration::ZERO)
+                .max_entry_bytes,
+            vgi_client::CacheLimits::default().max_entry_bytes
+        );
         assert!(settings.set_value(EXCHANGE_INPUT_DEDUP, "maybe").is_err());
+        assert!(settings.set_value(RESULT_CACHE_MAX_BYTES, "-1").is_err());
     }
 
     #[test]

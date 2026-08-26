@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 14,
+      "original_sql": "SELECT COUNT(DISTINCT example.hash_seed(7)) FROM (SELECT unnest(generate_series(1, 100)) AS i);",
+      "replacement_sql": "SELECT COUNT(DISTINCT result) FROM (\n  SELECT example.hash_seed(7) AS result\n  FROM (SELECT unnest(generate_series(1, 100)) AS i)\n);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's existing async-UDF executor evaluates remote functions in a projection; the derived table exposes that projection before the identical COUNT(DISTINCT) aggregate."
+    }
+  ]
+}

@@ -238,6 +238,13 @@ pub(crate) fn run_exchange(
         let attempt = (|| -> DFResult<_> {
             let mut exchange = client.open_exchange(&bound, &opts).map_err(to_df)?;
             let answer = exchange.send(&units[index].input).map_err(to_df)?;
+            emit_table_input_write(
+                conn,
+                catalog,
+                schema_name,
+                function,
+                units[index].input.num_rows(),
+            );
             let control = exchange.cache_control().cloned();
             exchange.close().map_err(to_df)?;
             let answer = answer.ok_or_else(|| {
@@ -356,6 +363,13 @@ pub(crate) fn run_exchange(
             .map_err(to_df)?;
         for index in direct {
             let answer = exchange.send(&units[index].input).map_err(to_df)?;
+            emit_table_input_write(
+                conn,
+                catalog,
+                schema_name,
+                function,
+                units[index].input.num_rows(),
+            );
             let control = exchange.cache_control().cloned();
             if let Some(answer) = answer {
                 if let Some(key) = units[index].key.as_ref() {
@@ -442,13 +456,15 @@ pub(crate) fn run_exchange(
         let mut exchange = client
             .open_exchange(&bound, &ScanOptions::default())
             .map_err(to_df)?;
-        units[index].output = Some(
-            exchange
-                .send(&units[index].input)
-                .map_err(to_df)?
-                .into_iter()
-                .collect(),
+        let answer = exchange.send(&units[index].input).map_err(to_df)?;
+        emit_table_input_write(
+            conn,
+            catalog,
+            schema_name,
+            function,
+            units[index].input.num_rows(),
         );
+        units[index].output = Some(answer.into_iter().collect());
         exchange.close().map_err(to_df)?;
     }
 
@@ -624,6 +640,25 @@ pub(crate) fn emit_exchange_cache_event(
     event.catalog = Some(catalog.to_string());
     event.function = Some(format!("{schema_name}.{function}"));
     event.message = message;
+    conn.runtime.emit(event);
+}
+
+/// Record one table-input batch only after the worker accepted the send.
+///
+/// Cardinality and function identity are useful for exchange diagnostics;
+/// input values, bind arguments, execution ids, and secrets are deliberately
+/// excluded from the event.
+pub(crate) fn emit_table_input_write(
+    conn: &VgiConnection,
+    catalog: &str,
+    schema_name: &str,
+    function: &str,
+    input_rows: usize,
+) {
+    let mut event = VgiEvent::new("table_in_out.write_input");
+    event.catalog = Some(catalog.to_string());
+    event.function = Some(format!("{schema_name}.{function}"));
+    event.message = Some(format!("input_rows={input_rows}"));
     conn.runtime.emit(event);
 }
 

@@ -979,7 +979,7 @@ fn session_runtime(ctx: &SessionContext) -> Arc<VgiRuntime> {
     runtime
 }
 
-fn ensure_vgi_settings(ctx: &SessionContext) {
+fn ensure_vgi_settings(ctx: &SessionContext, runtime: &VgiRuntime) {
     let state = ctx.state_ref();
     let mut state = state.write();
     if state
@@ -993,7 +993,9 @@ fn ensure_vgi_settings(ctx: &SessionContext) {
             .config_mut()
             .options_mut()
             .extensions
-            .insert(crate::VgiSettings::default());
+            .insert(crate::VgiSettings::with_cache_limits(
+                runtime.options().cache_limits,
+            ));
     }
 }
 
@@ -1110,8 +1112,8 @@ fn reset_vgi_setting(
 /// # }
 /// ```
 pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
-    ensure_vgi_settings(ctx);
     let runtime = session_runtime(ctx);
+    ensure_vgi_settings(ctx, &runtime);
     // Session-scoped diagnostics such as `vgi_catalogs(location)` are useful
     // before the first ATTACH. Registration is idempotent, so install them at
     // the adapter SQL boundary rather than waiting for attach discovery.

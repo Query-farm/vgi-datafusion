@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 13,
+      "original_sql": "SELECT (SELECT nonce FROM ex.data.cache_nonce) = (SELECT v FROM first);",
+      "kind": "out_of_scope",
+      "reason": "The nonce can remain equal only when the unsupported persistent disk tier serves the entry after the memory cap evicts it."
+    },
+    {
+      "record": 14,
+      "original_sql": "SELECT COUNT(*) >= 1 FROM duckdb_logs() WHERE type = 'VGI' AND message LIKE '%result_cache.hit%';",
+      "kind": "out_of_scope",
+      "reason": "This assertion specifically requires a disk-tier cache hit; the DataFusion adapter currently provides a bounded session-memory tier only."
+    }
+  ]
+}

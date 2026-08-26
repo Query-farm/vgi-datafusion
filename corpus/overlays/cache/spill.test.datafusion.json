@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 11,
+      "original_sql": "SELECT COUNT(*) FROM duckdb_logs() WHERE type = 'VGI' AND message LIKE '%result_cache.abort%';",
+      "kind": "out_of_scope",
+      "reason": "DuckDB expects an over-memory-cap capture to spill instead of abort; the DataFusion adapter intentionally refuses it because no disk tier is implemented."
+    },
+    {
+      "record": 16,
+      "original_sql": "SELECT COUNT(*) >= 1 FROM duckdb_logs() WHERE type = 'VGI'\n    AND message LIKE '%result_cache.hit%' AND message LIKE '%tier=disk_streaming%';",
+      "kind": "out_of_scope",
+      "reason": "Requires serving a spilled entry from the unsupported streaming disk tier."
+    },
+    {
+      "record": 20,
+      "original_sql": "SELECT COUNT(*) FROM duckdb_logs() WHERE type = 'VGI' AND message LIKE '%result_cache.abort%';",
+      "kind": "out_of_scope",
+      "reason": "DuckDB expects an over-memory-cap producer capture to spill instead of abort; DataFusion currently has no disk tier."
+    },
+    {
+      "record": 22,
+      "original_sql": "SELECT COUNT(*) >= 1 FROM duckdb_logs() WHERE type = 'VGI'\n    AND message LIKE '%result_cache.hit%' AND message LIKE '%tier=disk_streaming%';",
+      "kind": "out_of_scope",
+      "reason": "Requires serving a spilled producer entry from the unsupported streaming disk tier."
+    }
+  ]
+}

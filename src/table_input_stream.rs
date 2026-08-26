@@ -230,7 +230,15 @@ impl ExecutionPlan for VgiLimitedTableInputExec {
                             Arc::clone(&input_schema),
                             input.columns().to_vec(),
                         )?;
-                        let Some(batch) = exchange.send(&input).map_err(to_df)? else {
+                        let answer = exchange.send(&input).map_err(to_df)?;
+                        crate::table_input::emit_table_input_write(
+                            &conn,
+                            &catalog,
+                            &schema_name,
+                            &function,
+                            input.num_rows(),
+                        );
+                        let Some(batch) = answer else {
                             continue;
                         };
                         let batch = crate::conform(batch, &worker_schema, None)?;

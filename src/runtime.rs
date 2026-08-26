@@ -188,6 +188,7 @@ impl Default for VgiRuntime {
 impl VgiRuntime {
     /// Create a session runtime with bounded memory and no external callbacks.
     pub fn new(options: VgiSessionOptions) -> Self {
+        let session_settings = crate::VgiSettings::with_cache_limits(options.cache_limits);
         Self {
             cache: Arc::new(ResultCache::new(options.cache_limits)),
             options,
@@ -197,7 +198,7 @@ impl VgiRuntime {
             result_flights: Arc::new(ResultFlightRegistry::default()),
             exchange_cache_stats: Mutex::new(ExchangeCacheStats::default()),
             per_value_opt_ins: Mutex::new(HashSet::new()),
-            session_settings: Mutex::new(crate::VgiSettings::default()),
+            session_settings: Mutex::new(session_settings),
             catalog_metadata: Mutex::new(HashMap::new()),
             event_sink: None,
             secret_resolver: None,
@@ -317,6 +318,10 @@ impl VgiRuntime {
     }
 
     pub(crate) fn replace_session_settings(&self, settings: crate::VgiSettings) {
+        let limits = settings
+            .adapter_settings()
+            .result_cache_limits(self.options.cache_limits.default_ttl);
+        self.cache.set_limits(limits);
         *self.session_settings.lock().unwrap() = settings;
     }
 
@@ -674,6 +679,38 @@ mod result_flight_tests {
                 bytes_served: 42,
             }
         );
+    }
+
+    #[test]
+    fn sql_limit_overrides_reset_to_runtime_constructor_limits() {
+        let constructor_limits = CacheLimits {
+            max_entry_bytes: 17,
+            max_total_bytes: 31,
+            max_entries: 2,
+            default_ttl: Duration::from_secs(9),
+        };
+        let runtime = VgiRuntime::new(VgiSessionOptions {
+            cache_limits: constructor_limits,
+            ..VgiSessionOptions::default()
+        });
+
+        runtime.replace_session_settings(crate::VgiSettings::with_cache_limits(constructor_limits));
+        assert_eq!(runtime.result_cache().limits(), constructor_limits);
+
+        let mut settings = crate::VgiSettings::with_cache_limits(constructor_limits);
+        settings
+            .set_value(crate::settings::RESULT_CACHE_MAX_ENTRY_BYTES, "1")
+            .unwrap();
+        runtime.replace_session_settings(settings.clone());
+        assert_eq!(runtime.result_cache().limits().max_entry_bytes, 1);
+        assert_eq!(
+            runtime.result_cache().limits().default_ttl,
+            Duration::from_secs(9)
+        );
+
+        settings.reset_value(crate::settings::RESULT_CACHE_MAX_ENTRY_BYTES);
+        runtime.replace_session_settings(settings);
+        assert_eq!(runtime.result_cache().limits(), constructor_limits);
     }
 
     fn key(function: &str) -> vgi_client::CacheKey {

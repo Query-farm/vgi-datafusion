@@ -53,10 +53,15 @@ DataFusion where there is no matching planning or execution seam.
   cache statistics. Producer scan/cache counters also appear as native
   DataFusion execution metrics and in `EXPLAIN ANALYZE`; result-cache statistics
   distinguish exchange hits, stores, and bytes served.
+- SQL-owned `vgi_result_cache_max_entry_bytes`,
+  `vgi_result_cache_max_bytes`, and `vgi_result_cache_max_entries` settings
+  update the live session cache immediately. Reductions evict entries that no
+  longer fit, constructor-supplied defaults remain visible, and `RESET`
+  restores those constructor values.
 
 This is intentionally narrower than the DuckDB cache. Correlated 1:N per-value
 calls, persistent disk storage, stale-while-revalidate, compression, and
-SQL-mutable memory limits remain deferred.
+cross-process sharing remain deferred.
 
 ### Catalog and function fidelity
 
@@ -118,8 +123,9 @@ SQL-mutable memory limits remain deferred.
 - `VgiEventSink` receives structured catalog, plan, scan, cache, error, and
   cancellation events. The session also retains a bounded event history for
   `vgi_logs()` and `vgi_log_stats()`. Successful buffered begin/combine/finalize
-  calls and actual scalar input writes report structural counts without
-  arguments, row values, secrets, or synthetic events on cache replay.
+  calls, scalar input writes, and streaming table-input sends report structural
+  counts without arguments, row values, secrets, or synthetic events on cache
+  replay.
 - `VgiLocalityHook` exposes planned split locations to an embedding scheduler.
   The adapter does not invent DataFusion hash partitioning from VGI transforms.
 - `VgiSessionOptions` configures cache bounds, event history, and an optional
@@ -151,7 +157,7 @@ SQL-mutable memory limits remain deferred.
 | Global functions | Supported | Default-on/opt-out policy, collision ownership, concurrent attach linearization, replacement, and DETACH cleanup included |
 | Projection, static filters, LIMIT | Supported | Direct functions preserve exactness; lazy catalog tables recheck filters |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
-| Session result cache | Partial | Producer/split, streaming per-batch, stable scalar per-value, and unordered buffered whole-input tiers have conditional revalidation, single-flight, stale-if-error, revocation eviction, and native scan metrics; no correlated 1:N cache, disk, SWR, or SQL-mutable memory limits |
+| Session result cache | Partial | Producer/split, streaming per-batch, stable scalar per-value, and unordered buffered whole-input tiers have conditional revalidation, single-flight, stale-if-error, revocation eviction, live SQL memory limits, and native scan metrics; no correlated 1:N cache, disk, or SWR |
 | Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
@@ -168,14 +174,14 @@ SQL-mutable memory limits remain deferred.
 
 1. **Cache breadth with matching semantics.** Add correlated 1:N entries only
    where a complete deterministic key and cancellation boundary can be proved.
-   Keep disk persistence optional, consider SQL-safe cache-limit reconfiguration,
-   and add bounded stale-while-revalidate only with deterministic scheduling
-   semantics.
+   Keep disk persistence optional and add bounded stale-while-revalidate only
+   with deterministic scheduling semantics.
 2. **Unbounded execution hardening.** Gate resume on worker advertisement and
    add checkpoint/reconnect, cancellation, backpressure, and soak coverage.
-3. **Catalog and scalar breadth.** Broaden view translation and continue true
-   signature coverage for remaining null-coercion and nested-value forms; keep
-   host-native SQL spelling differences in sparse reviewed overlays.
+3. **Catalog and function breadth.** Broaden view translation and keep
+   host-native SQL spelling differences in sparse reviewed overlays. Scalar and
+   aggregate applicable corpus coverage is complete; future additions should
+   continue using the worker as the coercion authority.
 4. **Dynamic-filter breadth.** Add a VGI representation for DataFusion's large
    hash/Bloom lookup and multi-column struct membership expressions, and decide
    whether completed filters may safely refine split enumeration before init.
@@ -195,10 +201,9 @@ wiring VGI into DataFusion rather than developing a parallel query engine.
 ## Production verification gate
 
 The 327-file shared VGI SQLLogicTest corpus now completes against both HTTP and
-an explicitly managed Unix-socket worker. Each transport executes 3,362 records
-with zero timeouts and produces 2,161 exact, 110 rendering-equivalent, and 184
-genuinely different results. Selected-file baseline comparison reports no
-regressions on either transport.
+an explicitly managed Unix-socket worker. Each transport executes 3,462 records
+with zero timeouts and produces 2,199 exact, 116 rendering-equivalent, and 168
+genuinely different results. The promoted reports are byte-identical.
 The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
 and diagnostics, correlated table calls, wide table input, writes, and secret
 host configuration. Publishing, stalled subprocess-RPC cancellation, and
@@ -213,14 +218,17 @@ Post-baseline focused verification also covers concurrent producer and split
 cache fills; producer, table-input, scalar per-value, and buffered whole-input
 immediate-stale revalidation; exchange single-flight and stale-if-error;
 revocation eviction; unordered buffered multiset identity and bounded capture;
-truthful scalar/buffered lifecycle events; incremental finite-LIMIT exchange;
+truthful scalar/buffered/table-input lifecycle events; incremental finite-LIMIT exchange;
 catalog-source provider resolution; pre-attach canonical catalog discovery;
 global-function opt-out/collision/lifecycle; scan Drop cancellation and pool
 poisoning; callback-only window median; overload incompatibility; native scalar
 overlays; and multi-scope secret binds. The reviewed aggregate window slice now
 executes 15/15 applicable records with all 14 results agreeing.
 
-The current release-mode adapter suite passes 232/232 tests plus two doctests.
+The current release-mode adapter suite passes 239/239 tests plus two doctests,
+including focused cache-limit,
+table-input observability, scalar-null, and deterministic single-flight
+regressions in addition to the existing transport and integration coverage.
 The settings slice executes 42/42 records with all 14 results exact, and the
 required-filter slice executes 45/45 applicable records with all 25 results
 exact, over both Unix and HTTP. A 13-file

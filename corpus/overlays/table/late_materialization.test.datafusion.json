@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 11,
+      "original_sql": "SELECT\n    regexp_extract(pushed, 'in=([0-9]+)', 1)::INT AS in_count,\n    pushed NOT LIKE '%rng=none%' AS has_range\nFROM (SELECT pushed, payload FROM example.data.late_mat ORDER BY ord LIMIT 30)\nLIMIT 1;",
+      "replacement_sql": "SELECT\n    array_element(regexp_match(pushed, 'in=([0-9]+)'), 1)::INT AS in_count,\n    pushed NOT LIKE '%rng=none%' AS has_range\nFROM (SELECT pushed, payload FROM example.data.late_mat ORDER BY ord LIMIT 30)\nLIMIT 1;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion returns regular-expression capture groups as a list; selecting its one-based first capture preserves DuckDB regexp_extract(..., 1) for the worker's pushdown witness."
+    },
+    {
+      "record": 13,
+      "original_sql": "SELECT\n    regexp_extract(pushed, 'in=([0-9]+)', 1)::INT AS in_count,\n    pushed NOT LIKE '%rng=none%' AS has_range\nFROM (SELECT pushed, payload FROM example.data.late_mat ORDER BY ord LIMIT 200)\nLIMIT 1;",
+      "replacement_sql": "SELECT\n    array_element(regexp_match(pushed, 'in=([0-9]+)'), 1)::INT AS in_count,\n    pushed NOT LIKE '%rng=none%' AS has_range\nFROM (SELECT pushed, payload FROM example.data.late_mat ORDER BY ord LIMIT 200)\nLIMIT 1;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion returns regular-expression capture groups as a list; selecting its one-based first capture preserves DuckDB regexp_extract(..., 1) for the worker's pushdown witness."
+    },
+    {
+      "record": 15,
+      "original_sql": "SELECT regexp_extract(pushed, 'in=([0-9]+)', 1)::INT AS in_count\nFROM (SELECT pushed, payload FROM example.data.late_mat ORDER BY ord LIMIT 200)\nLIMIT 1;",
+      "replacement_sql": "SELECT array_element(regexp_match(pushed, 'in=([0-9]+)'), 1)::INT AS in_count\nFROM (SELECT pushed, payload FROM example.data.late_mat ORDER BY ord LIMIT 200)\nLIMIT 1;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion returns regular-expression capture groups as a list; selecting its one-based first capture preserves DuckDB regexp_extract(..., 1) for the worker's pushdown witness."
+    }
+  ]
+}

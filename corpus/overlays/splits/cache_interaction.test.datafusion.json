@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 3,
+      "original_sql": "CREATE TEMP TABLE cache_baseline AS SELECT hits, inserts FROM vgi_result_cache_stats();",
+      "replacement_sql": "CREATE TABLE cache_baseline AS SELECT hits, inserts FROM vgi_result_cache_stats();",
+      "kind": "equivalent_sql",
+      "reason": "Each SQLLogicTest file owns one isolated DataFusion SessionContext, so a session catalog table has the same lifetime and one-row snapshot semantics as DuckDB's temporary table here."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT count(*) > 0 FROM duckdb_logs\nWHERE type='VGI' AND message LIKE '%scan.plan%';",
+      "replacement_sql": "SELECT count(*) > 0 FROM duckdb_logs()\nWHERE type='VGI' AND message LIKE 'split_plan.complete%';",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes the same retained adapter event rows through the duckdb_logs table function and names the completed VGI scan-planning RPC split_plan.complete."
+    }
+  ]
+}

@@ -317,6 +317,56 @@ impl VgiScalarUdf {
             .or_else(|| positional.iter().find(|spec| spec.is_varargs).copied())
     }
 
+    /// Give untyped NULLs in an AnyArrow vararg group the unambiguous type of
+    /// their concrete peers.
+    ///
+    /// DataFusion's permissive `VariadicAny` signature deliberately does not
+    /// coerce arguments to a common type. That is normally what VGI wants, but
+    /// a bare SQL NULL therefore reaches the worker as Arrow `Null`, even for
+    /// calls such as `sum_values(NULL, 2, 3)`. DuckDB types that NULL as BIGINT
+    /// from the surrounding varargs, and the VGI function quite reasonably
+    /// rejects a physical `Null` input as non-addable.
+    ///
+    /// Only infer when every non-null member of the vararg group has exactly
+    /// the same type. Mixed concrete types remain untouched so the worker stays
+    /// the overload/coercion authority rather than this adapter guessing a
+    /// common supertype.
+    fn resolve_untyped_null_varargs(specs: &ArgSpecs, types: &[DataType]) -> Vec<DataType> {
+        let positional: Vec<_> = specs.positional().collect();
+        let Some((varargs_index, varargs)) = positional
+            .iter()
+            .enumerate()
+            .find(|(_, spec)| spec.is_varargs)
+        else {
+            return types.to_vec();
+        };
+        if varargs.data_type != DataType::Null || varargs_index >= types.len() {
+            return types.to_vec();
+        }
+
+        let mut concrete = types[varargs_index..]
+            .iter()
+            .filter(|ty| **ty != DataType::Null);
+        let Some(inferred) = concrete.next().cloned() else {
+            return types.to_vec();
+        };
+        if concrete.any(|ty| ty != &inferred) {
+            return types.to_vec();
+        }
+
+        types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                if index >= varargs_index && *ty == DataType::Null {
+                    inferred.clone()
+                } else {
+                    ty.clone()
+                }
+            })
+            .collect()
+    }
+
     fn declared_const_type(specs: &ArgSpecs, index: usize) -> Option<&DataType> {
         Self::positional_spec(specs, index)
             .filter(|spec| spec.is_const)
@@ -526,7 +576,9 @@ impl ScalarUDFImpl for VgiScalarUdf {
         // Reached only when the planner has no literal information; a const
         // parameter then resolves as a typed null, which is enough to learn an
         // output type. `return_field_from_args` is the richer path.
-        self.resolve_return_type(args, &[])
+        let (specs, _) = self.select_specs(args);
+        let resolved_types = Self::resolve_untyped_null_varargs(specs, args);
+        self.resolve_return_type(&resolved_types, &[])
     }
 
     fn return_field_from_args(&self, args: ReturnFieldArgs) -> DFResult<FieldRef> {
@@ -539,6 +591,7 @@ impl ScalarUDFImpl for VgiScalarUdf {
             .map(|f| f.data_type().clone())
             .collect();
         let (specs, compatible) = self.select_specs(&types);
+        let resolved_types = Self::resolve_untyped_null_varargs(specs, &types);
         let values: Vec<Option<ArgValue>> = args
             .scalar_arguments
             .iter()
@@ -558,7 +611,7 @@ impl ScalarUDFImpl for VgiScalarUdf {
                 }
             })
             .collect::<DFResult<_>>()?;
-        let out = self.resolve_return_type(&types, &values)?;
+        let out = self.resolve_return_type(&resolved_types, &values)?;
         Ok(Arc::new(Field::new(self.name(), out, true)))
     }
 
@@ -588,6 +641,7 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
         // columns; everything else is a column. See `split_arguments`.
         let types: Vec<DataType> = args.args.iter().map(|a| a.data_type()).collect();
         let (specs, compatible) = self.select_specs(&types);
+        let resolved_types = Self::resolve_untyped_null_varargs(specs, &types);
         let values: Vec<Option<ArgValue>> = args
             .args
             .iter()
@@ -618,7 +672,7 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
                 ColumnarValue::Array(_) => Ok(None),
             })
             .collect::<DFResult<_>>()?;
-        let (arguments, _) = self.split_arguments(specs, &types, &values, compatible);
+        let (arguments, _) = self.split_arguments(specs, &resolved_types, &values, compatible);
 
         let columns: Vec<datafusion::arrow::array::ArrayRef> = args
             .args
@@ -628,7 +682,13 @@ impl AsyncScalarUDFImpl for VgiScalarUdf {
             .map(|(i, a)| {
                 let array = a.to_array(rows)?;
                 let declared = Self::positional_spec(specs, i).map(|spec| &spec.data_type);
-                match declared.filter(|ty| compatible && **ty != DataType::Null) {
+                let resolved_null = (array.data_type() == &DataType::Null
+                    && resolved_types[i] != DataType::Null)
+                    .then_some(&resolved_types[i]);
+                let target = declared
+                    .filter(|ty| compatible && **ty != DataType::Null)
+                    .or(resolved_null);
+                match target {
                     Some(declared) if array.data_type() != declared => {
                         datafusion::arrow::compute::cast(array.as_ref(), declared).map_err(|error| {
                             DataFusionError::Execution(format!(
@@ -1405,6 +1465,33 @@ mod overload_tests {
         let (selected, compatible) = udf.select_specs(&[DataType::Boolean, DataType::Boolean]);
         assert!(compatible);
         assert_eq!(selected, &any);
+    }
+
+    #[test]
+    fn any_varargs_infer_untyped_nulls_from_identical_peers() {
+        let specs = varargs(DataType::Null);
+        assert_eq!(
+            VgiScalarUdf::resolve_untyped_null_varargs(
+                &specs,
+                &[DataType::Null, DataType::Int64, DataType::Int64],
+            ),
+            vec![DataType::Int64, DataType::Int64, DataType::Int64]
+        );
+    }
+
+    #[test]
+    fn any_varargs_do_not_guess_for_mixed_or_all_null_inputs() {
+        let specs = varargs(DataType::Null);
+        let mixed = [DataType::Null, DataType::Int64, DataType::Float64];
+        assert_eq!(
+            VgiScalarUdf::resolve_untyped_null_varargs(&specs, &mixed),
+            mixed
+        );
+        let nulls = [DataType::Null, DataType::Null];
+        assert_eq!(
+            VgiScalarUdf::resolve_untyped_null_varargs(&specs, &nulls),
+            nulls
+        );
     }
 
     #[test]

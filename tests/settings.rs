@@ -5,6 +5,9 @@
 mod common;
 
 use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
+use std::sync::Arc;
+
+use datafusion::execution::context::SessionConfig;
 use datafusion::prelude::SessionContext;
 
 fn configured(ctx: &SessionContext, name: &str) -> Option<String> {
@@ -31,6 +34,18 @@ async fn adapter_tuning_supports_unqualified_set_defaults_and_reset(
     assert_eq!(
         configured(&ctx, "vgi_result_cache_per_value").as_deref(),
         Some("true")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_entry_bytes").as_deref(),
+        Some("67108864")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_bytes").as_deref(),
+        Some("268435456")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_entries").as_deref(),
+        Some("131072")
     );
 
     vgi_datafusion::sql(&ctx, "SET vgi_exchange_input_dedup = false")
@@ -60,6 +75,85 @@ async fn adapter_tuning_supports_unqualified_set_defaults_and_reset(
         configured(&ctx, "vgi_result_cache_per_value").as_deref(),
         Some("true")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn result_cache_limits_apply_immediately_and_reset_to_runtime_defaults(
+) -> datafusion::common::Result<()> {
+    let constructor_limits = vgi_client::CacheLimits {
+        max_entry_bytes: 17,
+        max_total_bytes: 31,
+        max_entries: 2,
+        ..vgi_client::CacheLimits::default()
+    };
+    let runtime = Arc::new(vgi_datafusion::VgiRuntime::new(
+        vgi_datafusion::VgiSessionOptions {
+            cache_limits: constructor_limits,
+            ..vgi_datafusion::VgiSessionOptions::default()
+        },
+    ));
+    let ctx =
+        SessionContext::new_with_config(SessionConfig::new().with_extension(Arc::clone(&runtime)));
+    vgi_datafusion::sql(&ctx, "SELECT 1").await?;
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_entry_bytes").as_deref(),
+        Some("17")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_bytes").as_deref(),
+        Some("31")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_entries").as_deref(),
+        Some("2")
+    );
+
+    vgi_datafusion::sql(&ctx, "SET vgi_result_cache_max_entry_bytes = 1").await?;
+    vgi_datafusion::sql(&ctx, "SET vgi_result_cache_max_bytes = 2").await?;
+    vgi_datafusion::sql(&ctx, "SET vgi_result_cache_max_entries = 3").await?;
+    let limits = runtime.result_cache().limits();
+    assert_eq!(limits.max_entry_bytes, 1);
+    assert_eq!(limits.max_total_bytes, 2);
+    assert_eq!(limits.max_entries, 3);
+
+    vgi_datafusion::sql(&ctx, "RESET vgi.vgi_result_cache_max_entry_bytes").await?;
+    vgi_datafusion::sql(&ctx, "RESET vgi_result_cache_max_bytes").await?;
+    vgi_datafusion::sql(&ctx, "RESET vgi_result_cache_max_entries").await?;
+    assert_eq!(runtime.result_cache().limits(), constructor_limits);
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_entry_bytes").as_deref(),
+        Some("17")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_bytes").as_deref(),
+        Some("31")
+    );
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_entries").as_deref(),
+        Some("2")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn preinstalled_vgi_settings_remain_authoritative() -> datafusion::common::Result<()> {
+    let runtime = Arc::new(vgi_datafusion::VgiRuntime::default());
+    let mut supplied = vgi_datafusion::VgiSettings::default();
+    supplied.set_value("vgi_result_cache_max_entry_bytes", "99")?;
+    supplied.set_value("host_marker", "kept")?;
+    let config = SessionConfig::new()
+        .with_extension(Arc::clone(&runtime))
+        .with_option_extension(supplied);
+    let ctx = SessionContext::new_with_config(config);
+
+    vgi_datafusion::sql(&ctx, "SELECT 1").await?;
+    assert_eq!(
+        configured(&ctx, "vgi_result_cache_max_entry_bytes").as_deref(),
+        Some("99")
+    );
+    assert_eq!(configured(&ctx, "host_marker").as_deref(), Some("kept"));
+    assert_eq!(runtime.result_cache().limits().max_entry_bytes, 99);
     Ok(())
 }
 

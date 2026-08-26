@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 44,
+      "original_sql": "SELECT example.double(100::HUGEINT);",
+      "replacement_sql": "SELECT example.double(100::DECIMAL(38, 0));",
+      "kind": "equivalent_sql",
+      "reason": "DuckDB's HUGEINT crosses VGI as decimal128(38, 0); DataFusion spells that same Arrow physical type as DECIMAL(38, 0)."
+    }
+  ]
+}

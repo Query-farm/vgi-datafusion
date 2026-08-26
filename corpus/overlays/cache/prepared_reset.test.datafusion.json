@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 4,
+      "original_sql": "PREPARE p AS SELECT COUNT(*) FROM ex.cacheable_numbers(n := CAST($1 AS INTEGER));",
+      "kind": "out_of_scope",
+      "reason": "DataFusion plans this VGI table function before a prepared parameter has a literal value, so the worker's bind-time ConstParam cannot be formed."
+    },
+    {
+      "record": 5,
+      "original_sql": "EXECUTE p(5);",
+      "kind": "out_of_scope",
+      "reason": "Depends on the preceding unsupported prepared VGI ConstParam bind."
+    },
+    {
+      "record": 7,
+      "original_sql": "EXECUTE p(5);",
+      "kind": "out_of_scope",
+      "reason": "Depends on the preceding unsupported prepared VGI ConstParam bind."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT COUNT(*) >= 1 FROM duckdb_logs() WHERE type = 'VGI' AND message LIKE '%result_cache.hit%';",
+      "kind": "out_of_scope",
+      "reason": "This hit assertion depends on the unsupported prepared VGI ConstParam execution above."
+    },
+    {
+      "record": 9,
+      "original_sql": "EXECUTE p(8);",
+      "kind": "out_of_scope",
+      "reason": "Depends on the preceding unsupported prepared VGI ConstParam bind."
+    },
+    {
+      "record": 10,
+      "original_sql": "SELECT COUNT(*) FROM vgi_result_cache() WHERE function = 'cacheable_numbers';",
+      "kind": "out_of_scope",
+      "reason": "The expected entries are produced only by the unsupported prepared executions above."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT COUNT(DISTINCT key_hash) FROM vgi_result_cache() WHERE function = 'cacheable_numbers';",
+      "kind": "out_of_scope",
+      "reason": "The expected parameterized keys are produced only by the unsupported prepared executions above."
+    },
+    {
+      "record": 13,
+      "original_sql": "SET vgi_result_cache_max_entry_bytes = 4096;",
+      "replacement_sql": "SET vgi_result_cache_max_entry_bytes = 1;",
+      "kind": "equivalent_sql",
+      "reason": "One byte is an engine-independent over-cap bound for this Arrow result and preserves the test's intended refusal followed by RESET behavior."
+    },
+    {
+      "record": 14,
+      "original_sql": "SELECT COUNT(*) FROM ex.main.cache_bench(200000);",
+      "replacement_sql": "SELECT * FROM ex.main.cache_bench(200000);",
+      "kind": "equivalent_sql",
+      "reason": "The statement discards its rows and exists to fill or refuse the cache; selecting the value column prevents DataFusion's zero-byte count(*) projection from making the one-byte cap inapplicable."
+    },
+    {
+      "record": 17,
+      "original_sql": "SELECT COUNT(*) FROM ex.main.cache_bench(200000);",
+      "replacement_sql": "SELECT * FROM ex.main.cache_bench(200000);",
+      "kind": "equivalent_sql",
+      "reason": "The statement discards its rows and exists to verify that RESET permits the same full result to cache again; selecting the value column retains that cache-size witness."
+    }
+  ]
+}

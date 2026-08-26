@@ -9,6 +9,25 @@
       "reason": "DuckDB overloads length for lists; DataFusion exposes the equivalent list cardinality operation as array_length."
     },
     {
+      "record": 7,
+      "original_sql": "CREATE TEMP TABLE grid3 AS\nSELECT 100 * x + 10 * y + z AS v, x, y, z\nFROM range(2) tx(x), range(3) ty(y), range(2) tz(z);",
+      "replacement_sql": "CREATE TABLE grid3 AS\nSELECT 100 * x + 10 * y + z AS v, x, y, z\nFROM range(2) tx(x), range(3) ty(y), range(2) tz(z);",
+      "kind": "equivalent_sql",
+      "reason": "The corpus gives each file an isolated DataFusion session, so a session-lifetime table has the same scope as DuckDB's temporary table for this test."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT cell.axes.x, cell.axes.y, cell.axes.z, cell.value\nFROM (SELECT example.main.nest_tensor(v, {x: x, y: y, z: z}) AS t FROM grid3) r,\n     UNNEST(example.main.unnest_tensor(r.t)) u(cell)\nORDER BY cell.axes.x, cell.axes.y, cell.axes.z;",
+      "kind": "out_of_scope",
+      "reason": "This aggregate-to-scalar round trip requires a correlated UNNEST table input, which DataFusion 55 does not physically plan; literal 1D, 2D, sparse, and typed-null unnest_tensor calls remain covered."
+    },
+    {
+      "record": 10,
+      "original_sql": "SELECT g, cell.axes.i, cell.value\nFROM (\n  SELECT g, example.main.nest_tensor(v, {i: i}) AS t\n  FROM (VALUES (0, 1, 0), (0, 2, 1), (1, 10, 0), (1, 20, 1)) d(g, v, i)\n  GROUP BY g\n) r,\nUNNEST(example.main.unnest_tensor(r.t)) u(cell)\nORDER BY g, cell.axes.i;",
+      "kind": "out_of_scope",
+      "reason": "This grouped aggregate-to-scalar round trip requires a correlated UNNEST table input, which DataFusion 55 does not physically plan."
+    },
+    {
       "record": 14,
       "original_sql": "SELECT example.main.unnest_tensor(CAST(NULL AS STRUCT(tensor INTEGER[], axes STRUCT(i INTEGER[]))));",
       "replacement_sql": "SELECT example.main.unnest_tensor(arrow_cast(NULL, 'Struct(\"tensor\": List(Int32), \"axes\": Struct(\"i\": List(Int32)))'));",

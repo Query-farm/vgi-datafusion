@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 5,
+      "original_sql": "SELECT COUNT(*)\nFROM (\n  SELECT value,\n         SUM(value) OVER (PARTITION BY value % 5) AS win_sum,\n         (SELECT SUM(b.value) FROM example.data.numbers b WHERE b.value % 5 = a.value % 5) AS sub_sum\n  FROM example.data.numbers a\n)\nWHERE win_sum IS DISTINCT FROM sub_sum;",
+      "replacement_sql": "SELECT COUNT(*)\nFROM (\n  SELECT a.value,\n         SUM(a.value) OVER (PARTITION BY a.value % 5) AS win_sum,\n         totals.sub_sum\n  FROM example.data.numbers a\n  JOIN (\n    SELECT value % 5 AS bucket, SUM(value) AS sub_sum\n    FROM example.data.numbers\n    GROUP BY value % 5\n  ) totals ON totals.bucket = a.value % 5\n)\nWHERE win_sum IS DISTINCT FROM sub_sum;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion 55 does not execute this correlated scalar subquery shape; joining the independently grouped totals preserves the same per-row correctness assertion using its existing join and window APIs."
+    },
+    {
+      "record": 6,
+      "original_sql": "SELECT count(*) FROM duckdb_functions() WHERE function_name = 'vgi_table_scan';",
+      "replacement_sql": "SELECT count(*) FROM information_schema.tables\nWHERE table_catalog = 'example' AND table_schema = 'data' AND table_name = 'numbers';",
+      "kind": "equivalent_sql",
+      "reason": "DuckDB resolves catalog scans through a synthetic vgi_table_scan function, while DataFusion resolves the equivalent provider through its catalog; information_schema.tables verifies that the attached scan remains resolvable after window planning."
+    }
+  ]
+}

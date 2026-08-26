@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 3,
+      "original_sql": "SELECT example.main.nest_tensor(v, {i: i}).tensor\nFROM (VALUES (10, 0), (20, 1), (30, 2)) t(v, i);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('i', i)), 'tensor')\nFROM (VALUES (10, 0), (20, 1), (30, 2)) t(v, i);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion uses named_struct for row-dependent Struct construction and get_field for field access on a function result; both preserve the aggregate's Arrow Struct argument and return value."
+    },
+    {
+      "record": 4,
+      "original_sql": "SELECT example.main.nest_tensor(v, {i: i}).axes\nFROM (VALUES (10, 0), (20, 1), (30, 2)) t(v, i);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('i', i)), 'axes')\nFROM (VALUES (10, 0), (20, 1), (30, 2)) t(v, i);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve the aggregate's Arrow Struct argument and axes result."
+    },
+    {
+      "record": 5,
+      "original_sql": "SELECT example.main.nest_tensor(v, {i: i}).tensor\nFROM (VALUES (30, 2), (10, 0), (20, 1)) t(v, i);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('i', i)), 'tensor')\nFROM (VALUES (30, 2), (10, 0), (20, 1)) t(v, i);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve the aggregate's Arrow Struct argument and tensor result."
+    },
+    {
+      "record": 6,
+      "original_sql": "SELECT example.main.nest_tensor(v, {i: i}).axes\nFROM (VALUES (30, 2), (10, 0), (20, 1)) t(v, i);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('i', i)), 'axes')\nFROM (VALUES (30, 2), (10, 0), (20, 1)) t(v, i);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve the aggregate's Arrow Struct argument and axes result."
+    },
+    {
+      "record": 7,
+      "original_sql": "SELECT example.main.nest_tensor(v, {x: x, y: y}).tensor\nFROM (VALUES (1, 0, 0), (2, 0, 1), (3, 1, 0), (4, 1, 1)) t(v, x, y);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('x', x, 'y', y)), 'tensor')\nFROM (VALUES (1, 0, 0), (2, 0, 1), (3, 1, 0), (4, 1, 1)) t(v, x, y);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve the two-axis Arrow Struct argument and tensor result."
+    },
+    {
+      "record": 8,
+      "original_sql": "SELECT example.main.nest_tensor(v, {x: x, y: y}).axes\nFROM (VALUES (1, 0, 0), (2, 0, 1), (3, 1, 0), (4, 1, 1)) t(v, x, y);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('x', x, 'y', y)), 'axes')\nFROM (VALUES (1, 0, 0), (2, 0, 1), (3, 1, 0), (4, 1, 1)) t(v, x, y);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve the two-axis Arrow Struct argument and axes result."
+    },
+    {
+      "record": 9,
+      "original_sql": "SELECT example.main.nest_tensor(v, {x: x, y: y}).tensor\nFROM (VALUES (1, 0, 0), (2, 1, 1)) t(v, x, y);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('x', x, 'y', y)), 'tensor')\nFROM (VALUES (1, 0, 0), (2, 1, 1)) t(v, x, y);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve sparse tensor construction and null cells."
+    },
+    {
+      "record": 10,
+      "original_sql": "CREATE TEMP TABLE grid_3d AS\nSELECT 100 * x + 10 * y + z AS v, x, y, z\nFROM range(2) tx(x), range(3) ty(y), range(2) tz(z);",
+      "replacement_sql": "CREATE TABLE grid_3d AS\nSELECT 100 * x + 10 * y + z AS v, x, y, z\nFROM range(2) tx(x), range(3) ty(y), range(2) tz(z);",
+      "kind": "equivalent_sql",
+      "reason": "The corpus gives each file a fresh DataFusion SessionContext, so a session-local CREATE TABLE has the same lifetime and contents as DuckDB's TEMP table without requiring a new DataFusion temporary-table implementation."
+    },
+    {
+      "record": 11,
+      "original_sql": "SELECT example.main.nest_tensor(v, {x: x, y: y, z: z}).axes\nFROM grid_3d;",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('x', x, 'y', y, 'z', z)), 'axes')\nFROM grid_3d;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve the three-axis Arrow Struct argument and axes result."
+    },
+    {
+      "record": 12,
+      "original_sql": "SELECT cell.axes.x, cell.axes.y, cell.axes.z, cell.value\nFROM (SELECT example.main.nest_tensor(v, {x: x, y: y, z: z}) AS t FROM grid_3d) r,\n     UNNEST(example.main.unnest_tensor(r.t)) u(cell)\nORDER BY cell.axes.x, cell.axes.y, cell.axes.z;",
+      "replacement_sql": "SELECT get_field(get_field(cell, 'axes'), 'x'),\n       get_field(get_field(cell, 'axes'), 'y'),\n       get_field(get_field(cell, 'axes'), 'z'),\n       get_field(cell, 'value')\nFROM (\n  SELECT unnest(example.main.unnest_tensor(t)) AS cell\n  FROM (\n    SELECT example.main.nest_tensor(v, named_struct('x', x, 'y', y, 'z', z)) AS t\n    FROM grid_3d\n  ) nested\n) expanded\nORDER BY get_field(get_field(cell, 'axes'), 'x'),\n         get_field(get_field(cell, 'axes'), 'y'),\n         get_field(get_field(cell, 'axes'), 'z');",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's SELECT-list unnest expands the same list without a correlated LATERAL table input; named_struct and get_field preserve the nested Arrow values."
+    },
+    {
+      "record": 13,
+      "original_sql": "SELECT g, example.main.nest_tensor(v, {i: i}).tensor, example.main.nest_tensor(v, {i: i}).axes\nFROM (VALUES (0, 1, 0), (0, 2, 1), (1, 10, 0), (1, 20, 1)) t(g, v, i)\nGROUP BY g ORDER BY g;",
+      "replacement_sql": "SELECT g,\n       get_field(example.main.nest_tensor(v, named_struct('i', i)), 'tensor'),\n       get_field(example.main.nest_tensor(v, named_struct('i', i)), 'axes')\nFROM (VALUES (0, 1, 0), (0, 2, 1), (1, 10, 0), (1, 20, 1)) t(g, v, i)\nGROUP BY g ORDER BY g;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve grouped tensor aggregation and both returned Struct fields."
+    },
+    {
+      "record": 14,
+      "original_sql": "SELECT cell.axes.x, cell.axes.y, cell.value\nFROM (SELECT example.main.nest_tensor(v, {x: x, y: y}) AS t\n      FROM (VALUES (1,0,0),(2,0,1),(3,1,0),(4,1,1)) d(v,x,y)) r,\n     UNNEST(example.main.unnest_tensor(r.t)) u(cell)\nORDER BY cell.axes.x, cell.axes.y;",
+      "replacement_sql": "SELECT get_field(get_field(cell, 'axes'), 'x'),\n       get_field(get_field(cell, 'axes'), 'y'),\n       get_field(cell, 'value')\nFROM (\n  SELECT unnest(example.main.unnest_tensor(t)) AS cell\n  FROM (\n    SELECT example.main.nest_tensor(v, named_struct('x', x, 'y', y)) AS t\n    FROM (VALUES (1,0,0),(2,0,1),(3,1,0),(4,1,1)) d(v,x,y)\n  ) nested\n) expanded\nORDER BY get_field(get_field(cell, 'axes'), 'x'),\n         get_field(get_field(cell, 'axes'), 'y');",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's SELECT-list unnest expands the same dense list without a correlated LATERAL table input; named_struct and get_field preserve the nested Arrow values."
+    },
+    {
+      "record": 15,
+      "original_sql": "SELECT cell.axes.x, cell.axes.y, cell.value\nFROM (SELECT example.main.nest_tensor(v, {x: x, y: y}) AS t\n      FROM (VALUES (10, 0, 0), (20, 1, 1)) d(v, x, y)) r,\n     UNNEST(example.main.unnest_tensor(r.t)) u(cell)\nORDER BY cell.axes.x, cell.axes.y;",
+      "replacement_sql": "SELECT get_field(get_field(cell, 'axes'), 'x'),\n       get_field(get_field(cell, 'axes'), 'y'),\n       get_field(cell, 'value')\nFROM (\n  SELECT unnest(example.main.unnest_tensor(t)) AS cell\n  FROM (\n    SELECT example.main.nest_tensor(v, named_struct('x', x, 'y', y)) AS t\n    FROM (VALUES (10, 0, 0), (20, 1, 1)) d(v, x, y)\n  ) nested\n) expanded\nORDER BY get_field(get_field(cell, 'axes'), 'x'),\n         get_field(get_field(cell, 'axes'), 'y');",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's SELECT-list unnest expands the same sparse Cartesian tensor without a correlated LATERAL table input and preserves null cells."
+    },
+    {
+      "record": 16,
+      "original_sql": "SELECT example.main.nest_tensor(v, {i: i}).tensor\nFROM (VALUES (NULL::INTEGER, 0), (5, 1)) t(v, i);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('i', i)), 'tensor')\nFROM (VALUES (NULL::INTEGER, 0), (5, 1)) t(v, i);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve a null tensor cell and the aggregate's Arrow types."
+    },
+    {
+      "record": 17,
+      "original_sql": "SELECT example.main.nest_tensor(v, a).tensor\nFROM (\n  SELECT 1 AS v, {i: 0}::STRUCT(i INTEGER) AS a\n  UNION ALL SELECT 2, {i: 1}\n  UNION ALL SELECT 99, NULL\n) t;",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, a), 'tensor')\nFROM (\n  SELECT 1 AS v, named_struct('i', 0::INTEGER) AS a\n  UNION ALL SELECT 2, named_struct('i', 1::INTEGER)\n  UNION ALL SELECT 99, arrow_cast(NULL, 'Struct(\"i\": Int32)')\n) t;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct plus a typed null Struct represents the same nullable axes column, and get_field accesses the aggregate result."
+    },
+    {
+      "record": 20,
+      "original_sql": "SELECT example.main.nest_tensor(v, {k: k}).tensor\nFROM (VALUES ('a', 0), ('b', 1), ('c', 2)) t(v, k);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('k', k)), 'tensor')\nFROM (VALUES ('a', 0), ('b', 1), ('c', 2)) t(v, k);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve string tensor values."
+    },
+    {
+      "record": 21,
+      "original_sql": "SELECT example.main.nest_tensor(v, {k: k}).tensor\nFROM (VALUES (1.5::DOUBLE, 0), (2.5, 1)) t(v, k);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('k', k)), 'tensor')\nFROM (VALUES (1.5::DOUBLE, 0), (2.5, 1)) t(v, k);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve Float64 tensor values."
+    },
+    {
+      "record": 22,
+      "original_sql": "SELECT example.main.nest_tensor(v, {k: k}).axes\nFROM (VALUES (1, 'c'), (2, 'a'), (3, 'b')) t(v, k);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('k', k)), 'axes')\nFROM (VALUES (1, 'c'), (2, 'a'), (3, 'b')) t(v, k);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve string axis coordinates and ordering."
+    },
+    {
+      "record": 23,
+      "original_sql": "SELECT example.main.nest_tensor(v, {k: k}).tensor\nFROM (VALUES (1, 'c'), (2, 'a'), (3, 'b')) t(v, k);",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('k', k)), 'tensor')\nFROM (VALUES (1, 'c'), (2, 'a'), (3, 'b')) t(v, k);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve string-axis sorting and tensor placement."
+    },
+    {
+      "record": 27,
+      "original_sql": "SELECT example.main.nest_tensor(v, {i: i}).tensor\nFROM (SELECT i AS v, i FROM range(100) t(i));",
+      "replacement_sql": "SELECT get_field(example.main.nest_tensor(v, named_struct('i', i)), 'tensor')\nFROM (SELECT i AS v, i FROM range(100) t(i));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve the parallel aggregate input and tensor result."
+    },
+    {
+      "record": 28,
+      "original_sql": "SELECT g, example.main.nest_tensor(v, {i: i}).tensor\nFROM (SELECT i AS v, i, i % 4 AS g FROM range(40) t(i))\nGROUP BY g ORDER BY g;",
+      "replacement_sql": "SELECT g, get_field(example.main.nest_tensor(v, named_struct('i', i)), 'tensor')\nFROM (SELECT i AS v, i, i % 4 AS g FROM range(40) t(i))\nGROUP BY g ORDER BY g;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct and get_field spellings preserve parallel grouped tensor aggregation."
+    }
+  ]
+}
