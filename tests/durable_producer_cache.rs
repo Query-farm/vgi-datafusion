@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use datafusion::arrow::array::{Array, Int64Array};
+use datafusion::physical_plan::{collect, ExecutionPlan};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::StreamExt;
 use vgi_client::disk_cache::DiskCacheCodec;
@@ -184,6 +185,63 @@ async fn query_count_sum(
             .value(0)
     };
     Ok((value(0), value(1)))
+}
+
+fn find_vgi_scan(plan: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
+    if plan.downcast_ref::<vgi_datafusion::VgiScanExec>().is_some() {
+        return Some(Arc::clone(plan));
+    }
+    plan.children()
+        .into_iter()
+        .find_map(|child| find_vgi_scan(child))
+}
+
+fn scan_metric(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
+    plan.metrics()
+        .expect("VgiScanExec exposes metrics")
+        .iter()
+        .filter(|metric| metric.value().name() == name)
+        .map(|metric| metric.value().as_usize())
+        .sum()
+}
+
+async fn query_count_sum_with_worker_scans(
+    context: &SessionContext,
+    sql: &str,
+) -> datafusion::common::Result<((i64, i64), usize)> {
+    let dataframe = vgi_datafusion::sql(context, sql).await?;
+    let plan = dataframe.create_physical_plan().await?;
+    let scan = find_vgi_scan(&plan).expect("query contains a VGI scan");
+    let batches = collect(plan, context.task_ctx()).await?;
+    let batch = batches.first().expect("aggregate query returns one batch");
+    let value = |column| {
+        batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("aggregate query returns Int64")
+            .value(0)
+    };
+    Ok(((value(0), value(1)), scan_metric(&scan, "worker_scans")))
+}
+
+async fn query_i64_with_worker_scans(
+    context: &SessionContext,
+    sql: &str,
+) -> datafusion::common::Result<(i64, usize)> {
+    let dataframe = vgi_datafusion::sql(context, sql).await?;
+    let plan = dataframe.create_physical_plan().await?;
+    let scan = find_vgi_scan(&plan).expect("query contains a VGI scan");
+    let batches = collect(plan, context.task_ctx()).await?;
+    let value = batches
+        .first()
+        .expect("query returns one batch")
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("query returns Int64")
+        .value(0);
+    Ok((value, scan_metric(&scan, "worker_scans")))
 }
 
 async fn wait_for_path(path: &Path) {
@@ -612,6 +670,173 @@ async fn split_capture_replays_after_runtime_and_partition_count_change(
         .find(|entry| entry.function.ends_with("split_cacheable"))
         .expect("split_cacheable entry disappeared during replay");
     assert!(warm_entry.partitions > 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn split_validator_requires_unanimous_executed_group_agreement(
+) -> datafusion::common::Result<()> {
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("split-validator-unanimous");
+    const QUERY: &str = "SELECT count(*), sum(n) \
+                         FROM ex.main.split_cacheable( \
+                           n := 100, splits := 2, policy := 'not_modified')";
+
+    // The packer creates two execution partitions for the two split groups.
+    let (cold_context, _) = attached_with_partitions(&location, root.path(), 6).await?;
+    assert_eq!(query_count_sum(&cold_context, QUERY).await?, (100, 4_950));
+    drop(cold_context);
+
+    // A different target partition count must not affect the stored physical
+    // substreams. Partition 0 validates both groups serially and replays the
+    // flattened durable result exactly once.
+    let (warm_context, warm_runtime) = attached_with_partitions(&location, root.path(), 4).await?;
+    let (result, worker_scans) = query_count_sum_with_worker_scans(&warm_context, QUERY).await?;
+    assert_eq!(result, (100, 4_950));
+    assert_eq!(
+        worker_scans, 2,
+        "only the two executed split groups should vote"
+    );
+    let stats = warm_runtime
+        .durable_result_cache()
+        .expect("durable cache configured")
+        .stats()
+        .expect("durable stats");
+    assert_eq!(stats.revalidations, 1);
+    assert_eq!(stats.inserts, 0);
+    assert_eq!(stats.entries, 1);
+    assert!(warm_runtime.events().iter().any(|event| {
+        event.kind == "cache.revalidated"
+            && event.message.as_deref() == Some("split_validation=unanimous")
+    }));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_split_entry_is_revoked_when_replanning_finds_zero_splits(
+) -> datafusion::common::Result<()> {
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("split-validator-zero-transition");
+    let policy = format!(
+        "zero_after_cold:{}",
+        root.path()
+            .file_name()
+            .expect("test root has a file name")
+            .to_string_lossy()
+    );
+    let query = format!(
+        "SELECT count(*) FROM ex.main.split_cacheable(\
+         n := 100, splits := 4, policy := '{}')",
+        sql_quote(&policy)
+    );
+
+    let (cold_context, _) = attached_with_partitions(&location, root.path(), 4).await?;
+    assert_eq!(query_i64(&cold_context, &query).await?, 100);
+    drop(cold_context);
+
+    let (warm_context, warm_runtime) = attached_with_partitions(&location, root.path(), 2).await?;
+    let (rows, worker_scans) = query_i64_with_worker_scans(&warm_context, &query).await?;
+    assert_eq!(rows, 0, "the stale split payload was replayed");
+    assert_eq!(worker_scans, 0, "a definitive zero-split plan has no work");
+    let stats = warm_runtime
+        .durable_result_cache()
+        .expect("durable cache configured")
+        .stats()
+        .expect("durable stats");
+    assert_eq!(stats.entries, 0, "the stale generation was not revoked");
+    assert_eq!(stats.revalidations, 0);
+    assert_eq!(stats.inserts, 0, "an empty no-work result was published");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_fresh_revoked_and_incompatible_split_votes_rerun_the_whole_result(
+) -> datafusion::common::Result<()> {
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+
+    for policy in ["mixed", "disagree", "revoke"] {
+        let root = TestCacheRoot::new(&format!("split-validator-{policy}"));
+        let query = format!(
+            "SELECT count(*), sum(n) FROM ex.main.split_cacheable(\
+             n := 100, splits := 4, policy := '{policy}')"
+        );
+        let (cold_context, _) = attached_with_partitions(&location, root.path(), 4).await?;
+        assert_eq!(query_count_sum(&cold_context, &query).await?, (100, 4_950));
+        drop(cold_context);
+
+        let (warm_context, warm_runtime) =
+            attached_with_partitions(&location, root.path(), 2).await?;
+        let (result, worker_scans) =
+            query_count_sum_with_worker_scans(&warm_context, &query).await?;
+        assert_eq!(
+            result,
+            (100, 4_950),
+            "validation rows leaked or the unconditional {policy} rerun was partial"
+        );
+        assert_eq!(
+            worker_scans, 3,
+            "{policy} should validate distinct groups before one unconditional full-token rerun"
+        );
+        let stats = warm_runtime
+            .durable_result_cache()
+            .expect("durable cache configured")
+            .stats()
+            .expect("durable stats");
+        assert_eq!(stats.revalidations, 0, "{policy} was treated as unanimous");
+        assert_eq!(stats.inserts, 1, "{policy} rerun was not durably published");
+        assert_eq!(stats.entries, 1);
+        assert!(!warm_runtime.events().iter().any(|event| {
+            event.kind == "cache.revalidated"
+                && event.message.as_deref() == Some("split_validation=unanimous")
+        }));
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn split_validation_error_fails_closed_without_stale_replay() -> datafusion::common::Result<()>
+{
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("split-validator-error");
+    const QUERY: &str = "SELECT count(*), sum(n) \
+                         FROM ex.main.split_cacheable( \
+                           n := 100, splits := 4, policy := 'error')";
+
+    let (cold_context, _) = attached_with_partitions(&location, root.path(), 4).await?;
+    assert_eq!(query_count_sum(&cold_context, QUERY).await?, (100, 4_950));
+    drop(cold_context);
+
+    let (warm_context, warm_runtime) = attached_with_partitions(&location, root.path(), 1).await?;
+    let error = vgi_datafusion::sql(&warm_context, QUERY)
+        .await?
+        .collect()
+        .await
+        .expect_err("split validation error must not serve stale bytes");
+    assert!(
+        error
+            .to_string()
+            .contains("injected split validation failure"),
+        "unexpected validation error: {error}"
+    );
+    let stats = warm_runtime
+        .durable_result_cache()
+        .expect("durable cache configured")
+        .stats()
+        .expect("durable stats");
+    assert_eq!(stats.stale_serves, 0);
+    assert_eq!(stats.revalidations, 0);
+    assert_eq!(
+        stats.entries, 1,
+        "failed validation must not publish a partial"
+    );
     Ok(())
 }
 

@@ -2121,6 +2121,103 @@ impl ScanCacheRevalidation {
         }
         Ok(())
     }
+
+    fn remove_selected(
+        &self,
+        cache: &vgi_client::ResultCache,
+        disk_cache: Option<&Arc<vgi_client::DiskCache>>,
+        key: &vgi_client::CacheKey,
+    ) -> DFResult<()> {
+        match self {
+            Self::Memory { disk_companion, .. } => {
+                cache.remove(key);
+                if let (Some(disk_cache), Some(hit)) = (disk_cache, disk_companion) {
+                    disk_cache.remove_hit(&hit.0).map_err(|error| {
+                        DataFusionError::Execution(format!(
+                            "could not remove the selected durable validator generation: {error}"
+                        ))
+                    })?;
+                }
+            }
+            Self::Disk(hit) => {
+                if let Some(disk_cache) = disk_cache {
+                    disk_cache.remove_hit(&hit.0).map_err(|error| {
+                        DataFusionError::Execution(format!(
+                            "could not remove the selected durable validator generation: {error}"
+                        ))
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_selected(
+        &mut self,
+        cache: &vgi_client::ResultCache,
+        disk_cache: Option<&Arc<vgi_client::DiskCache>>,
+        key: &vgi_client::CacheKey,
+        freshness: vgi_client::CacheFreshness,
+        control: &vgi_client::CacheControl,
+    ) -> DFResult<()> {
+        if let Self::Memory {
+            entry,
+            disk_companion,
+        } = self
+        {
+            if entry.bytes() > cache.limits().max_entry_bytes {
+                cache.remove(key);
+                *self = match disk_companion.clone() {
+                    Some(hit) => Self::Disk(hit),
+                    None => {
+                        return Err(DataFusionError::Execution(
+                            "selected L1 validator exceeded the current max_entry_bytes limit"
+                                .to_string(),
+                        ));
+                    }
+                };
+            }
+        }
+
+        match self {
+            Self::Memory { disk_companion, .. } => {
+                if !cache.slide_with_control(key, freshness.remaining(), control) {
+                    return Err(DataFusionError::Execution(
+                        "selected L1 validator generation changed before refresh".to_string(),
+                    ));
+                }
+                if let (Some(disk_cache), Some(hit)) = (disk_cache, disk_companion) {
+                    disk_cache
+                        .revalidate_freshness(&hit.0, freshness, control)
+                        .map_err(|error| {
+                            DataFusionError::Execution(format!(
+                                "could not refresh the matching durable validator generation: {error}"
+                            ))
+                        })?;
+                }
+            }
+            Self::Disk(hit) => {
+                let refreshed = disk_cache
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "selected durable validator cache is unavailable".to_string(),
+                        )
+                    })?
+                    .revalidate_freshness(&hit.0, freshness, control)
+                    .map_err(|error| {
+                        DataFusionError::Execution(format!(
+                            "could not refresh the selected durable validator generation: {error}"
+                        ))
+                    })?;
+                if !refreshed {
+                    return Err(DataFusionError::Execution(
+                        "selected durable validator generation changed before refresh".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2239,7 +2336,7 @@ impl VgiScanExec {
             EmissionType::Incremental,
             boundedness,
         ));
-        let (statistics, partition_statistics) = match &split_groups {
+        let (mut statistics, mut partition_statistics) = match &split_groups {
             Some(plan) => {
                 let overall = Arc::new(statistics_for_splits(
                     &schema,
@@ -2322,6 +2419,21 @@ impl VgiScanExec {
         } else {
             None
         };
+        // A definitive zero-split replan must still execute the adapter when
+        // this query shape participates in result caching. Otherwise
+        // DataFusion can replace the scan with EmptyExec before the stale
+        // whole-result generation is revoked. The adapter itself returns no
+        // rows and performs no worker scan; unknown statistics here preserve
+        // that cache-maintenance side effect.
+        if cache_key.is_some()
+            && split_groups
+                .as_ref()
+                .is_some_and(|planned| planned.groups.is_empty())
+        {
+            let unknown = Arc::new(Statistics::new_unknown(&schema));
+            statistics = Arc::clone(&unknown);
+            partition_statistics = vec![unknown; partitions.max(1)];
+        }
         let metrics = ExecutionPlanMetricsSet::new();
         let cache_metrics = VgiCacheMetrics::new(&metrics);
         let cache_capture = cache_key.as_ref().map(|key| {
@@ -2331,7 +2443,7 @@ impl VgiScanExec {
                 key.clone(),
                 partitions.max(1),
                 cache_storage_schema.clone(),
-                split_groups.is_none(),
+                true,
                 cache_metrics.clone(),
             ))
         });
@@ -2642,25 +2754,19 @@ mod scan_cache_contract_tests {
     }
 
     #[test]
-    fn split_durable_policy_strips_uncoordinated_validators() {
+    fn coordinated_split_policy_retains_validators() {
         let control = vgi_client::CacheControl::ttl(0)
             .with_etag("opaque")
             .with_revalidatable()
             .with_stale_if_error(60);
         assert_eq!(scan_cache_storage_control(&control, true), control);
 
-        let split = scan_cache_storage_control(&control, false);
-        assert_eq!(split.ttl_seconds, Some(0));
-        assert_eq!(split.etag, None);
-        assert_eq!(split.last_modified, None);
-        assert!(!split.revalidatable);
-        assert_eq!(split.stale_while_revalidate, None);
-        assert_eq!(split.stale_if_error, None);
+        let split = scan_cache_storage_control(&control, true);
+        assert_eq!(split, control);
         let cache = vgi_client::ResultCache::new(vgi_client::CacheLimits::default());
-        assert!(matches!(
-            cache.freshness_deadline(Some(&split), Some("scope"), std::time::SystemTime::now()),
-            Err(vgi_client::Ineligible::NoFreshness)
-        ));
+        assert!(cache
+            .freshness_deadline(Some(&split), Some("scope"), std::time::SystemTime::now())
+            .is_ok());
 
         let stale_key = vgi_client::CacheKey {
             catalog: "example".into(),
@@ -2685,7 +2791,11 @@ mod scan_cache_contract_tests {
             std::time::Duration::ZERO,
             Some(&split),
         );
-        assert_eq!(cache.reap(), 1, "a stale split entry must not be retained");
+        assert_eq!(
+            cache.reap(),
+            0,
+            "a coordinated stale split entry remains reachable for validation"
+        );
     }
 
     #[test]
@@ -3788,18 +3898,19 @@ impl ExecutionPlan for VgiScanExec {
             .split_groups
             .as_ref()
             .map(|planned| planned.plan.clone());
+        let split_validation_groups = self
+            .split_groups
+            .as_ref()
+            .map(|planned| planned.groups.clone());
         // One handle for the blocking scan, one for the stream adapter.
         let scan_schema = self.schema.clone();
         let cache_storage_schema = self.cache_storage_schema.clone();
         let column_mapping = self.column_mapping.clone();
         let cache_capture = self.cache_capture.clone();
-        let memory_revalidation = if self.split_groups.is_none() {
-            self.cache_key
-                .as_ref()
-                .and_then(|key| self.conn.runtime.result_cache().get_for_revalidation(key))
-        } else {
-            None
-        };
+        let memory_revalidation = self
+            .cache_key
+            .as_ref()
+            .and_then(|key| self.conn.runtime.result_cache().get_for_revalidation(key));
         let cache_revalidation_probe = Arc::clone(&self.cache_revalidation_probe);
         let cache_key = self.cache_key.clone();
         let cache = Arc::clone(self.conn.runtime.result_cache());
@@ -3825,10 +3936,21 @@ impl ExecutionPlan for VgiScanExec {
                 .map(|tokens| format!("partition={partition}, tokens={}", tokens.len()));
             conn.runtime.emit(event);
             let run = || -> DFResult<()> {
-                let revalidation = cache_revalidation_probe
+                let mut revalidation = cache_revalidation_probe
                     .get()
                     .and_then(|entry| entry.as_ref())
                     .cloned();
+                // A stale split result is validated as one atomic unit. Only
+                // partition 0 performs that serial validation wave; the other
+                // physical partitions are explicit no-work participants in the
+                // shared capture. Cold split scans keep the normal parallel
+                // path below.
+                if revalidation.is_some() && split_validation_groups.is_some() && partition > 0 {
+                    if let Some(capture) = &cache_capture {
+                        capture.no_work(partition);
+                    }
+                    return Ok(());
+                }
                 let mut client = conn.connect()?;
                 let attached = conn.attach(&mut client, &catalog)?;
                 // A catalog table carries the worker's own argument bytes;
@@ -3870,6 +3992,146 @@ impl ExecutionPlan for VgiScanExec {
                     (other, true) => other.clone(),
                     (_, false) => None,
                 };
+                let scan_options = |conditional: Option<&ScanCacheRevalidation>| ScanOptions {
+                    projection: push.clone(),
+                    pushdown_filters: initial_pushdown.blob.clone(),
+                    join_keys: (!initial_pushdown.join_keys.is_empty())
+                        .then_some(initial_pushdown.join_keys.clone()),
+                    // See PlanOptions above: the filter's columns must be
+                    // requested even when the projection omits them, or the
+                    // worker evaluates the predicate against the wrong column.
+                    filter_columns: Some(initial_pushdown.columns.clone()),
+                    row_limit: limit.map(|l| l as i64),
+                    if_none_match: conditional.and_then(ScanCacheRevalidation::etag),
+                    if_modified_since: conditional.and_then(ScanCacheRevalidation::last_modified),
+                    ..Default::default()
+                };
+
+                let mut execution_tokens = split_tokens.clone();
+                if let (Some(mut entry), Some(plan), Some(groups)) = (
+                    revalidation.clone(),
+                    split_plan.as_ref(),
+                    split_validation_groups.as_ref(),
+                ) {
+                    debug_assert_eq!(partition, 0);
+                    let mut agreed_control: Option<vgi_client::CacheControl> = None;
+                    let mut votes = 0usize;
+                    let mut rerun = false;
+
+                    // Do not emit or capture validation-wave rows. A cached
+                    // split result is reusable only after every actually
+                    // executed group independently votes not_modified with the
+                    // same eligible policy.
+                    for group in groups.iter().filter(|group| !group.tokens.is_empty()) {
+                        let opts = plan
+                            .redemption_options(group.tokens.clone(), scan_options(Some(&entry)));
+                        let mut validation = client.scan(&bound, &opts).map_err(to_df)?;
+                        worker_metrics.worker_scans.add(1);
+                        let mut rows = 0usize;
+                        while let Some(batch) = validation.next_batch().map_err(to_df)? {
+                            worker_metrics.worker_batches.add(1);
+                            worker_metrics.worker_rows.add(batch.num_rows());
+                            worker_metrics.worker_bytes.add(
+                                datafusion::common::utils::memory::get_record_batch_memory_size(
+                                    &batch,
+                                ),
+                            );
+                            rows = rows.saturating_add(batch.num_rows());
+                        }
+                        let control = validation.cache_control().cloned();
+                        if control.as_ref().is_some_and(|control| control.not_modified) && rows != 0
+                        {
+                            return Err(DataFusionError::Execution(format!(
+                                "VGI function `{function}` returned rows and not_modified together during split validation"
+                            )));
+                        }
+                        let Some(control) = control.filter(|control| control.not_modified) else {
+                            rerun = true;
+                            break;
+                        };
+                        votes += 1;
+                        match &agreed_control {
+                            Some(agreed) if agreed != &control => {
+                                rerun = true;
+                                break;
+                            }
+                            None => agreed_control = Some(control),
+                            Some(_) => {}
+                        }
+                    }
+
+                    if votes == 0 && groups.is_empty() {
+                        let key = cache_key.as_ref().ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "split revalidation is missing its cache key".to_string(),
+                            )
+                        })?;
+                        entry.remove_selected(&cache, conn.runtime.durable_result_cache(), key)?;
+                        if let Some(capture) = &cache_capture {
+                            capture.no_work(partition);
+                        }
+                        return Ok(());
+                    }
+                    if votes == 0 {
+                        return Err(DataFusionError::Execution(format!(
+                            "VGI function `{function}` had no executed split group to validate"
+                        )));
+                    }
+
+                    if !rerun {
+                        let control = agreed_control
+                            .as_ref()
+                            .expect("a validation vote has cache control");
+                        let key = cache_key.as_ref().ok_or_else(|| {
+                            DataFusionError::Execution(format!(
+                                "VGI function `{function}` returned not_modified without a cache key"
+                            ))
+                        })?;
+                        match cache.freshness_deadline(
+                            Some(control),
+                            Some(key.identity_scope.as_str()),
+                            std::time::SystemTime::now(),
+                        ) {
+                            Ok(freshness) => {
+                                entry.refresh_selected(
+                                    &cache,
+                                    conn.runtime.durable_result_cache(),
+                                    key,
+                                    freshness,
+                                    control,
+                                )?;
+                                entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
+                                if let Some(capture) = &cache_capture {
+                                    capture.revalidated();
+                                }
+                                cache_metrics.revalidations.add(1);
+                                let mut event = VgiEvent::new("cache.revalidated");
+                                event.catalog = Some(catalog.clone());
+                                event.function = Some(format!("{schema_name}.{function}"));
+                                event.message = Some("split_validation=unanimous".to_string());
+                                conn.runtime.emit(event);
+                                return Ok(());
+                            }
+                            Err(_) => rerun = true,
+                        }
+                    }
+
+                    if rerun {
+                        let key = cache_key.as_ref().ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "split revalidation is missing its cache key".to_string(),
+                            )
+                        })?;
+                        entry.remove_selected(&cache, conn.runtime.durable_result_cache(), key)?;
+                        revalidation = None;
+                        execution_tokens = Some(
+                            groups
+                                .iter()
+                                .flat_map(|group| group.tokens.iter().cloned())
+                                .collect(),
+                        );
+                    }
+                }
                 // A split scan is genuinely parallel: each partition redeems its
                 // OWN tokens, so no partition has to learn another's execution
                 // id. That rendezvous is exactly what splits remove — a token
@@ -3879,7 +4141,7 @@ impl ExecutionPlan for VgiScanExec {
                 // partition 0 does the work and the rest are empty: correct, but
                 // not parallel, because joining an existing execution WOULD need
                 // the shared id.
-                if let Some(tokens) = &split_tokens {
+                if let Some(tokens) = &execution_tokens {
                     if tokens.is_empty() {
                         if let Some(capture) = &cache_capture {
                             capture.no_work(partition);
@@ -3893,23 +4155,8 @@ impl ExecutionPlan for VgiScanExec {
                     return Ok(());
                 }
 
-                let opts = ScanOptions {
-                    projection: push,
-                    pushdown_filters: initial_pushdown.blob.clone(),
-                    join_keys: (!initial_pushdown.join_keys.is_empty())
-                        .then_some(initial_pushdown.join_keys.clone()),
-                    // See PlanOptions above: the filter's columns must be
-                    // requested even when the projection omits them, or the
-                    // worker evaluates the predicate against the wrong column.
-                    filter_columns: Some(initial_pushdown.columns.clone()),
-                    row_limit: limit.map(|l| l as i64),
-                    if_none_match: revalidation.as_ref().and_then(ScanCacheRevalidation::etag),
-                    if_modified_since: revalidation
-                        .as_ref()
-                        .and_then(ScanCacheRevalidation::last_modified),
-                    ..Default::default()
-                };
-                let opts = match (&split_plan, split_tokens.clone()) {
+                let opts = scan_options(revalidation.as_ref());
+                let opts = match (&split_plan, execution_tokens) {
                     (Some(plan), Some(tokens)) => plan.redemption_options(tokens, opts),
                     _ => opts,
                 };
@@ -4237,7 +4484,7 @@ impl ExecutionPlan for VgiScanExec {
                 Arc::clone(&self.disk_cache_revalidation_probe),
                 Arc::clone(&self.cache_revalidation_probe),
                 memory_revalidation.clone(),
-                self.split_groups.is_none(),
+                true,
                 Arc::clone(&cache_observation),
                 Arc::clone(&self.cache_flight_probe),
                 Arc::clone(&self.cache_flight_disk_probe),

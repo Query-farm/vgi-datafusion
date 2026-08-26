@@ -45,12 +45,15 @@ DataFusion where there is no matching planning or execution seam.
   conditional revalidation, including immediate-stale validator policies, and
   worker-authorized stale-if-error fallback.
 - The durable tier persists validators for complete, bounded, catalog-scoped
-  non-split producers. It can conditionally revalidate after runtime restart,
-  atomically slide the observed generation, honor worker-authorized
-  stale-if-error, and conditionally remove that generation when reuse is
-  revoked. Split entries remain fresh-hit-only: validator metadata is stripped,
-  and immediate-stale split results are refused until an atomic all-partition
-  not-modified protocol exists.
+  producer and split scans. Non-split producers can conditionally revalidate
+  after runtime restart, atomically slide the observed generation, honor
+  worker-authorized stale-if-error, and conditionally remove that generation
+  when reuse is revoked. Split scans validate every nonempty planned group
+  serially on partition zero and replay only after unanimous compatible
+  `not_modified` responses. A fresh, mixed, incompatible, or revoked response
+  discards the validation wave, conditionally removes the selected durable
+  generation, and reruns every split without validators; validation errors fail
+  closed rather than replaying stale bytes.
 - Concurrent identical misses are coalesced per complete cache key. One query
   fills the entry while followers replay the atomic result; cancellation,
   refusal, expiry, and `no_store` wake followers to execute normally rather
@@ -233,7 +236,7 @@ replay remains physically present until release and a later reap.
 | Projection, static filters, LIMIT | Supported | Direct functions preserve exactness; lazy catalog tables recheck filters |
 | Set operations and joins | Supported | VGI scans compose with UNION/INTERSECT/EXCEPT, IN/EXISTS, CTEs, and DataFusion semi/anti plans; the SQL adapter maps DuckDB's unqualified `SEMI JOIN`/`ANTI JOIN` spelling to the equivalent left-directed plans, including in nested SELECTs |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
-| Session result cache | Partial | The bounded memory tier covers producer/split scans, streaming per-batch, stable scalar per-value, and unordered buffered whole-input results with conditional revalidation, runtime-local single-flight, stale-if-error, and revocation eviction. An opt-in Arrow IPC tier (Zstandard by default) durably shares complete bounded producer/split results across local processes with leases, atomic publication, restart recovery, and combined SQL diagnostics/maintenance. Non-split producer validators survive restart with conditional refresh, stale-if-error, and exact-generation revocation; split validators remain fail-closed pending atomic all-partition agreement. Durable bounds are constructor-owned; live SQL limits govern memory. Durable exchange/scalar/correlated entries and SWR remain unwired |
+| Session result cache | Partial | The bounded memory tier covers producer/split scans, streaming per-batch, stable scalar per-value, and unordered buffered whole-input results with conditional revalidation, runtime-local single-flight, stale-if-error, and revocation eviction. An opt-in Arrow IPC tier (Zstandard by default) durably shares complete bounded producer/split results across local processes with leases, atomic publication, restart recovery, and combined SQL diagnostics/maintenance. Non-split producer validators survive restart with conditional refresh, stale-if-error, and exact-generation revocation. Split validators require unanimous serial all-group agreement before replay; fresh, mixed, or revoked votes trigger an unconditional whole-result rerun, while validation errors fail closed. Durable bounds are constructor-owned; live SQL limits govern memory. Durable exchange/scalar/correlated entries and SWR remain unwired |
 | Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink; built-in transports forward in-band worker logs, without request/function correlation, access logs, or stderr |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
@@ -335,4 +338,6 @@ both execute 145/173 records and all 113 comparable queries agree. Aggregate
 executes 42/42; macro/catalog executes 24/24; cache executes 30/38. Separately,
 the completed seven-file focused cache slice executes 79/79 applicable records
 with zero failures over both transports; its two genuine diagnostic
-differences are the still-missing detailed cache-ineligibility reason logs.
+differences record the cache-ineligibility reason logs that were missing in that
+snapshot. Sanitized reasons are implemented now; this historical result is not
+relabeled until the focused corpus is regenerated.

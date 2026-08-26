@@ -246,8 +246,10 @@ unique failure.
 A separate completed seven-file cache slice executes 79/79 applicable records
 over both Unix and HTTP, with zero failures, 19 reviewed non-applicable records,
 five SQL adaptations, 49 exact results, and two genuine diagnostic differences.
-Those two differences are missing detailed cache-ineligibility reason logs,
-which remain an honest gap. This is focused post-baseline evidence, not a new
+Those two snapshot differences were missing detailed cache-ineligibility reason
+logs. Stable sanitized reasons are now emitted, but that focused corpus snapshot
+has not yet been regenerated, so it remains historical evidence rather than a
+retroactive pass claim. This is focused post-baseline evidence, not a new
 full-corpus total.
 
 The complete typed filter-pushdown slice executes 185/185 applicable records
@@ -307,13 +309,15 @@ engine work to a minimum:
    references, replay leases, restart reconciliation, corruption-as-miss
    recovery, and combined SQL flush/reap make that tier safe to share between
    local processes on filesystems with Unix rename, advisory-lock, and
-   directory-`fsync` semantics. Durable split validators still require atomic
-   all-partition validation; durable scalar and exchange entries, correlated
-   1:N per-value entries, stale-while-revalidate,
-   cross-process request coalescing, worker-log forwarding, and detailed
-   ineligibility-reason logs remain. The promoted baseline executes 646/783
-   cache records. The focused cache batch remains a useful zero-failure
-   regression slice within that promoted result.
+   directory-`fsync` semantics. Durable split validators now use serial
+   all-group agreement before replay and an unconditional whole-result rerun
+   after any fresh, mixed, or revoked vote; validation errors fail closed.
+   Durable scalar and exchange entries, correlated 1:N per-value entries,
+   stale-while-revalidate, and
+   cross-process request coalescing remain. In-band worker logs and sanitized
+   cache-ineligibility reasons are now available through SQL history and the
+   embedder event sink. The promoted baseline executes 646/783 cache records;
+   its focused cache batch remains historical evidence until regenerated.
 4. **Table-in/out engine boundary.** Correlated LATERAL calls and wide table
    subqueries remain the predominant engine-boundary failures. The adapter
    accepts the single-column expression shape DataFusion exposes naturally,

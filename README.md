@@ -302,10 +302,12 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   codec (Zstandard by default) and shares them safely between local processes.
   Non-split producers persist ETag/Last-Modified policy, conditionally
   revalidate after restart, honor stale-if-error, and remove only the observed
-  durable generation when the worker revokes reuse. Split results remain
-  fresh-hit-only: their validators are stripped because replaying one whole
-  stale result requires an atomic all-partition agreement protocol that is not
-  implemented. The durable tier is not used for exchange, scalar, correlated
+  durable generation when the worker revokes reuse. Stale split results are
+  validated atomically: partition zero serially asks every nonempty split group,
+  and replays only after unanimous compatible `not_modified` responses. Any
+  fresh, mixed, or revoked response removes the selected generation and reruns
+  every split without conditions; validation errors fail closed rather than
+  serving stale bytes. The durable tier is not used for exchange, scalar, correlated
   1:N, dynamic-filtered, unbounded,
   ordered-split, secret-dependent, or non-catalog-scoped calls. Its recency
   ordering is approximate per process, and its crash-safety contract requires

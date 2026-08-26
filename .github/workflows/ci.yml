@@ -22,7 +22,7 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   # Keep the sibling source reviewable and reproducible. Update this hash only
   # with the vgi-datafusion compatibility change that has been reviewed against it.
-  VGI_RUST_REVISION: "bf802e88bc9dc374ebe030941deb2bf19e779aa5"
+  VGI_RUST_REVISION: "49f339126d6f4708dcaf5e39ba0c3ef998957517"
   VGI_RUST_REGISTRY_VERSION: "0.31.0"
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Query-farm/vgi-rust
-          ref: bf802e88bc9dc374ebe030941deb2bf19e779aa5 # Reviewed worker-log API revision.
+          ref: 49f339126d6f4708dcaf5e39ba0c3ef998957517 # Reviewed split-revalidation fixture revision.
           path: vgi-rust
           persist-credentials: false
 

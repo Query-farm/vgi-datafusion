@@ -65,7 +65,7 @@
       "title": "VGI result cache",
       "status": "partial",
       "groups": ["cache"],
-      "remaining": ["durable split validators with atomic all-partition validation", "durable scalar and exchange entries", "correlated 1:N per-value caching", "stale-while-revalidate", "cross-process request coalescing", "worker-log forwarding beyond adapter events"]
+      "remaining": ["durable scalar and exchange entries", "correlated 1:N per-value caching", "stale-while-revalidate", "cross-process request coalescing"]
     },
     {
       "id": "catalog_metadata",
