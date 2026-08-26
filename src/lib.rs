@@ -1907,6 +1907,8 @@ pub struct VgiScanExec {
     cache_key: Option<vgi_client::CacheKey>,
     cache_probe: OnceLock<Option<vgi_client::CachedEntry>>,
     disk_cache_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
+    disk_cache_revalidation_probe: Arc<tokio::sync::OnceCell<Option<SharedDiskHit>>>,
+    cache_revalidation_probe: Arc<OnceLock<Option<ScanCacheRevalidation>>>,
     cache_observation: Arc<OnceLock<()>>,
     cache_flight: Arc<OnceLock<crate::runtime::ResultFlightClaim>>,
     cache_flight_probe: Arc<OnceLock<Option<vgi_client::CachedEntry>>>,
@@ -1919,6 +1921,15 @@ pub struct VgiScanExec {
 #[derive(Clone)]
 struct SharedDiskHit(Arc<vgi_client::DiskCacheHit>);
 
+#[derive(Clone, Debug)]
+enum ScanCacheRevalidation {
+    Memory {
+        entry: vgi_client::CachedEntry,
+        disk_companion: Option<SharedDiskHit>,
+    },
+    Disk(SharedDiskHit),
+}
+
 impl fmt::Debug for SharedDiskHit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SharedDiskHit")
@@ -1926,6 +1937,87 @@ impl fmt::Debug for SharedDiskHit {
             .field("partitions", &self.0.partitions())
             .field("stored_bytes", &self.0.stored_bytes())
             .finish()
+    }
+}
+
+impl ScanCacheRevalidation {
+    fn memory_with_matching_disk(
+        entry: vgi_client::CachedEntry,
+        disk: Option<SharedDiskHit>,
+    ) -> Self {
+        let disk_companion = disk.filter(|hit| {
+            let has_validator = entry.etag.is_some() || entry.last_modified.is_some();
+            has_validator
+                && entry.etag.as_deref() == hit.0.etag()
+                && entry.last_modified.as_deref() == hit.0.last_modified()
+        });
+        Self::Memory {
+            entry,
+            disk_companion,
+        }
+    }
+
+    fn etag(&self) -> Option<String> {
+        match self {
+            Self::Memory { entry, .. } => entry.etag.clone(),
+            Self::Disk(hit) => hit.0.etag().map(str::to_owned),
+        }
+    }
+
+    fn last_modified(&self) -> Option<String> {
+        match self {
+            Self::Memory { entry, .. } => entry.last_modified.clone(),
+            Self::Disk(hit) => hit.0.last_modified().map(str::to_owned),
+        }
+    }
+
+    fn may_serve_on_error(&self) -> bool {
+        match self {
+            Self::Memory { entry, .. } => entry.may_serve_on_error_at(std::time::Instant::now()),
+            Self::Disk(hit) => hit.0.may_serve_on_error_at(std::time::SystemTime::now()),
+        }
+    }
+
+    fn replay(
+        &self,
+        tx: &tokio::sync::mpsc::Sender<DFResult<datafusion::arrow::array::RecordBatch>>,
+        schema: &SchemaRef,
+        column_mapping: Option<&HashMap<String, String>>,
+    ) -> DFResult<()> {
+        match self {
+            Self::Memory { entry, .. } => {
+                for batch in entry.batches() {
+                    let batch = conform(batch.clone(), schema, column_mapping)?;
+                    tx.blocking_send(Ok(batch)).map_err(|_| {
+                        DataFusionError::Execution(
+                            "cached revalidation consumer dropped".to_string(),
+                        )
+                    })?;
+                }
+            }
+            Self::Disk(hit) => {
+                for partition in 0..hit.0.partitions() {
+                    let reader = hit.0.open_partition(partition).map_err(|error| {
+                        DataFusionError::Execution(format!(
+                            "VGI durable cache replay failed: {error}"
+                        ))
+                    })?;
+                    for batch in reader {
+                        let batch = conform(
+                            batch.map_err(DataFusionError::from)?,
+                            schema,
+                            column_mapping,
+                        )?;
+                        tx.blocking_send(Ok(batch)).map_err(|_| {
+                            DataFusionError::Execution(
+                                "durable cached revalidation consumer dropped".to_string(),
+                            )
+                        })?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2126,6 +2218,7 @@ impl VgiScanExec {
                 key.clone(),
                 partitions.max(1),
                 cache_storage_schema.clone(),
+                split_groups.is_none(),
                 cache_metrics.clone(),
             ))
         });
@@ -2153,6 +2246,8 @@ impl VgiScanExec {
             cache_key,
             cache_probe: OnceLock::new(),
             disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
+            disk_cache_revalidation_probe: Arc::new(tokio::sync::OnceCell::new()),
+            cache_revalidation_probe: Arc::new(OnceLock::new()),
             cache_observation: Arc::new(OnceLock::new()),
             cache_flight: Arc::new(OnceLock::new()),
             cache_flight_probe: Arc::new(OnceLock::new()),
@@ -2192,6 +2287,8 @@ impl VgiScanExec {
             cache_key: None,
             cache_probe: OnceLock::new(),
             disk_cache_probe: Arc::new(tokio::sync::OnceCell::new()),
+            disk_cache_revalidation_probe: Arc::new(tokio::sync::OnceCell::new()),
+            cache_revalidation_probe: Arc::new(OnceLock::new()),
             cache_observation: Arc::new(OnceLock::new()),
             cache_flight: Arc::new(OnceLock::new()),
             cache_flight_probe: Arc::new(OnceLock::new()),
@@ -2231,6 +2328,7 @@ struct ScanCacheCapture {
     runtime: Arc<VgiRuntime>,
     key: vgi_client::CacheKey,
     storage_schema: SchemaRef,
+    durable_revalidation: bool,
     metrics: VgiCacheMetrics,
     flight: Mutex<Option<Arc<crate::runtime::ResultFlightProducer>>>,
     state: Mutex<ScanCacheCaptureState>,
@@ -2288,12 +2386,27 @@ fn executed_cache_substreams(outcomes: &[Option<ScanCachePartitionOutcome>]) -> 
         .max(1)
 }
 
+fn scan_cache_storage_control(
+    control: &vgi_client::CacheControl,
+    allow_revalidation: bool,
+) -> vgi_client::CacheControl {
+    let mut durable = control.clone();
+    if !allow_revalidation {
+        durable.etag = None;
+        durable.last_modified = None;
+        durable.revalidatable = false;
+        durable.stale_while_revalidate = None;
+        durable.stale_if_error = None;
+    }
+    durable
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)] // Contract test stays beside its private helper.
 mod scan_cache_contract_tests {
     use super::{
-        completed_scan_cache_control, executed_cache_substreams, ScanCachePartitionOutcome,
-        VgiConnection,
+        completed_scan_cache_control, executed_cache_substreams, scan_cache_storage_control,
+        ScanCachePartitionOutcome, VgiConnection,
     };
 
     #[test]
@@ -2329,6 +2442,53 @@ mod scan_cache_contract_tests {
             2,
             "zero-row scans still count as executed producer substreams"
         );
+    }
+
+    #[test]
+    fn split_durable_policy_strips_uncoordinated_validators() {
+        let control = vgi_client::CacheControl::ttl(0)
+            .with_etag("opaque")
+            .with_revalidatable()
+            .with_stale_if_error(60);
+        assert_eq!(scan_cache_storage_control(&control, true), control);
+
+        let split = scan_cache_storage_control(&control, false);
+        assert_eq!(split.ttl_seconds, Some(0));
+        assert_eq!(split.etag, None);
+        assert_eq!(split.last_modified, None);
+        assert!(!split.revalidatable);
+        assert_eq!(split.stale_while_revalidate, None);
+        assert_eq!(split.stale_if_error, None);
+        let cache = vgi_client::ResultCache::new(vgi_client::CacheLimits::default());
+        assert!(matches!(
+            cache.freshness_deadline(Some(&split), Some("scope"), std::time::SystemTime::now()),
+            Err(vgi_client::Ineligible::NoFreshness)
+        ));
+
+        let stale_key = vgi_client::CacheKey {
+            catalog: "example".into(),
+            identity_scope: "scope".into(),
+            worker_label: "worker".into(),
+            function: "main.split".into(),
+            arguments: Vec::new(),
+            projection: None,
+            filters: None,
+            catalog_version: 1,
+            at: None,
+            settings: Vec::new(),
+            attach_options: Vec::new(),
+            row_limit: None,
+            ordering: None,
+            sample: None,
+            plan: None,
+        };
+        cache.insert(
+            stale_key,
+            Vec::new(),
+            std::time::Duration::ZERO,
+            Some(&split),
+        );
+        assert_eq!(cache.reap(), 1, "a stale split entry must not be retained");
     }
 
     #[test]
@@ -2435,6 +2595,7 @@ impl ScanCacheCapture {
         key: vgi_client::CacheKey,
         partitions: usize,
         storage_schema: SchemaRef,
+        durable_revalidation: bool,
         metrics: VgiCacheMetrics,
     ) -> Self {
         let disk_cache = runtime.durable_result_cache().cloned();
@@ -2444,6 +2605,7 @@ impl ScanCacheCapture {
             runtime,
             key,
             storage_schema,
+            durable_revalidation,
             metrics,
             flight: Mutex::new(None),
             state: Mutex::new(ScanCacheCaptureState {
@@ -2631,9 +2793,10 @@ impl ScanCacheCapture {
                 return;
             }
         };
+        let storage_control = scan_cache_storage_control(&control, self.durable_revalidation);
         let received_at_wall = std::time::SystemTime::now();
         let freshness = match self.cache.freshness_deadline(
-            Some(&control),
+            Some(&storage_control),
             Some(&self.key.identity_scope),
             received_at_wall,
         ) {
@@ -2656,7 +2819,7 @@ impl ScanCacheCapture {
                 return;
             }
         };
-        let immediate_revalidation = freshness.expires_at() <= received_at_wall;
+        let immediate_revalidation = freshness.is_immediately_stale();
         let batches = state
             .partitions
             .iter()
@@ -2665,7 +2828,12 @@ impl ScanCacheCapture {
         let num_substreams = executed_cache_substreams(&state.outcomes);
         let mut disk_stored = match (self.disk_cache.as_ref(), state.disk_capture.take()) {
             (Some(cache), Some(capture)) => {
-                match cache.commit_freshness(self.key.clone(), capture, freshness, Some(&control)) {
+                match cache.commit_freshness(
+                    self.key.clone(),
+                    capture,
+                    freshness,
+                    Some(&storage_control),
+                ) {
                     Ok(vgi_client::DiskCacheCommit::Stored { .. }) => true,
                     Ok(vgi_client::DiskCacheCommit::Skipped(reason)) => {
                         let mut event = VgiEvent::new("cache.disk_refused");
@@ -2715,7 +2883,7 @@ impl ScanCacheCapture {
                 } else {
                     remaining
                 },
-                Some(&control),
+                Some(&storage_control),
             );
         }
         if memory_stored || disk_stored {
@@ -2815,6 +2983,47 @@ async fn durable_cache_lookup_async(
         Err(error) => {
             let mut event = VgiEvent::new("cache.disk_error");
             event.message = Some(format!("durable lookup task failed: {error}"));
+            runtime.emit(event);
+            None
+        }
+    }
+}
+
+fn durable_cache_revalidation_lookup(
+    runtime: &VgiRuntime,
+    key: &vgi_client::CacheKey,
+    expected_schema: &SchemaRef,
+) -> Option<SharedDiskHit> {
+    let cache = runtime.durable_result_cache()?;
+    match cache.lookup_for_revalidation_expected_schema(key, expected_schema) {
+        Ok(Some(hit)) => Some(SharedDiskHit(Arc::new(hit))),
+        Ok(None) => None,
+        Err(error) => {
+            let mut event = VgiEvent::new("cache.disk_error");
+            event.catalog = Some(key.catalog.clone());
+            event.function = Some(key.function.clone());
+            event.message = Some(format!("durable revalidation lookup failed: {error}"));
+            runtime.emit(event);
+            None
+        }
+    }
+}
+
+async fn durable_cache_revalidation_lookup_async(
+    runtime: Arc<VgiRuntime>,
+    key: vgi_client::CacheKey,
+    expected_schema: SchemaRef,
+) -> Option<SharedDiskHit> {
+    let runtime_for_lookup = Arc::clone(&runtime);
+    match tokio::task::spawn_blocking(move || {
+        durable_cache_revalidation_lookup(&runtime_for_lookup, &key, &expected_schema)
+    })
+    .await
+    {
+        Ok(hit) => hit,
+        Err(error) => {
+            let mut event = VgiEvent::new("cache.disk_error");
+            event.message = Some(format!("durable revalidation lookup task failed: {error}"));
             runtime.emit(event);
             None
         }
@@ -3377,13 +3586,14 @@ impl ExecutionPlan for VgiScanExec {
         let cache_storage_schema = self.cache_storage_schema.clone();
         let column_mapping = self.column_mapping.clone();
         let cache_capture = self.cache_capture.clone();
-        let revalidation = if self.split_groups.is_none() {
+        let memory_revalidation = if self.split_groups.is_none() {
             self.cache_key
                 .as_ref()
                 .and_then(|key| self.conn.runtime.result_cache().get_for_revalidation(key))
         } else {
             None
         };
+        let cache_revalidation_probe = Arc::clone(&self.cache_revalidation_probe);
         let cache_key = self.cache_key.clone();
         let cache = Arc::clone(self.conn.runtime.result_cache());
         let worker_metrics = partition_metrics.worker.clone();
@@ -3408,6 +3618,10 @@ impl ExecutionPlan for VgiScanExec {
                 .map(|tokens| format!("partition={partition}, tokens={}", tokens.len()));
             conn.runtime.emit(event);
             let run = || -> DFResult<()> {
+                let revalidation = cache_revalidation_probe
+                    .get()
+                    .and_then(|entry| entry.as_ref())
+                    .cloned();
                 let mut client = conn.connect()?;
                 let attached = conn.attach(&mut client, &catalog)?;
                 // A catalog table carries the worker's own argument bytes;
@@ -3482,10 +3696,10 @@ impl ExecutionPlan for VgiScanExec {
                     // worker evaluates the predicate against the wrong column.
                     filter_columns: Some(initial_pushdown.columns.clone()),
                     row_limit: limit.map(|l| l as i64),
-                    if_none_match: revalidation.as_ref().and_then(|entry| entry.etag.clone()),
+                    if_none_match: revalidation.as_ref().and_then(ScanCacheRevalidation::etag),
                     if_modified_since: revalidation
                         .as_ref()
-                        .and_then(|entry| entry.last_modified.clone()),
+                        .and_then(ScanCacheRevalidation::last_modified),
                     ..Default::default()
                 };
                 let opts = match (&split_plan, split_tokens.clone()) {
@@ -3495,19 +3709,18 @@ impl ExecutionPlan for VgiScanExec {
                 let mut scan = match client.scan(&bound, &opts) {
                     Ok(scan) => scan,
                     Err(_error)
-                        if revalidation.as_ref().is_some_and(|entry| {
-                            entry.may_serve_on_error_at(std::time::Instant::now())
-                        }) =>
+                        if revalidation
+                            .as_ref()
+                            .is_some_and(ScanCacheRevalidation::may_serve_on_error) =>
                     {
                         let entry = revalidation.as_ref().expect("checked above");
-                        for batch in entry.batches() {
-                            let batch =
-                                conform(batch.clone(), &scan_schema, column_mapping.as_deref())?;
-                            if tx.blocking_send(Ok(batch)).is_err() {
-                                break;
+                        entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
+                        cache.record_stale_serve();
+                        if matches!(entry, ScanCacheRevalidation::Disk(_)) {
+                            if let Some(disk) = conn.runtime.durable_result_cache() {
+                                disk.record_stale_serve();
                             }
                         }
-                        cache.record_stale_serve();
                         cache_metrics.stale_serves.add(1);
                         if let Some(capture) = &cache_capture {
                             capture.revalidated();
@@ -3542,22 +3755,18 @@ impl ExecutionPlan for VgiScanExec {
                         Ok(next) => next,
                         Err(error) => {
                             if emitted == 0
-                                && revalidation.as_ref().is_some_and(|entry| {
-                                    entry.may_serve_on_error_at(std::time::Instant::now())
-                                })
+                                && revalidation
+                                    .as_ref()
+                                    .is_some_and(ScanCacheRevalidation::may_serve_on_error)
                             {
                                 let entry = revalidation.as_ref().expect("checked above");
-                                for batch in entry.batches() {
-                                    let batch = conform(
-                                        batch.clone(),
-                                        &scan_schema,
-                                        column_mapping.as_deref(),
-                                    )?;
-                                    if tx.blocking_send(Ok(batch)).is_err() {
-                                        break;
+                                entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
+                                cache.record_stale_serve();
+                                if matches!(entry, ScanCacheRevalidation::Disk(_)) {
+                                    if let Some(disk) = conn.runtime.durable_result_cache() {
+                                        disk.record_stale_serve();
                                     }
                                 }
-                                cache.record_stale_serve();
                                 cache_metrics.stale_serves.add(1);
                                 if let Some(capture) = &cache_capture {
                                     capture.revalidated();
@@ -3640,7 +3849,7 @@ impl ExecutionPlan for VgiScanExec {
                 if !limit.is_some_and(|l| emitted >= l) {
                     let control = scan.cache_control().cloned();
                     if control.as_ref().is_some_and(|control| control.not_modified) {
-                        let entry = revalidation.as_ref().ok_or_else(|| {
+                        let mut entry = revalidation.clone().ok_or_else(|| {
                             DataFusionError::Execution(format!(
                                 "VGI function `{function}` returned not_modified without a conditional request"
                             ))
@@ -3655,29 +3864,116 @@ impl ExecutionPlan for VgiScanExec {
                                 "VGI function `{function}` returned not_modified without a cache key"
                             ))
                         })?;
-                        let ttl = match cache.eligibility(
+                        let received_at_wall = std::time::SystemTime::now();
+                        let freshness = match cache.freshness_deadline(
                             control.as_ref(),
                             Some(key.identity_scope.as_str()),
-                            entry.bytes(),
+                            received_at_wall,
                         ) {
-                            Ok(ttl) => ttl,
+                            Ok(freshness) => freshness,
                             Err(reason) => {
-                                cache.remove(key);
+                                match &entry {
+                                    ScanCacheRevalidation::Memory { disk_companion, .. } => {
+                                        cache.remove(key);
+                                        if let (Some(disk), Some(hit)) = (
+                                            conn.runtime.durable_result_cache(),
+                                            disk_companion.as_ref(),
+                                        ) {
+                                            if let Err(error) = disk.remove_hit(&hit.0) {
+                                                let mut event = VgiEvent::new("cache.disk_error");
+                                                event.catalog = Some(catalog.clone());
+                                                event.function =
+                                                    Some(format!("{schema_name}.{function}"));
+                                                event.message = Some(format!(
+                                                    "durable companion validator revocation failed: {error}"
+                                                ));
+                                                conn.runtime.emit(event);
+                                            }
+                                        }
+                                    }
+                                    ScanCacheRevalidation::Disk(hit) => {
+                                        if let Some(disk) = conn.runtime.durable_result_cache() {
+                                            if let Err(error) = disk.remove_hit(&hit.0) {
+                                                let mut event = VgiEvent::new("cache.disk_error");
+                                                event.catalog = Some(catalog.clone());
+                                                event.function =
+                                                    Some(format!("{schema_name}.{function}"));
+                                                event.message = Some(format!(
+                                                    "durable validator revocation failed: {error}"
+                                                ));
+                                                conn.runtime.emit(event);
+                                            }
+                                        }
+                                    }
+                                }
                                 return Err(DataFusionError::Execution(format!(
                                     "VGI function `{function}` returned not_modified with ineligible cache control: {reason:?}"
                                 )));
                             }
                         };
-                        cache.slide(key, ttl);
-                        for batch in entry.batches() {
-                            let batch =
-                                conform(batch.clone(), &scan_schema, column_mapping.as_deref())?;
-                            tx.blocking_send(Ok(batch)).map_err(|_| {
-                                DataFusionError::Execution(
-                                    "cached revalidation consumer dropped".to_string(),
-                                )
-                            })?;
+                        // Make this the last admission decision before tier
+                        // mutation and replay. The stale L1 value was cloned
+                        // while building the execution stream, so a concurrent
+                        // host limit reduction may already have evicted the
+                        // map entry. Fall back only to its exact-validator L2
+                        // companion; never let the clone bypass the new cap.
+                        if let ScanCacheRevalidation::Memory {
+                            entry: memory_entry,
+                            disk_companion,
+                        } = &entry
+                        {
+                            if memory_entry.bytes() > cache.limits().max_entry_bytes {
+                                cache.remove(key);
+                                entry = match disk_companion.clone() {
+                                    Some(hit) => ScanCacheRevalidation::Disk(hit),
+                                    None => {
+                                        return Err(DataFusionError::Execution(format!(
+                                            "VGI function `{function}` returned not_modified after its L1 cache entry exceeded the current max_entry_bytes limit"
+                                        )));
+                                    }
+                                };
+                            }
                         }
+                        match &entry {
+                            ScanCacheRevalidation::Memory { disk_companion, .. } => {
+                                let control =
+                                    control.as_ref().expect("not_modified has cache control");
+                                cache.slide_with_control(key, freshness.remaining(), control);
+                                if let (Some(disk), Some(hit)) =
+                                    (conn.runtime.durable_result_cache(), disk_companion.as_ref())
+                                {
+                                    if let Err(error) =
+                                        disk.revalidate_freshness(&hit.0, freshness, control)
+                                    {
+                                        let mut event = VgiEvent::new("cache.disk_error");
+                                        event.catalog = Some(catalog.clone());
+                                        event.function = Some(format!("{schema_name}.{function}"));
+                                        event.message = Some(format!(
+                                            "durable companion validator refresh failed: {error}"
+                                        ));
+                                        conn.runtime.emit(event);
+                                    }
+                                }
+                            }
+                            ScanCacheRevalidation::Disk(hit) => {
+                                if let Some(disk) = conn.runtime.durable_result_cache() {
+                                    if let Err(error) = disk.revalidate_freshness(
+                                        &hit.0,
+                                        freshness,
+                                        control.as_ref().expect("not_modified has cache control"),
+                                    ) {
+                                        let mut event = VgiEvent::new("cache.disk_error");
+                                        event.catalog = Some(catalog.clone());
+                                        event.function = Some(format!("{schema_name}.{function}"));
+                                        event.message = Some(format!(
+                                            "durable validator refresh failed: {error}"
+                                        ));
+                                        conn.runtime.emit(event);
+                                    }
+                                }
+                            }
+                        }
+                        entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
                         if let Some(capture) = &cache_capture {
                             capture.revalidated();
                         }
@@ -3685,6 +3981,9 @@ impl ExecutionPlan for VgiScanExec {
                         let mut event = VgiEvent::new("cache.revalidated");
                         event.catalog = Some(catalog.clone());
                         event.function = Some(format!("{schema_name}.{function}"));
+                        if matches!(entry, ScanCacheRevalidation::Disk(_)) {
+                            event.message = Some("tier=disk".to_string());
+                        }
                         conn.runtime.emit(event);
                         return Ok(());
                     }
@@ -3728,6 +4027,10 @@ impl ExecutionPlan for VgiScanExec {
                 key,
                 Arc::clone(self.conn.runtime.result_cache()),
                 Arc::clone(&self.disk_cache_probe),
+                Arc::clone(&self.disk_cache_revalidation_probe),
+                Arc::clone(&self.cache_revalidation_probe),
+                memory_revalidation.clone(),
+                self.split_groups.is_none(),
                 Arc::clone(&self.cache_observation),
                 Arc::clone(&self.cache_flight_probe),
                 Arc::clone(&self.cache_flight_disk_probe),
@@ -3751,6 +4054,10 @@ impl ExecutionPlan for VgiScanExec {
                     key,
                     cache,
                     plan_disk_probe,
+                    plan_disk_revalidation_probe,
+                    revalidation_probe,
+                    memory_revalidation,
+                    revalidation_allowed,
                     cache_observation,
                     probe,
                     disk_probe,
@@ -3797,6 +4104,47 @@ impl ExecutionPlan for VgiScanExec {
                             partition,
                         );
                     } else {
+                        if revalidation_allowed {
+                            let durable_revalidation = plan_disk_revalidation_probe
+                                .get_or_init(|| {
+                                    durable_cache_revalidation_lookup_async(
+                                        Arc::clone(&runtime),
+                                        key.clone(),
+                                        Arc::clone(&storage_schema),
+                                    )
+                                })
+                                .await
+                                .clone();
+                            // Preserve normal L1-before-L2 tier precedence. A
+                            // process-local entry may have been refreshed after
+                            // a later durable admission failed, so the durable
+                            // generation is not necessarily newer.
+                            let memory_revalidation = memory_revalidation.clone().filter(|entry| {
+                                let within_current_l1_limit =
+                                    entry.bytes() <= cache.limits().max_entry_bytes;
+                                if !within_current_l1_limit {
+                                    // `memory_revalidation` was cloned when the
+                                    // execution stream was built. A live host
+                                    // limit update may have evicted the map
+                                    // entry since then; do not let the clone
+                                    // bypass the new L1 admission policy.
+                                    cache.remove(&key);
+                                }
+                                within_current_l1_limit
+                            });
+                            let selected = match memory_revalidation {
+                                Some(entry) => {
+                                    Some(ScanCacheRevalidation::memory_with_matching_disk(
+                                        entry,
+                                        durable_revalidation,
+                                    ))
+                                }
+                                None => durable_revalidation.map(ScanCacheRevalidation::Disk),
+                            };
+                            let _ = revalidation_probe.set(selected);
+                        } else {
+                            let _ = revalidation_probe.set(None);
+                        }
                         if cache_observation.set(()).is_ok() {
                             cache_metrics.misses.add(1);
                             let mut event = VgiEvent::new("cache.miss");
@@ -3877,6 +4225,33 @@ impl ExecutionPlan for VgiScanExec {
                                                 event.message = Some("tier=disk".to_string());
                                                 runtime.emit(event);
                                             } else {
+                                                let durable_stale =
+                                                    durable_cache_revalidation_lookup_async(
+                                                        Arc::clone(&runtime),
+                                                        key.clone(),
+                                                        Arc::clone(&storage_schema),
+                                                    )
+                                                    .await;
+                                                if let Some(hit) = durable_stale {
+                                                    drop(job.take());
+                                                    spawn_durable_replay(
+                                                        hit,
+                                                        durable_replay_tx,
+                                                        replay_schema,
+                                                        column_mapping,
+                                                        partition,
+                                                    );
+                                                    cache_metrics.coalesced_hits.add(1);
+                                                    let mut event =
+                                                        VgiEvent::new("cache.coalesced_hit");
+                                                    event.catalog = Some(catalog);
+                                                    event.function = Some(function);
+                                                    event.message = Some("tier=disk".to_string());
+                                                    runtime.emit(event);
+                                                    return rx.recv().await.map(|item| {
+                                                        (item, (rx, job, None, replay))
+                                                    });
+                                                }
                                                 // A zero-TTL revalidatable entry, short
                                                 // expiry, or intervening eviction can make
                                                 // a successful fill unavailable by the

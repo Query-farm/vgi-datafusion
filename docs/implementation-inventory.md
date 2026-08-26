@@ -41,10 +41,13 @@ DataFusion where there is no matching planning or execution seam.
   entries, and buffered whole-input results support ETag/Last-Modified
   conditional revalidation, including immediate-stale validator policies, and
   worker-authorized stale-if-error fallback.
-- Conditional revalidation and stale-if-error are memory-tier behavior. The
-  durable tier admits only complete, bounded, catalog-scoped producer results
-  with positive freshness remaining; it stores neither immediate-stale entries
-  nor validators.
+- The durable tier persists validators for complete, bounded, catalog-scoped
+  non-split producers. It can conditionally revalidate after runtime restart,
+  atomically slide the observed generation, honor worker-authorized
+  stale-if-error, and conditionally remove that generation when reuse is
+  revoked. Split entries remain fresh-hit-only: validator metadata is stripped,
+  and immediate-stale split results are refused until an atomic all-partition
+  not-modified protocol exists.
 - Concurrent identical misses are coalesced per complete cache key. One query
   fills the entry while followers replay the atomic result; cancellation,
   refusal, expiry, and `no_store` wake followers to execute normally rather
@@ -76,9 +79,10 @@ DataFusion where there is no matching planning or execution seam.
   and an empty partition label for whole-result entries. Memory bytes measure
   retained Arrow memory and its substreams are executed producer streams; disk
   bytes measure encoded Arrow payloads and its substream count is the stored
-  partition-file count. Per-entry disk hit/revalidation values are unavailable,
-  so disk rows report zero/false. Flush and reap operate on both configured
-  tiers. Producer scan/cache counters also
+  partition-file count. Disk rows report durable revalidation capability,
+  while per-entry hit counts remain unavailable. Aggregate durable
+  revalidation and stale-serve counters are exposed. Flush and reap operate on
+  both configured tiers. Producer scan/cache counters also
   appear as native DataFusion execution metrics and in `EXPLAIN ANALYZE`;
   result-cache statistics distinguish exchange hits, stores, and bytes served.
 - SQL-owned `vgi_result_cache_max_entry_bytes`,
@@ -201,12 +205,14 @@ replay remains physically present until release and a later reap.
 | Table and buffered functions | Supported | One input column can carry nested Arrow values; multiple top-level input columns remain constrained by scalar-subquery planning |
 | Global functions | Supported | Default-on/opt-out policy, collision ownership, concurrent attach linearization, replacement, and DETACH cleanup included |
 | Projection, static filters, LIMIT | Supported | Direct functions preserve exactness; lazy catalog tables recheck filters |
+| Set operations and joins | Supported | VGI scans compose with UNION/INTERSECT/EXCEPT, IN/EXISTS, CTEs, and DataFusion semi/anti plans; the SQL adapter maps DuckDB's unqualified `SEMI JOIN`/`ANTI JOIN` spelling to the equivalent left-directed plans, including in nested SELECTs |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
-| Session result cache | Partial | The bounded memory tier covers producer/split scans, streaming per-batch, stable scalar per-value, and unordered buffered whole-input results with conditional revalidation, runtime-local single-flight, stale-if-error, and revocation eviction. An opt-in Arrow IPC tier (Zstandard by default) durably shares complete, positively fresh, bounded producer/split results across local processes with leases, atomic publication, restart recovery, and combined SQL diagnostics/maintenance. Durable bounds are constructor-owned; live SQL limits govern memory. Durable validators, exchange/scalar/correlated entries, and SWR remain unwired |
+| Session result cache | Partial | The bounded memory tier covers producer/split scans, streaming per-batch, stable scalar per-value, and unordered buffered whole-input results with conditional revalidation, runtime-local single-flight, stale-if-error, and revocation eviction. An opt-in Arrow IPC tier (Zstandard by default) durably shares complete bounded producer/split results across local processes with leases, atomic publication, restart recovery, and combined SQL diagnostics/maintenance. Non-split producer validators survive restart with conditional refresh, stale-if-error, and exact-generation revocation; split validators remain fail-closed pending atomic all-partition agreement. Durable bounds are constructor-owned; live SQL limits govern memory. Durable exchange/scalar/correlated entries and SWR remain unwired |
 | Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
 | Correlated LATERAL table calls | Not wired | DataFusion binds table functions before an outer row is available |
+| Correlated scalar subqueries with VGI aggregates | Not wired | DataFusion 55 leaves a `ScalarSubquery` expression that its physical planner cannot lower; uncorrelated scalar aggregates and correlated IN/EXISTS paths work |
 | Dynamic join filters | Partial | Single-column `IN` and same-column equality-OR sets use VGI v2 side IPC at init, with exact scalar types preserved. Small multi-column hash-join tuple sets are safely decomposed into per-column marginal sets for worker pruning while DataFusion retains the exact tuple join locally. Later constant/range generations use `vgi_pushdown_filters` over subprocess, Unix/TCP, and plain or authenticated HTTP continuations; large hash/Bloom state and tuple-correlated protocol expressions remain local |
 | ORDER BY / TABLESAMPLE hints | Not wired | Current provider scan callback does not carry these VGI hints |
 | Table time travel | Supported | Fully-qualified VGI tables accept literal `AT (VERSION => …)` and `AT (TIMESTAMP => …)`; historical schemas and cache identities are isolated |

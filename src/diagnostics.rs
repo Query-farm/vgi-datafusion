@@ -700,6 +700,8 @@ fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         Field::new("disk_capture_aborts", DataType::UInt64, false),
         Field::new("disk_entries", DataType::UInt64, false),
         Field::new("disk_total_bytes", DataType::UInt64, false),
+        Field::new("disk_revalidations", DataType::UInt64, false),
+        Field::new("disk_stale_serves", DataType::UInt64, false),
     ]));
     let values = [
         stats.hits,
@@ -726,6 +728,8 @@ fn cache_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         disk.capture_aborts,
         disk.entries as u64,
         disk.total_bytes,
+        disk.revalidations,
+        disk.stale_serves,
     ];
     Ok(RecordBatch::try_new(
         schema,
@@ -831,7 +835,7 @@ fn cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
                 entries
                     .iter()
                     .map(|entry| entry.revalidatable)
-                    .chain(disk_entries.iter().map(|_| false))
+                    .chain(disk_entries.iter().map(|entry| entry.revalidatable))
                     .collect::<Vec<_>>(),
             )),
             Arc::new(StringArray::from_iter_values(
@@ -866,8 +870,9 @@ fn cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
 /// Compatibility shape for the DuckDB extension's `vgi_result_cache()`.
 ///
 /// Keep the DataFusion-native diagnostic above stable and expose only fields
-/// each cache tier actually owns. Durable entries intentionally leave the
-/// memory-only validator and per-entry hit count empty.
+/// each cache tier actually owns. Both tiers expose validators when present;
+/// durable entries intentionally leave the memory-only per-entry hit count
+/// empty.
 fn duckdb_cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     let entries = runtime.result_cache().entries();
     let disk_entries = runtime
@@ -974,7 +979,7 @@ fn duckdb_cache_entries(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
                 entries
                     .iter()
                     .map(|entry| entry.revalidatable)
-                    .chain(disk_entries.iter().map(|_| false))
+                    .chain(disk_entries.iter().map(|entry| entry.revalidatable))
                     .collect::<Vec<_>>(),
             )),
             Arc::new(UInt64Array::from_iter_values(
@@ -2707,19 +2712,23 @@ mod tests {
             .begin_capture(Arc::clone(&schema), 1)
             .map_err(vgi_error)?;
         capture.push_batch(0, &batch).map_err(vgi_error)?;
+        let disk_control = vgi_client::CacheControl::ttl(60)
+            .with_etag("diagnostic-validator")
+            .with_revalidatable();
         assert!(disk
             .commit(
                 key,
                 capture,
                 std::time::Duration::from_secs(60),
-                Some(&control),
+                Some(&disk_control),
             )
             .map_err(vgi_error)?
             .is_stored());
 
         let stats = ctx
             .sql(
-                "SELECT disk_inserts, disk_entries, disk_total_bytes \
+                "SELECT disk_inserts, disk_entries, disk_total_bytes, \
+                        disk_revalidations, disk_stale_serves \
                  FROM vgi_cache_stats()",
             )
             .await?
@@ -2745,11 +2754,23 @@ mod tests {
                 .value(0)
                 > 0
         );
+        for column in 3..5 {
+            assert_eq!(
+                stats[0]
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .value(0),
+                0
+            );
+        }
 
         let disk_rows = ctx
             .sql(
                 "SELECT COUNT(*) FROM vgi_cache_entries() \
-                 WHERE tier = 'disk' AND codec = 'none' AND partitions = 1",
+                 WHERE tier = 'disk' AND codec = 'none' AND partitions = 1 \
+                   AND revalidatable",
             )
             .await?
             .collect()
@@ -2767,7 +2788,7 @@ mod tests {
             .sql(
                 "SELECT COUNT(*) FROM vgi_result_cache() \
                  WHERE tier = 'disk' AND num_batches = 1 AND num_substreams = 1 \
-                   AND at_unit = 'VERSION' AND at_value = '7'",
+                   AND at_unit = 'VERSION' AND at_value = '7' AND revalidatable",
             )
             .await?
             .collect()

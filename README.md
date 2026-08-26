@@ -26,6 +26,7 @@ ctx.sql("SELECT count(*) FROM orders").await?.show().await?;
 | Table time travel | version-specific `TableProvider` + VGI `At` | ✅ |
 | Views and prefixed global functions | `ViewTable` + UDF/UDTF registries | ✅ |
 | Scalar and table SQL macros | sqlparser AST expansion into existing expressions/relations | ✅ |
+| Set operations, CTEs, semi/anti joins | existing DataFusion logical/physical plans + SQL spelling normalization | ✅ |
 | Scalar function | `AsyncScalarUDFImpl` | ✅ |
 | Aggregate and sliding window-frame use | `AggregateUDFImpl` with retract | ◐ |
 | Projection & LIMIT pushdown | `scan(projection, limit)` | ✅ |
@@ -276,10 +277,15 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   independent of row order and physical batch boundaries; ordered sinks,
   secrets, cancellation, failed lifecycle phases, inconsistent policy, and
   over-cap results never commit. An optional host-owned durable tier persists
-  complete, positively fresh, bounded producer and split results as Arrow IPC
-  using the configured codec (Zstandard by default) and shares them safely
-  between local processes. It does not persist validators and is not used for
-  exchange, scalar, correlated 1:N, dynamic-filtered, unbounded,
+  complete bounded producer and split results as Arrow IPC using the configured
+  codec (Zstandard by default) and shares them safely between local processes.
+  Non-split producers persist ETag/Last-Modified policy, conditionally
+  revalidate after restart, honor stale-if-error, and remove only the observed
+  durable generation when the worker revokes reuse. Split results remain
+  fresh-hit-only: their validators are stripped because replaying one whole
+  stale result requires an atomic all-partition agreement protocol that is not
+  implemented. The durable tier is not used for exchange, scalar, correlated
+  1:N, dynamic-filtered, unbounded,
   ordered-split, secret-consuming, or non-catalog-scoped calls. Its recency
   ordering is approximate per process, and its crash-safety contract requires
   a local Unix filesystem with advisory locks, atomic rename, and directory

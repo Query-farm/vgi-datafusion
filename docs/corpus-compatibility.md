@@ -258,6 +258,16 @@ non-applicable because they require multiple top-level scalar-subquery columns,
 DuckDB enum DDL, or a TIMETZ constructor unavailable in DataFusion 55. No
 filter result mismatch is hidden by those classifications.
 
+The focused set-operation/subquery file now executes 21/21 applicable records:
+all 20 comparable queries agree exactly, and the attach statement succeeds.
+This includes UNION/INTERSECT/EXCEPT, IN/NOT IN/EXISTS, CTEs, scalar aggregate
+subqueries, and four semi/anti joins. The adapter normalizes DuckDB's
+unqualified `SEMI JOIN` and `ANTI JOIN` spellings to DataFusion 55's equivalent
+left-directed logical plans. The one remaining correlated scalar subquery with
+a VGI aggregate is recorded as out of scope at DataFusion's physical-expression
+boundary rather than counted as an adapter failure; `SET threads` remains
+engine configuration and is non-applicable.
+
 ## What remains
 
 The following order maximizes useful coverage while keeping new DataFusion
@@ -289,12 +299,21 @@ engine work to a minimum:
    conservatively keyed. Non-projection-capable workers cache one full result
    that is conformed on each local replay, including zero-column `count(*)`.
    Entry diagnostics expose real batch/substream counts, time-travel identity,
-   memory bytes/tier, and truthful whole-result partition labeling. Correlated
-   1:N per-value entries, disk
-   persistence/spilling, compression, stale-while-revalidate, and worker-log
-   forwarding and detailed ineligibility-reason logs remain. The promoted
-   baseline executes 646/783 cache records. The focused cache batch remains a
-   useful zero-failure regression slice within that promoted result.
+   encoded and decoded byte counts, the serving tier, and truthful whole-result
+   partition labeling. An opt-in durable tier now stores complete bounded
+   producer and split results as compressed Arrow IPC. Non-split producer
+   validators survive restart with conditional refresh, exact-generation
+   revocation, and stale-if-error. Atomic
+   references, replay leases, restart reconciliation, corruption-as-miss
+   recovery, and combined SQL flush/reap make that tier safe to share between
+   local processes on filesystems with Unix rename, advisory-lock, and
+   directory-`fsync` semantics. Durable split validators still require atomic
+   all-partition validation; durable scalar and exchange entries, correlated
+   1:N per-value entries, stale-while-revalidate,
+   cross-process request coalescing, worker-log forwarding, and detailed
+   ineligibility-reason logs remain. The promoted baseline executes 646/783
+   cache records. The focused cache batch remains a useful zero-failure
+   regression slice within that promoted result.
 4. **Table-in/out engine boundary.** Correlated LATERAL calls and wide table
    subqueries remain the predominant engine-boundary failures. The adapter
    accepts the single-column expression shape DataFusion exposes naturally,

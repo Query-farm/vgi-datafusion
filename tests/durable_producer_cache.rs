@@ -27,6 +27,7 @@ use vgi_client::CacheLimits;
 use vgi_datafusion::{VgiDurableCacheOptions, VgiRuntime, VgiSessionOptions};
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const REVALIDATION_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TestCacheRoot(PathBuf);
@@ -105,6 +106,18 @@ fn disk_only_options(root: &Path) -> VgiSessionOptions {
     }
 }
 
+fn layered_options(root: &Path) -> VgiSessionOptions {
+    VgiSessionOptions {
+        durable_cache: Some(VgiDurableCacheOptions {
+            root: root.to_path_buf(),
+            max_bytes: 256 * 1024 * 1024,
+            max_entries: 1_024,
+            codec: DiskCacheCodec::default(),
+        }),
+        ..VgiSessionOptions::default()
+    }
+}
+
 async fn attached(
     location: &str,
     root: &Path,
@@ -117,7 +130,15 @@ async fn attached_with_partitions(
     root: &Path,
     target_partitions: usize,
 ) -> datafusion::common::Result<(SessionContext, Arc<VgiRuntime>)> {
-    let runtime = Arc::new(VgiRuntime::try_new(disk_only_options(root))?);
+    attached_with_options(location, target_partitions, disk_only_options(root)).await
+}
+
+async fn attached_with_options(
+    location: &str,
+    target_partitions: usize,
+    options: VgiSessionOptions,
+) -> datafusion::common::Result<(SessionContext, Arc<VgiRuntime>)> {
+    let runtime = Arc::new(VgiRuntime::try_new(options)?);
     let context = SessionContext::new_with_config(
         SessionConfig::new()
             .with_target_partitions(target_partitions)
@@ -163,6 +184,21 @@ async fn query_count_sum(
             .value(0)
     };
     Ok((value(0), value(1)))
+}
+
+async fn wait_for_path(path: &Path) {
+    // On a saturated debug-build host, opening and binding the conditional
+    // scan can take substantially longer than filesystem cleanup. This is a
+    // readiness bound, not the cache operation's latency contract.
+    let deadline = tokio::time::Instant::now() + REVALIDATION_SYNC_TIMEOUT;
+    while !path.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {}",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 fn visit_tree(
@@ -283,6 +319,241 @@ async fn host_root_replays_across_runtime_recreation_without_worker_reinvocation
         .expect("read durable cache stats");
     assert_eq!(warm_disk.entries, 1);
     assert_eq!(warm_disk.hits, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validator_survives_restart_and_not_modified_replays_disk_bytes(
+) -> datafusion::common::Result<()> {
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("validator-restart");
+    let sql = "SELECT nonce FROM ex.main.cache_revalidation_policy('not_modified')";
+
+    let (cold_context, _) = attached(&location, root.path()).await?;
+    let cold = query_i64(&cold_context, sql).await?;
+    drop(cold_context);
+
+    let (warm_context, warm_runtime) = attached(&location, root.path()).await?;
+    assert_eq!(query_i64(&warm_context, sql).await?, cold);
+    let disk = warm_runtime
+        .durable_result_cache()
+        .expect("durable cache configured")
+        .stats()
+        .expect("durable stats");
+    assert_eq!(disk.revalidations, 1);
+    assert_eq!(disk.entries, 1);
+    assert!(warm_runtime.events().iter().any(|event| {
+        event.kind == "cache.revalidated" && event.message.as_deref() == Some("tier=disk")
+    }));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_validator_revocation_evicts_stale_bytes() -> datafusion::common::Result<()> {
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("validator-revoke");
+    let sql = "SELECT nonce FROM ex.main.cache_revalidation_policy('revoke')";
+
+    let (cold_context, _) = attached(&location, root.path()).await?;
+    query_i64(&cold_context, sql).await?;
+    drop(cold_context);
+
+    let (warm_context, warm_runtime) = attached(&location, root.path()).await?;
+    let error = query_i64(&warm_context, sql)
+        .await
+        .expect_err("no_store plus not_modified must revoke durable reuse");
+    assert!(error.to_string().contains("ineligible cache control"));
+    assert_eq!(
+        warm_runtime
+            .durable_result_cache()
+            .expect("durable cache configured")
+            .stats()
+            .expect("durable stats")
+            .entries,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_validator_honors_stale_if_error_after_restart() -> datafusion::common::Result<()> {
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("validator-stale-error");
+    let sql = "SELECT nonce FROM ex.main.cache_revalidation_policy('stale_if_error')";
+
+    let (cold_context, _) = attached(&location, root.path()).await?;
+    let cold = query_i64(&cold_context, sql).await?;
+    drop(cold_context);
+
+    let (warm_context, warm_runtime) = attached(&location, root.path()).await?;
+    assert_eq!(query_i64(&warm_context, sql).await?, cold);
+    let disk = warm_runtime
+        .durable_result_cache()
+        .expect("durable cache configured")
+        .stats()
+        .expect("durable stats");
+    assert_eq!(disk.stale_serves, 1);
+    assert_eq!(disk.entries, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_revocation_removes_matching_durable_generation() -> datafusion::common::Result<()> {
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("layered-validator-revoke");
+    let policy = format!(
+        "revoke_then_error:{}:{}",
+        std::process::id(),
+        ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let sql = format!(
+        "SELECT nonce FROM ex.main.cache_revalidation_policy('{}')",
+        sql_quote(&policy)
+    );
+
+    let (context, runtime) =
+        attached_with_options(&location, 1, layered_options(root.path())).await?;
+    query_i64(&context, &sql).await?;
+    query_i64(&context, &sql)
+        .await
+        .expect_err("no_store plus not_modified must revoke both cache tiers");
+    assert_eq!(runtime.result_cache().stats().entries, 0);
+    assert_eq!(
+        runtime
+            .durable_result_cache()
+            .expect("durable cache configured")
+            .stats()
+            .expect("durable stats")
+            .entries,
+        0
+    );
+    drop(context);
+    drop(runtime);
+
+    let (restarted, _) = attached(&location, root.path()).await?;
+    let error = query_i64(&restarted, &sql)
+        .await
+        .expect_err("revoked durable bytes must not stale-serve after restart");
+    assert!(
+        error
+            .to_string()
+            .contains("injected post-revocation worker failure"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_rotation_updates_matching_durable_policy() -> datafusion::common::Result<()> {
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("layered-validator-rotation");
+    let policy = format!(
+        "rotate_then_error:{}:{}",
+        std::process::id(),
+        ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let sql = format!(
+        "SELECT nonce FROM ex.main.cache_revalidation_policy('{}')",
+        sql_quote(&policy)
+    );
+
+    let (context, runtime) =
+        attached_with_options(&location, 1, layered_options(root.path())).await?;
+    let cold = query_i64(&context, &sql).await?;
+    assert_eq!(query_i64(&context, &sql).await?, cold);
+    assert_eq!(runtime.result_cache().stats().revalidations, 1);
+    assert_eq!(
+        runtime
+            .durable_result_cache()
+            .expect("durable cache configured")
+            .stats()
+            .expect("durable stats")
+            .revalidations,
+        1
+    );
+    drop(context);
+    drop(runtime);
+
+    let (restarted, restarted_runtime) = attached(&location, root.path()).await?;
+    let error = query_i64(&restarted, &sql)
+        .await
+        .expect_err("withdrawn stale-if-error must not replay durable bytes");
+    assert!(
+        error
+            .to_string()
+            .contains("injected conditional v2 failure"),
+        "durable validator was not rotated to v2: {error}"
+    );
+    assert_eq!(
+        restarted_runtime
+            .durable_result_cache()
+            .expect("durable cache configured")
+            .stats()
+            .expect("durable stats")
+            .stale_serves,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_flight_l1_limit_reduction_falls_back_to_matching_disk() -> datafusion::common::Result<()>
+{
+    let Some(location) = transport_location() else {
+        return Ok(());
+    };
+    let root = TestCacheRoot::new("layered-validator-limit");
+    let sync = TestCacheRoot::new("layered-validator-limit-sync");
+    fs::create_dir_all(sync.path())?;
+    let entered = sync.path().join("entered");
+    let release = sync.path().join("release");
+    let policy = format!(
+        "blocked_not_modified|{}|{}",
+        entered.display(),
+        release.display()
+    );
+    let sql = format!(
+        "SELECT nonce FROM ex.main.cache_revalidation_policy('{}')",
+        sql_quote(&policy)
+    );
+
+    let (context, runtime) =
+        attached_with_options(&location, 1, layered_options(root.path())).await?;
+    let cold = query_i64(&context, &sql).await?;
+    let query_context = context.clone();
+    let query_sql = sql.clone();
+    let revalidation = tokio::spawn(async move { query_i64(&query_context, &query_sql).await });
+    wait_for_path(&entered).await;
+
+    let mut limits = runtime.result_cache().limits();
+    limits.max_entry_bytes = 0;
+    runtime.result_cache().set_limits(limits);
+    fs::write(&release, b"release")?;
+
+    assert_eq!(
+        revalidation
+            .await
+            .expect("revalidation task did not panic")?,
+        cold
+    );
+    assert_eq!(runtime.result_cache().stats().entries, 0);
+    let disk = runtime
+        .durable_result_cache()
+        .expect("durable cache configured")
+        .stats()
+        .expect("durable stats");
+    assert_eq!(disk.entries, 1);
+    assert_eq!(disk.revalidations, 1);
     Ok(())
 }
 

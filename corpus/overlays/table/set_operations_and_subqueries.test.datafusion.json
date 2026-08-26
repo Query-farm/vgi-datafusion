@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 17,
+      "original_sql": "SELECT t.x, (SELECT example.main.vgi_sum(s.n) FROM example.main.sequence(5) s WHERE s.n <= t.x) AS partial_sum\nFROM (VALUES (0::BIGINT), (2::BIGINT), (4::BIGINT)) t(x)\nORDER BY t.x;",
+      "kind": "out_of_scope",
+      "reason": "DataFusion 55 cannot lower the correlated ScalarSubquery expression containing the VGI aggregate into a physical plan. Uncorrelated scalar subqueries, IN/NOT IN/EXISTS, CTEs, set operations, and semi/anti joins use existing DataFusion plans and remain applicable."
+    }
+  ]
+}

@@ -1638,7 +1638,7 @@ impl StripPrefixCi for str {
 fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResult<()> {
     use datafusion::sql::sqlparser::ast::{
         BinaryOperator, Expr as SQLExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName,
-        ObjectNamePart, TableFactor, VisitorMut,
+        ObjectNamePart, Select, TableFactor, VisitorMut,
     };
 
     struct Rewrite<'a> {
@@ -1650,6 +1650,27 @@ fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResul
 
     impl VisitorMut for Rewrite<'_> {
         type Break = Box<datafusion::common::DataFusionError>;
+
+        fn pre_visit_select(&mut self, select: &mut Select) -> ControlFlow<Self::Break> {
+            use datafusion::sql::sqlparser::ast::JoinOperator;
+
+            // sqlparser represents DuckDB's unqualified `SEMI JOIN` and
+            // `ANTI JOIN` explicitly. Their semantics are left semi/anti, but
+            // DataFusion 55's SQL planner accepts only the direction-qualified
+            // variants even though its logical and physical plans support both
+            // operations. Normalize the spelling at this existing SQL adapter
+            // boundary; nested SELECTs are visited too.
+            for relation in &mut select.from {
+                for join in &mut relation.joins {
+                    join.join_operator = match join.join_operator.clone() {
+                        JoinOperator::Semi(constraint) => JoinOperator::LeftSemi(constraint),
+                        JoinOperator::Anti(constraint) => JoinOperator::LeftAnti(constraint),
+                        other => other,
+                    };
+                }
+            }
+            ControlFlow::Continue(())
+        }
 
         fn pre_visit_table_factor(&mut self, tf: &mut TableFactor) -> ControlFlow<Self::Break> {
             let macro_key = match tf {
@@ -3393,6 +3414,57 @@ mod tests {
         assert!(
             rewritten.contains("local.items"),
             "unattached two-part name was changed: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn unqualified_semi_and_anti_joins_use_datafusion_left_join_plans() {
+        let ctx = SessionContext::new();
+        let parse_and_rewrite = |sql: &str| {
+            let state = ctx.state();
+            let dialect = state.config_options().sql_parser.dialect;
+            let mut statement = state.sql_to_statement(sql, &dialect).expect("parses");
+            rewrite_vgi_sql(&ctx, &mut statement).expect("rewrites");
+            statement.to_string()
+        };
+
+        let semi = parse_and_rewrite(
+            "SELECT l.n FROM left_source l SEMI JOIN right_source r ON l.n = r.n",
+        );
+        assert!(semi.contains("LEFT SEMI JOIN"), "{semi}");
+
+        let nested = parse_and_rewrite(
+            "SELECT * FROM (SELECT l.n FROM left_source l ANTI JOIN right_source r ON l.n = r.n)",
+        );
+        assert!(nested.contains("LEFT ANTI JOIN"), "{nested}");
+
+        let directed = parse_and_rewrite(
+            "SELECT r.n FROM left_source l RIGHT SEMI JOIN right_source r ON l.n = r.n",
+        );
+        assert!(directed.contains("RIGHT SEMI JOIN"), "{directed}");
+        assert!(!directed.contains("LEFT SEMI JOIN"), "{directed}");
+    }
+
+    #[tokio::test]
+    async fn unqualified_semi_and_anti_joins_execute_through_existing_datafusion_plans() {
+        let ctx = SessionContext::new();
+        assert_eq!(
+            query_i64(
+                &ctx,
+                "SELECT COUNT(*) FROM (VALUES (1), (2), (3)) l(n) \
+                 SEMI JOIN (VALUES (2), (3), (4)) r(n) ON l.n = r.n",
+            )
+            .await,
+            2
+        );
+        assert_eq!(
+            query_i64(
+                &ctx,
+                "SELECT COUNT(*) FROM (VALUES (1), (2), (3)) l(n) \
+                 ANTI JOIN (VALUES (2), (3), (4)) r(n) ON l.n = r.n",
+            )
+            .await,
+            1
         );
     }
 

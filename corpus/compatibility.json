@@ -23,7 +23,7 @@
       "title": "Table functions and scans",
       "status": "partial",
       "groups": ["table"],
-      "remaining": ["ORDER BY and TABLESAMPLE hints", "late materialization", "transaction storage", "DuckDB-only virtual rowid forms"]
+      "remaining": ["ORDER BY and TABLESAMPLE hints", "late materialization", "transaction storage", "DuckDB-only virtual rowid forms", "correlated scalar subqueries containing VGI aggregates"]
     },
     {
       "id": "scalar_functions",
@@ -65,7 +65,7 @@
       "title": "VGI result cache",
       "status": "partial",
       "groups": ["cache"],
-      "remaining": ["correlated 1:N per-value caching", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events"]
+      "remaining": ["durable split validators with atomic all-partition validation", "durable scalar and exchange entries", "correlated 1:N per-value caching", "stale-while-revalidate", "cross-process request coalescing", "worker-log forwarding beyond adapter events"]
     },
     {
       "id": "catalog_metadata",
