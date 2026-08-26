@@ -821,6 +821,93 @@ impl VgiTableProvider {
         Self::bind_catalog_table_inner(conn, catalog, schema_name, info, Some(at)).await
     }
 
+    /// Bind one function-backed arm of a VGI catalog table.
+    ///
+    /// Multi-branch metadata carries the same flat scan-argument encoding as
+    /// the legacy single-function response. The function may be declared in
+    /// either the table's schema or the attached catalog's default schema, so
+    /// resolve it with the same candidate order used by ordinary catalog
+    /// tables. The outer catalog provider owns reconciliation and constraints.
+    pub(crate) async fn bind_catalog_branch(
+        conn: VgiConnection,
+        catalog: impl Into<String>,
+        table_schema: impl Into<String>,
+        function: impl Into<String>,
+        raw_arguments: vgi_client::Bytes,
+    ) -> DFResult<Arc<Self>> {
+        let catalog = catalog.into();
+        let table_schema = table_schema.into();
+        let function = function.into();
+        let arguments = if raw_arguments.0.is_empty() {
+            Arguments::new()
+        } else {
+            Arguments::from_scan_arguments(&raw_arguments.0).map_err(to_df)?
+        };
+        let c = conn.clone();
+        let cat = catalog.clone();
+        let table_schema_for_bind = table_schema.clone();
+        let function_for_bind = function.clone();
+        let arguments_for_bind = arguments.clone();
+        let (function_schema, statistics_bind, capabilities, catalog_version) =
+            tokio::task::spawn_blocking(move || {
+                let mut client = c.connect()?;
+                let attached = c.attach(&mut client, &cat)?;
+                let default_schema = attached.default_schema().to_string();
+                let mut candidates = vec![table_schema_for_bind];
+                if default_schema != candidates[0] {
+                    candidates.push(default_schema);
+                }
+
+                let mut last_error = None;
+                for schema in candidates {
+                    let spec = BindSpec::table(&function_for_bind)
+                        .in_schema(&schema)
+                        .with_arguments(arguments_for_bind.clone());
+                    match bind_with_secrets(&c, &mut client, &attached, &spec) {
+                        Ok(bound) => {
+                            let capabilities = function_capabilities(
+                                &mut client,
+                                &attached,
+                                &schema,
+                                &function_for_bind,
+                            )?;
+                            return Ok::<_, DataFusionError>((
+                                schema,
+                                bound,
+                                capabilities,
+                                attached.info().catalog_version,
+                            ));
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                Err(last_error.expect("at least one catalog branch schema candidate"))
+            })
+            .await
+            .map_err(|error| DataFusionError::External(Box::new(error)))??;
+        let output_schema = statistics_bind.output_schema().clone();
+
+        Ok(Arc::new(Self {
+            conn,
+            catalog,
+            schema_name: function_schema,
+            function,
+            arguments,
+            raw_arguments: None,
+            statistics_bind,
+            function_statistics: tokio::sync::OnceCell::new(),
+            output_schema,
+            projection_pushdown: capabilities.projection_pushdown,
+            supports_splits: capabilities.supports_splits,
+            filters_exactly_applied: capabilities.filters_exactly_applied,
+            catalog_version,
+            at: None,
+            constraints: None,
+            column_mapping: None,
+            max_workers: 1,
+        }))
+    }
+
     async fn bind_catalog_table_inner(
         conn: VgiConnection,
         catalog: impl Into<String>,

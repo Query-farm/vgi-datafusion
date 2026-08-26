@@ -24,6 +24,9 @@ pub(crate) struct VgiCatalogMetadata {
     pub resolved_implementation_version: Option<String>,
     pub schemas: Vec<vgi_client::dtos::SchemaInfo>,
     pub tables: Vec<vgi_client::dtos::TableInfo>,
+    /// Branch metadata resolved on demand by catalog scans. The key is the
+    /// case-normalized `(schema, table)` pair within this attached alias.
+    pub table_branches: HashMap<(String, String), vgi_client::CatalogScanBranches>,
     /// View declaration plus the columns of its successfully planned
     /// DataFusion ViewTable. VGI carries comments but not a separate output
     /// schema, so the latter is captured after view planning.
@@ -180,6 +183,23 @@ impl VgiRuntime {
             event_sink: None,
             secret_resolver: None,
             locality_hook: None,
+        }
+    }
+
+    pub(crate) fn set_table_branches(
+        &self,
+        alias: &str,
+        schema: &str,
+        table: &str,
+        branches: vgi_client::CatalogScanBranches,
+    ) {
+        if let Ok(mut catalogs) = self.catalog_metadata.lock() {
+            if let Some(metadata) = catalogs.get_mut(alias) {
+                metadata.table_branches.insert(
+                    (schema.to_ascii_lowercase(), table.to_ascii_lowercase()),
+                    branches,
+                );
+            }
         }
     }
 

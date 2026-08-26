@@ -34,20 +34,33 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::{CatalogProvider, SchemaProvider, Session, TableProvider};
-use datafusion::common::{Constraints, DFSchema, DataFusionError, Result as DFResult, Statistics};
+use datafusion::common::{
+    Constraints, DFSchema, DataFusionError, Result as DFResult, ScalarValue, Statistics,
+};
 use datafusion::execution::SessionState;
 use datafusion::logical_expr::utils::expr_to_columns;
 use datafusion::logical_expr::{
     Expr, ExprSchemable, TableProviderFilterPushDown, TableType, Volatility,
 };
-use datafusion::physical_expr::expressions::Column as PhysicalColumn;
+use datafusion::physical_expr::expressions::{
+    cast as physical_cast, Column as PhysicalColumn, Literal as PhysicalLiteral,
+};
 use datafusion::physical_plan::empty::EmptyExec;
+use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::projection::{ProjectionExec, ProjectionExpr};
+use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::ExecutionPlan;
 
 use crate::{datafusion_constraints, to_df, VgiConnection, VgiTableProvider};
 
 type CachedTable = Result<Arc<dyn TableProvider>, String>;
+
+#[derive(Debug)]
+struct BoundCatalogBranch {
+    info: vgi_client::ScanBranch,
+    provider: Arc<VgiTableProvider>,
+}
 
 /// A catalog table whose schema is available from discovery and whose scan
 /// function is bound only when DataFusion actually scans it.
@@ -59,6 +72,7 @@ type CachedTable = Result<Arc<dyn TableProvider>, String>;
 #[derive(Debug)]
 struct VgiCatalogTableProvider {
     conn: VgiConnection,
+    mount_alias: String,
     catalog: String,
     schema_name: String,
     info: vgi_client::TableInfo,
@@ -69,12 +83,16 @@ struct VgiCatalogTableProvider {
     physical_schema: SchemaRef,
     constraints: Constraints,
     bound: tokio::sync::OnceCell<Arc<VgiTableProvider>>,
+    /// Function-backed multi-branch sources. `None` means the branches RPC
+    /// resolved to the ordinary legacy-compatible one-function shape.
+    branches: tokio::sync::OnceCell<Option<Vec<BoundCatalogBranch>>>,
     statistics: tokio::sync::OnceCell<Option<Arc<Statistics>>>,
 }
 
 impl VgiCatalogTableProvider {
     fn new(
         conn: VgiConnection,
+        mount_alias: impl Into<String>,
         catalog: impl Into<String>,
         schema_name: impl Into<String>,
         info: vgi_client::TableInfo,
@@ -97,6 +115,7 @@ impl VgiCatalogTableProvider {
         )?;
         Ok(Arc::new(Self {
             conn,
+            mount_alias: mount_alias.into(),
             catalog: catalog.into(),
             schema_name: schema_name.into(),
             info,
@@ -105,6 +124,7 @@ impl VgiCatalogTableProvider {
             physical_schema,
             constraints,
             bound: tokio::sync::OnceCell::new(),
+            branches: tokio::sync::OnceCell::new(),
             statistics: tokio::sync::OnceCell::new(),
         }))
     }
@@ -138,6 +158,254 @@ impl VgiCatalogTableProvider {
             })
             .await?;
         Ok(provider)
+    }
+
+    async fn multi_branches(&self) -> DFResult<Option<&Vec<BoundCatalogBranch>>> {
+        let branches = self
+            .branches
+            .get_or_try_init(|| async {
+                let connection = self.conn.clone();
+                let catalog = self.catalog.clone();
+                let table = self.info.clone();
+                let at = self.at.clone();
+                let resolved = tokio::task::spawn_blocking(move || {
+                    let mut client = connection.connect()?;
+                    let attached = connection.attach(&mut client, &catalog)?;
+                    client
+                        .table_scan_branches(&attached, &table, at.as_ref())
+                        .map_err(to_df)
+                })
+                .await
+                .map_err(|error| DataFusionError::External(Box::new(error)))??;
+                let (kind, message) = match resolved.resolution {
+                    vgi_client::ScanBranchesResolution::BranchesRpc => (
+                        "catalog.rpc.scan_branches",
+                        "method=catalog_table_scan_branches_get",
+                    ),
+                    vgi_client::ScanBranchesResolution::LegacyFallbackAfterProbe => (
+                        "catalog.rpc.scan_branches.fallback",
+                        "catalog_table_scan_branches_get unsupported; method=catalog_table_scan_function_get",
+                    ),
+                    vgi_client::ScanBranchesResolution::LegacyCached => (
+                        "catalog.rpc.scan_branches.legacy",
+                        "method=catalog_table_scan_function_get",
+                    ),
+                };
+                let mut event = crate::VgiEvent::new(kind);
+                event.catalog = Some(self.mount_alias.clone());
+                event.function = Some(format!("{}.{}", self.schema_name, self.info.name));
+                event.message = Some(message.to_string());
+                self.conn.runtime().emit(event);
+                self.conn.runtime().set_table_branches(
+                    &self.mount_alias,
+                    &self.schema_name,
+                    &self.info.name,
+                    resolved.clone(),
+                );
+
+                let needs_union = resolved.branches.len() > 1
+                    || resolved.branches.iter().any(|branch| {
+                        branch.branch_filter.is_some()
+                            || branch.writable
+                            || branch.source_table.is_some()
+                            || branch.format_name.is_some()
+                    });
+                if !needs_union {
+                    return Ok(None);
+                }
+                if self.at.is_some() {
+                    return Err(DataFusionError::Plan(format!(
+                        "AT (...) clauses are not supported on multi-branch VGI table `{}.{}`",
+                        self.schema_name, self.info.name
+                    )));
+                }
+                if !resolved.required_extensions.is_empty() {
+                    return Err(DataFusionError::NotImplemented(format!(
+                        "VGI table `{}.{}` requires host extension(s) for its scan branches: {}",
+                        self.schema_name,
+                        self.info.name,
+                        resolved.required_extensions.join(", ")
+                    )));
+                }
+
+                let mut bound = Vec::with_capacity(resolved.branches.len());
+                for (index, branch) in resolved.branches.into_iter().enumerate() {
+                    if branch.function_name.is_empty() {
+                        let kind = if branch.format_name.is_some() {
+                            "format"
+                        } else {
+                            "catalog-table"
+                        };
+                        return Err(DataFusionError::NotImplemented(format!(
+                            "VGI {kind} scan branch {index} for `{}.{}` is not yet mapped to a DataFusion provider",
+                            self.schema_name, self.info.name
+                        )));
+                    }
+                    let provider = VgiTableProvider::bind_catalog_branch(
+                        self.conn.clone(),
+                        &self.catalog,
+                        &self.schema_name,
+                        &branch.function_name,
+                        branch.arguments.clone(),
+                    )
+                    .await?;
+                    bound.push(BoundCatalogBranch {
+                        info: branch,
+                        provider,
+                    });
+                }
+                Ok(Some(bound))
+            })
+            .await?;
+        Ok(branches.as_ref())
+    }
+
+    fn reconcile_branch(&self, input: Arc<dyn ExecutionPlan>) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let raw_schema = input.schema();
+        for raw in raw_schema.fields() {
+            if !self
+                .physical_schema
+                .fields()
+                .iter()
+                .any(|canonical| canonical.name().eq_ignore_ascii_case(raw.name()))
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "VGI branch returned column {:?} which is not in table `{}.{}`",
+                    raw.name(),
+                    self.schema_name,
+                    self.info.name
+                )));
+            }
+        }
+
+        let mut expressions = Vec::with_capacity(self.physical_schema.fields().len());
+        for canonical in self.physical_schema.fields() {
+            let matches = raw_schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, raw)| raw.name().eq_ignore_ascii_case(canonical.name()))
+                .collect::<Vec<_>>();
+            let expression = match matches.as_slice() {
+                [] => Arc::new(PhysicalLiteral::new(ScalarValue::try_new_null(
+                    canonical.data_type(),
+                )?)) as Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+                [(index, raw)] => {
+                    let column = Arc::new(PhysicalColumn::new(raw.name(), *index))
+                        as Arc<dyn datafusion::physical_expr::PhysicalExpr>;
+                    physical_cast(column, raw_schema.as_ref(), canonical.data_type().clone())?
+                }
+                _ => {
+                    return Err(DataFusionError::Plan(format!(
+                        "VGI branch returned duplicate case-insensitive column {:?}",
+                        canonical.name()
+                    )));
+                }
+            };
+            expressions.push(ProjectionExpr {
+                expr: expression,
+                alias: canonical.name().clone(),
+            });
+        }
+        Ok(Arc::new(ProjectionExec::try_new_with_schema_metadata(
+            expressions,
+            input,
+            &self.physical_schema,
+        )?))
+    }
+
+    fn apply_branch_filter(
+        &self,
+        state: &dyn Session,
+        branch: &BoundCatalogBranch,
+        input: Arc<dyn ExecutionPlan>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let Some(sql) = branch
+            .info
+            .branch_filter
+            .as_deref()
+            .filter(|sql| !sql.trim().is_empty())
+        else {
+            return Ok(input);
+        };
+        let session_state = state
+            .as_any()
+            .downcast_ref::<SessionState>()
+            .ok_or_else(|| {
+                DataFusionError::Plan(
+                    "VGI branch filters require DataFusion SessionState SQL expression support"
+                        .to_string(),
+                )
+            })?;
+        let schema = DFSchema::try_from(self.physical_schema.as_ref().clone())?;
+        let logical = session_state.create_logical_expr(sql, &schema)?;
+
+        // A branch filter is a source-scope contract. Do not let a missing
+        // column become a NULL-filled canonical and silently change it into an
+        // always-false predicate.
+        let mut columns = HashSet::new();
+        expr_to_columns(&logical, &mut columns)?;
+        for column in columns {
+            if !branch
+                .provider
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name().eq_ignore_ascii_case(&column.name))
+            {
+                return Err(DataFusionError::Plan(format!(
+                    "VGI branch filter references column {:?} not exposed by branch function {:?}",
+                    column.name, branch.info.function_name
+                )));
+            }
+        }
+        let predicate = state.create_physical_expr(logical, &schema)?;
+        Ok(Arc::new(FilterExec::try_new(predicate, input)?))
+    }
+
+    async fn scan_multi_branches(
+        &self,
+        state: &dyn Session,
+        branches: &[BoundCatalogBranch],
+        projection: Option<&Vec<usize>>,
+        limit: Option<usize>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let mut inputs = Vec::with_capacity(branches.len());
+        for branch in branches {
+            // Query filters remain above this Inexact provider. Branch filters
+            // are mandatory source contracts and are enforced locally after
+            // by-name reconciliation.
+            let raw = branch.provider.scan(state, None, &[], None).await?;
+            let reconciled = self.reconcile_branch(raw)?;
+            inputs.push(self.apply_branch_filter(state, branch, reconciled)?);
+        }
+        let mut plan = UnionExec::try_new(inputs)?;
+
+        if self.has_generated_columns() {
+            return self.generated_projection(state, projection, plan);
+        }
+        if let Some(indices) = projection {
+            let projected_schema = self.output_schema.project(indices)?;
+            let expressions: Vec<ProjectionExpr> = indices
+                .iter()
+                .map(|index| ProjectionExpr {
+                    expr: Arc::new(PhysicalColumn::new(
+                        self.output_schema.field(*index).name(),
+                        *index,
+                    )),
+                    alias: self.output_schema.field(*index).name().clone(),
+                })
+                .collect();
+            plan = Arc::new(ProjectionExec::try_new_with_schema_metadata(
+                expressions,
+                plan,
+                &projected_schema,
+            )?);
+        }
+        if let Some(limit) = limit {
+            plan = Arc::new(GlobalLimitExec::new(plan, 0, Some(limit)));
+        }
+        Ok(plan)
     }
 
     async fn column_statistics(&self) -> DFResult<Option<Arc<Statistics>>> {
@@ -310,6 +578,11 @@ impl TableProvider for VgiCatalogTableProvider {
             };
             return Ok(Arc::new(EmptyExec::new(schema)));
         }
+        if let Some(branches) = self.multi_branches().await? {
+            return self
+                .scan_multi_branches(state, branches, projection, limit)
+                .await;
+        }
         let bound = self.bound().await?;
         if !self.has_generated_columns() {
             return bound.scan(state, projection, filters, limit).await;
@@ -337,6 +610,7 @@ pub(crate) struct TableFunctionMetadata {
 #[derive(Debug)]
 pub struct VgiSchemaProvider {
     conn: VgiConnection,
+    mount_alias: String,
     catalog: String,
     schema_name: String,
     /// Per-function execution shape and argument declarations.
@@ -394,6 +668,7 @@ impl VgiSchemaProvider {
     /// List one schema's tables and table functions. Two RPCs; no binds.
     pub async fn discover(
         conn: VgiConnection,
+        mount_alias: &str,
         catalog: &str,
         schema_name: &str,
     ) -> DFResult<Arc<Self>> {
@@ -527,6 +802,7 @@ impl VgiSchemaProvider {
 
         Ok(Arc::new(Self {
             conn,
+            mount_alias: mount_alias.to_string(),
             catalog: catalog.to_string(),
             schema_name: schema_name.to_string(),
             names,
@@ -653,6 +929,7 @@ impl VgiSchemaProvider {
 
         let bound = VgiCatalogTableProvider::new(
             self.conn.clone(),
+            &self.mount_alias,
             &self.catalog,
             &self.schema_name,
             info,
@@ -718,6 +995,7 @@ impl SchemaProvider for VgiSchemaProvider {
         let bound = match self.tables.get(name) {
             Some(info) => VgiCatalogTableProvider::new(
                 self.conn.clone(),
+                &self.mount_alias,
                 &self.catalog,
                 &self.schema_name,
                 info.clone(),
@@ -782,6 +1060,15 @@ pub struct VgiCatalogProvider {
 impl VgiCatalogProvider {
     /// Attach a catalog and list its schemas.
     pub async fn discover(conn: VgiConnection, catalog: &str) -> DFResult<Arc<Self>> {
+        Self::discover_as(conn, catalog, catalog).await
+    }
+
+    /// Attach a catalog under an explicit DataFusion alias.
+    pub(crate) async fn discover_as(
+        conn: VgiConnection,
+        catalog: &str,
+        mount_alias: &str,
+    ) -> DFResult<Arc<Self>> {
         let (c, cat) = (conn.clone(), catalog.to_string());
         let (
             schema_infos,
@@ -823,7 +1110,7 @@ impl VgiCatalogProvider {
 
         let mut schemas: HashMap<String, Arc<VgiSchemaProvider>> = HashMap::new();
         for name in schema_infos.iter().map(|schema| schema.name.clone()) {
-            let sp = VgiSchemaProvider::discover(conn.clone(), catalog, &name).await?;
+            let sp = VgiSchemaProvider::discover(conn.clone(), mount_alias, catalog, &name).await?;
             schemas.insert(name, sp);
         }
         Ok(Arc::new(Self {

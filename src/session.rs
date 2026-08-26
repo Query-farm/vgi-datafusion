@@ -1656,7 +1656,8 @@ async fn attach_one(
     crate::diagnostics::register(ctx, Arc::clone(conn.runtime()));
     let options = build_attach_options(ctx, &conn, spec).await?;
     conn = conn.with_catalog_attach_options(&spec.catalog, options);
-    let provider = VgiCatalogProvider::discover(conn.clone(), &spec.catalog).await?;
+    let provider =
+        VgiCatalogProvider::discover_as(conn.clone(), &spec.catalog, &spec.alias).await?;
     // Re-attaching an alias refreshes its flat function registrations as well
     // as its catalog provider.
     deregister_alias_functions(ctx, &spec.alias);
@@ -1683,6 +1684,7 @@ async fn attach_one(
                 .map(str::to_string),
             schemas: provider.schema_infos().to_vec(),
             tables: provider.tables().cloned().collect(),
+            table_branches: HashMap::new(),
             views: provider.metadata_views(),
             functions: provider.functions().cloned().collect(),
             macros: provider.metadata_macros().cloned().collect(),

@@ -96,8 +96,12 @@ generic harness adapters without reviewed per-record substitutions, or
 
 Do not create full `.datafusion.test` copies for isolated syntax differences.
 They duplicate expected output and unchanged SQL, drift independently, and can
-be picked up by broad `*.test` discovery. A separate DataFusion-native fixture
-is appropriate only when nearly the entire setup or assertion contract differs.
+be picked up by broad `*.test` discovery. In particular, do not put them beside
+the originals under `../vgi/test/sql/integration`: both the VGI DuckDB runner
+and this runner recursively discover `*.test`, so both variants would run. A
+separate DataFusion-native fixture is appropriate only when nearly the entire
+setup or assertion contract differs; keep it in this repository under `tests/`
+or a dedicated, explicitly selected `corpus/native/` tree.
 
 Files use independent DataFusion sessions, so `--jobs N` runs them concurrently
 while merging results back in source order. Keep `N` bounded on shared hosts;
@@ -173,6 +177,16 @@ DataFusion's `range.value` versus DuckDB's `range.range` column spelling; with
 them, `macro/macros.test` and `catalog/function_arguments_macros.test` execute
 24/24 records with all 21 query results exact.
 
+Function-backed multi-branch catalog scans are also complete in the focused
+slice. The client prefers `catalog_table_scan_branches_get`, narrowly caches the
+legacy fallback, and validates branch shape and writability. DataFusion binds
+each function arm, reconciles columns by name, enforces branch filters, and
+unions the plans through its existing physical operators. Across the seven
+catalog/split files that do not require external branch fixtures, 47/47 positive
+records execute and all 34 comparable results are exact. One reviewed overlay
+rephrases DuckDB's unsupported `DESCRIBE`-as-derived-table syntax while querying
+the same diagnostic column and type.
+
 ## What remains
 
 The following order maximizes useful coverage while keeping new DataFusion
@@ -197,13 +211,15 @@ engine work to a minimum:
    The adapter accepts the single-column expression shape DataFusion exposes
    naturally, plus literal one-row exchange. These two gaps are tracked but are
    not candidates for new DataFusion engine work in this project.
-5. **Catalog objects.** The focused scalar/table macro slice is now complete at
-   19/19 records. Multi-branch catalogs, broader views, database metadata
-   adaptations, and same-schema qualification for unqualified objects inside
-   macro definitions remain. Function inventory, overloads, argument
-   docs/constraints, tags, categories, and global nominations use retained
-   worker metadata. The committed full baseline still records 64/90 for
-   catalog, 4/19 for macros, and 5/14 for views until the next promotion run.
+5. **Catalog objects.** The focused scalar/table macro slice and the
+   function-backed multi-branch slice now pass completely. Native format arms,
+   companion-catalog arms, heterogeneous external branch fixtures, broader
+   views, database metadata adaptations, and same-schema qualification for
+   unqualified objects inside macro definitions remain. Function inventory,
+   overloads, argument docs/constraints, tags, categories, and global
+   nominations use retained worker metadata. The committed full baseline still
+   records 64/90 for catalog, 4/19 for macros, and 5/14 for views until the next
+   promotion run.
 6. **Secrets and authenticated fixtures.** Twenty-four failures explicitly lack
    a `VgiSecretResolver`. Add deterministic corpus resolvers before judging the
    worker behavior; keep real OAuth and external-service tests in the blocked

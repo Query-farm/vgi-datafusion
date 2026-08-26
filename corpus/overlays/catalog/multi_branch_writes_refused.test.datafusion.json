@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 8,
+      "original_sql": "SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM vgi_table_branches()) WHERE column_name = 'writable';",
+      "replacement_sql": "SELECT 'writable' AS column_name, typeof(writable) AS column_type FROM vgi_table_branches() LIMIT 1;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion does not parse DESCRIBE as a derived table; typeof inspects the same writable result column through the existing DataFusion compatibility function."
+    }
+  ]
+}

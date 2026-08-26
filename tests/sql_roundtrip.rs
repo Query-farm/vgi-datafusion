@@ -644,6 +644,55 @@ async fn blended_literal_table_function_runs_as_a_one_row_exchange() -> datafusi
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn catalog_multi_branch_scans_union_and_enforce_branch_filters(
+) -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let ctx = SessionContext::new();
+    vgi_datafusion::sql(
+        &ctx,
+        &format!(
+            "ATTACH 'example' AS ex (TYPE vgi, LOCATION '{}')",
+            worker.to_string_lossy()
+        ),
+    )
+    .await?;
+
+    let batches = vgi_datafusion::sql(&ctx, "SELECT count(*) FROM ex.data.multi_branch_numbers")
+        .await?
+        .collect()
+        .await?;
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    assert_eq!(count, 100, "both sequence(50) branches must contribute");
+
+    let batches = vgi_datafusion::sql(
+        &ctx,
+        "SELECT count(*), min(n), max(n) \
+         FROM ex.data.multi_branch_filtered_numbers WHERE n > 75",
+    )
+    .await?
+    .collect()
+    .await?;
+    let values = batches[0]
+        .columns()
+        .iter()
+        .map(|column| {
+            column
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                .expect("aggregate is Int64")
+                .value(0)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, [24, 76, 99]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn projection_reaches_the_worker() -> datafusion::error::Result<()> {
     let worker = skip_without_worker!();
     let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()]);

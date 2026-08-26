@@ -298,6 +298,7 @@ enum DiagnosticsKind {
     DuckDbColumns,
     DuckDbConstraints,
     VgiFunctionArguments,
+    VgiTableBranches,
     LogStats,
     CacheFlush,
     CacheReap,
@@ -323,6 +324,7 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::DuckDbColumns => duckdb_columns(&self.runtime)?,
             DiagnosticsKind::DuckDbConstraints => duckdb_constraints(&self.runtime)?,
             DiagnosticsKind::VgiFunctionArguments => vgi_function_arguments(&self.runtime)?,
+            DiagnosticsKind::VgiTableBranches => vgi_table_branches(&self.runtime)?,
             DiagnosticsKind::LogStats => log_stats(&self.runtime)?,
             DiagnosticsKind::CacheFlush => operation_result(
                 "flushed",
@@ -1677,6 +1679,153 @@ fn log_stats(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     )?)
 }
 
+/// DataFusion compatibility surface for DuckDB's `vgi_table_branches()`.
+///
+/// Catalog scans publish their exact decoded branch response into the session
+/// runtime. On first diagnostic use, unresolved tables are fetched over one
+/// pooled connection per catalog and retained, matching DuckDB's all-tables
+/// diagnostic semantics without repeating the RPC walk for later queries.
+fn vgi_table_branches(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    struct Row {
+        catalog: String,
+        schema: String,
+        table: String,
+        index: i64,
+        function: String,
+        branch_filter: Option<String>,
+        extensions: Vec<String>,
+        writable: bool,
+    }
+
+    let mut rows = Vec::new();
+    for (alias, metadata) in runtime.catalog_metadata() {
+        let unresolved = metadata
+            .tables
+            .iter()
+            .filter(|table| {
+                !metadata.table_branches.contains_key(&(
+                    table.schema_name.to_ascii_lowercase(),
+                    table.name.to_ascii_lowercase(),
+                ))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let fetched = if unresolved.is_empty() {
+            Vec::new()
+        } else {
+            let connection = metadata.connection.clone();
+            let worker_catalog = metadata.worker_catalog.clone();
+            crate::run_blocking_planner_call(move || {
+                let mut client = connection.connect()?;
+                let attached = connection.attach(&mut client, &worker_catalog)?;
+                Ok(unresolved
+                    .into_iter()
+                    .filter_map(|table| {
+                        client
+                            .table_scan_branches(&attached, &table, None)
+                            .ok()
+                            .map(|branches| (table, branches))
+                    })
+                    .collect::<Vec<_>>())
+            })?
+        };
+        let mut resolved_by_table = metadata.table_branches.clone();
+        for (table, branches) in fetched {
+            let key = (
+                table.schema_name.to_ascii_lowercase(),
+                table.name.to_ascii_lowercase(),
+            );
+            runtime.set_table_branches(&alias, &table.schema_name, &table.name, branches.clone());
+            resolved_by_table.insert(key, branches);
+        }
+
+        for table in &metadata.tables {
+            let key = (
+                table.schema_name.to_ascii_lowercase(),
+                table.name.to_ascii_lowercase(),
+            );
+            let Some(resolved) = resolved_by_table.get(&key).cloned() else {
+                continue;
+            };
+            for (index, branch) in resolved.branches.into_iter().enumerate() {
+                rows.push(Row {
+                    catalog: alias.clone(),
+                    schema: table.schema_name.clone(),
+                    table: table.name.clone(),
+                    index: index as i64,
+                    function: branch.function_name,
+                    branch_filter: branch.branch_filter,
+                    extensions: resolved.required_extensions.clone(),
+                    writable: branch.writable,
+                });
+            }
+        }
+    }
+    rows.sort_by(|left, right| {
+        (&left.catalog, &left.schema, &left.table, left.index).cmp(&(
+            &right.catalog,
+            &right.schema,
+            &right.table,
+            right.index,
+        ))
+    });
+
+    let mut extensions = ListBuilder::new(StringBuilder::new());
+    for row in &rows {
+        for extension in &row.extensions {
+            extensions.values().append_value(extension);
+        }
+        extensions.append(true);
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("catalog_name", DataType::Utf8, false),
+        Field::new("schema_name", DataType::Utf8, false),
+        Field::new("table_name", DataType::Utf8, false),
+        Field::new("branch_index", DataType::Int64, false),
+        Field::new("function_name", DataType::Utf8, false),
+        Field::new("positional_arguments", DataType::Utf8, false),
+        Field::new("named_arguments", DataType::Utf8, false),
+        Field::new("branch_filter", DataType::Utf8, true),
+        Field::new(
+            "table_required_extensions",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            false,
+        ),
+        Field::new("writable", DataType::Boolean, false),
+    ]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.catalog.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.schema.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.table.as_str()),
+            )),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|row| row.index),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.function.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "[]"))),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "{}"))),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.branch_filter.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(extensions.finish()),
+            Arc::new(BooleanArray::from(
+                rows.iter().map(|row| row.writable).collect::<Vec<_>>(),
+            )),
+        ],
+    )?)
+}
+
 fn zero_arg_u64(
     name: &str,
     operation: impl Fn() -> u64 + Send + Sync + 'static,
@@ -1717,6 +1866,7 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
             "vgi_function_arguments",
             DiagnosticsKind::VgiFunctionArguments,
         ),
+        ("vgi_table_branches", DiagnosticsKind::VgiTableBranches),
     ] {
         if !state.table_functions().contains_key(name) {
             ctx.register_udtf(
