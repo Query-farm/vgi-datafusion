@@ -810,11 +810,10 @@ fn run_scalar_exchange(
         crate::bind_with_input_secrets_status(conn, &mut client, &attached, &spec, input_schema)?;
 
     let direct = |client: &mut vgi_client::VgiClient,
-                  input: &RecordBatch|
+                  input: &RecordBatch,
+                  options: &ScanOptions|
      -> DFResult<(RecordBatch, Option<vgi_client::CacheControl>)> {
-        let mut exchange = client
-            .open_exchange(&bound, &ScanOptions::default())
-            .map_err(to_df)?;
+        let mut exchange = client.open_exchange(&bound, options).map_err(to_df)?;
         let answer = exchange.send(input).map_err(to_df)?;
         let control = exchange.cache_control().cloned();
         exchange.close().map_err(to_df)?;
@@ -824,14 +823,14 @@ fn run_scalar_exchange(
     };
 
     if !cacheable || used_resolved_secrets || input.num_rows() == 0 {
-        return direct(&mut client, &input).map(|(answer, _)| answer);
+        return direct(&mut client, &input, &ScanOptions::default()).map(|(answer, _)| answer);
     }
 
     if !conn.cache_enabled
         || !conn.runtime.options().cache_enabled
         || conn.cache_identity_scope(catalog).is_none()
     {
-        return direct(&mut client, &input).map(|(answer, _)| answer);
+        return direct(&mut client, &input, &ScanOptions::default()).map(|(answer, _)| answer);
     }
     let opt_in_identity =
         per_value_opt_in_identity(conn, catalog, schema_name, function, catalog_version);
@@ -842,7 +841,7 @@ fn run_scalar_exchange(
     // forever. If the response opts in, populate its distinct rows after the
     // fact so the very first call still warms the per-value tier.
     if !conn.runtime.has_per_value_opt_in(&opt_in_identity) {
-        let (answer, control) = direct(&mut client, &input)?;
+        let (answer, control) = direct(&mut client, &input, &ScanOptions::default())?;
         let per_value = control.as_ref().is_some_and(|control| control.per_value);
         let shape_is_scalar = answer.num_rows() == input.num_rows() && answer.num_columns() == 1;
         let mut stored = 0usize;
@@ -985,8 +984,165 @@ fn run_scalar_exchange(
         );
     }
 
-    if !misses.is_empty() {
-        let miss_batches = misses
+    enum MissClaim {
+        Producer {
+            flight: Arc<crate::runtime::ResultFlightProducer>,
+            stale: Option<vgi_client::CachedEntry>,
+        },
+        Follower(crate::runtime::ResultFlightWaiter),
+    }
+    let mut claims = (0..uniques.len())
+        .map(|_| None)
+        .collect::<Vec<Option<MissClaim>>>();
+    for &index in &misses {
+        let key = &uniques[index].0;
+        claims[index] = Some(match conn.runtime.acquire_result_flight(key) {
+            crate::runtime::ResultFlightClaim::Producer(flight) => MissClaim::Producer {
+                flight,
+                stale: cache.get_for_revalidation(key),
+            },
+            crate::runtime::ResultFlightClaim::Follower(waiter) => MissClaim::Follower(waiter),
+        });
+    }
+
+    // A conditional validator applies to one exchange init, hence one scalar
+    // cache key. Revalidate producer claims individually; ordinary cold claims
+    // remain batched below.
+    let revalidations = misses
+        .iter()
+        .copied()
+        .filter(|index| {
+            matches!(
+                claims[*index].as_ref(),
+                Some(MissClaim::Producer { stale: Some(_), .. })
+            )
+        })
+        .collect::<Vec<_>>();
+    for index in revalidations {
+        let Some(MissClaim::Producer {
+            flight,
+            stale: Some(stale),
+        }) = claims[index].as_ref()
+        else {
+            unreachable!("revalidation classification changed")
+        };
+        let key = &uniques[index].0;
+        let options = ScanOptions {
+            if_none_match: stale.etag.clone(),
+            if_modified_since: stale.last_modified.clone(),
+            ..Default::default()
+        };
+        let (answer, control) = match direct(&mut client, &uniques[index].1, &options) {
+            Ok(answer) => answer,
+            Err(error) if stale.may_serve_on_error_at(std::time::Instant::now()) => {
+                cache.record_stale_serve();
+                conn.runtime.note_exchange_cache_hit(stale.bytes());
+                let [cached] = stale.batches() else {
+                    flight.abort("stale-if-error entry was not one batch");
+                    return Err(error);
+                };
+                outputs[index] = Some(cached.clone());
+                flight.stored();
+                crate::table_input::emit_exchange_cache_event(
+                    conn,
+                    catalog,
+                    schema_name,
+                    function,
+                    "cache.stale_if_error",
+                    Some(format!("tier=per_value {error}")),
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if control.as_ref().is_some_and(|control| control.not_modified) {
+            if answer.num_rows() != 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "VGI scalar `{function}` returned rows and not_modified together"
+                )));
+            }
+            let [cached] = stale.batches() else {
+                flight.abort("revalidation entry was not one batch");
+                continue;
+            };
+            let ttl = match crate::table_input::exchange_cache_ttl(
+                cache,
+                control.as_ref(),
+                &key.identity_scope,
+                stale.bytes(),
+            ) {
+                Ok(ttl) => ttl,
+                Err(reason) => {
+                    cache.remove(key);
+                    flight.abort(format!("revalidation revoked cache: {reason:?}"));
+                    return Err(DataFusionError::Execution(format!(
+                        "VGI scalar `{function}` returned not_modified with ineligible cache control: {reason:?}"
+                    )));
+                }
+            };
+            cache.slide(key, ttl);
+            conn.runtime.note_exchange_cache_hit(stale.bytes());
+            outputs[index] = Some(cached.clone());
+            flight.stored();
+            crate::table_input::emit_exchange_cache_event(
+                conn,
+                catalog,
+                schema_name,
+                function,
+                "cache.revalidated",
+                Some("tier=per_value".to_string()),
+            );
+        } else if answer.num_rows() == 1 && answer.num_columns() == 1 {
+            let output = materialize_output_row(&answer, 0)?;
+            let bytes = output
+                .columns()
+                .iter()
+                .map(|array| array.get_array_memory_size())
+                .sum();
+            match crate::table_input::exchange_cache_ttl(
+                cache,
+                control.as_ref(),
+                &key.identity_scope,
+                bytes,
+            ) {
+                Ok(ttl) if control.as_ref().is_some_and(|control| control.per_value) => {
+                    cache.insert(key.clone(), vec![output.clone()], ttl, control.as_ref());
+                    conn.runtime.note_exchange_cache_store();
+                    outputs[index] = Some(output);
+                    flight.stored();
+                }
+                Ok(_) => {
+                    cache.remove(key);
+                    outputs[index] = Some(output);
+                    flight.abort("worker withdrew per-value cache opt-in");
+                }
+                Err(reason) => {
+                    cache.remove(key);
+                    outputs[index] = Some(output);
+                    flight.abort(format!("cache refused revalidated result: {reason:?}"));
+                }
+            }
+        } else {
+            return Err(DataFusionError::Execution(format!(
+                "{function} answered {} rows and {} columns for one conditional scalar input; expected a 1:1, one-column result",
+                answer.num_rows(),
+                answer.num_columns()
+            )));
+        }
+    }
+
+    let producers = misses
+        .iter()
+        .copied()
+        .filter(|index| {
+            matches!(
+                claims[*index].as_ref(),
+                Some(MissClaim::Producer { stale: None, .. })
+            )
+        })
+        .collect::<Vec<_>>();
+    if !producers.is_empty() {
+        let miss_batches = producers
             .iter()
             .map(|index| &uniques[*index].1)
             .collect::<Vec<_>>();
@@ -999,20 +1155,23 @@ fn run_scalar_exchange(
         })?;
         let control = exchange.cache_control().cloned();
         exchange.close().map_err(to_df)?;
-        if fresh.num_rows() != misses.len() || fresh.num_columns() != 1 {
+        if fresh.num_rows() != producers.len() || fresh.num_columns() != 1 {
             return Err(DataFusionError::Execution(format!(
                 "{function} answered {} rows and {} columns for {} distinct scalar inputs; expected a 1:1, one-column result",
                 fresh.num_rows(),
                 fresh.num_columns(),
-                misses.len()
+                producers.len()
             )));
         }
 
         let per_value = control.as_ref().is_some_and(|control| control.per_value);
         let mut stored = 0usize;
         let mut store_attempts = 0usize;
-        for (fresh_row, unique_index) in misses.into_iter().enumerate() {
+        for (fresh_row, unique_index) in producers.into_iter().enumerate() {
             let output = fresh.slice(fresh_row, 1);
+            let Some(MissClaim::Producer { flight, .. }) = claims[unique_index].as_ref() else {
+                unreachable!("fresh scalar claim changed")
+            };
             if per_value && store_attempts < PER_VALUE_MAX_NEW_STORES_PER_CALL {
                 store_attempts += 1;
                 let cached_output = materialize_output_row(&fresh, fresh_row)?;
@@ -1031,17 +1190,27 @@ fn run_scalar_exchange(
                     Ok(ttl) => {
                         cache.insert(key.clone(), vec![cached_output], ttl, control.as_ref());
                         conn.runtime.note_exchange_cache_store();
+                        flight.stored();
                         stored += 1;
                     }
-                    Err(reason) => crate::table_input::emit_exchange_cache_event(
-                        conn,
-                        catalog,
-                        schema_name,
-                        function,
-                        "cache.refused",
-                        Some(format!("tier=per_value {reason:?}")),
-                    ),
+                    Err(reason) => {
+                        flight.abort(format!("cache refused result: {reason:?}"));
+                        crate::table_input::emit_exchange_cache_event(
+                            conn,
+                            catalog,
+                            schema_name,
+                            function,
+                            "cache.refused",
+                            Some(format!("tier=per_value {reason:?}")),
+                        );
+                    }
                 }
+            } else {
+                flight.abort(if per_value {
+                    "per-value new-store cap reached"
+                } else {
+                    "worker withdrew per-value cache opt-in"
+                });
             }
             outputs[unique_index] = Some(output);
         }
@@ -1055,6 +1224,32 @@ fn run_scalar_exchange(
                 Some(format!("tier=per_value tuples={stored}")),
             );
         }
+    }
+
+    // Followers consume the producer's stored row. If the producer aborted or
+    // a zero-TTL entry is no longer available as a fresh hit, execute this row
+    // directly without claiming another flight; refusal must not form a loop.
+    for index in misses {
+        let Some(MissClaim::Follower(waiter)) = claims[index].as_ref() else {
+            continue;
+        };
+        let key = &uniques[index].0;
+        if matches!(
+            waiter.wait_blocking_timeout(conn.rpc_timeout()),
+            crate::runtime::ResultFlightOutcome::Stored
+        ) {
+            let entry = cache.get(key).or_else(|| cache.get_for_revalidation(key));
+            if let Some(entry) = entry {
+                if let [batch] = entry.batches() {
+                    if batch.num_rows() == 1 && batch.num_columns() == 1 {
+                        conn.runtime.note_exchange_cache_hit(entry.bytes());
+                        outputs[index] = Some(batch.clone());
+                        continue;
+                    }
+                }
+            }
+        }
+        outputs[index] = Some(direct(&mut client, &uniques[index].1, &ScanOptions::default())?.0);
     }
 
     let unique_outputs = outputs

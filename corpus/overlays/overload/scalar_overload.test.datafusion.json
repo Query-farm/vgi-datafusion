@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 22,
+      "original_sql": "SELECT example.type_info(42::UINTEGER);",
+      "replacement_sql": "SELECT example.type_info(arrow_cast(42, 'UInt32'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's arrow_cast supplies the same UInt32 overload key as DuckDB's UINTEGER cast."
+    },
+    {
+      "record": 23,
+      "original_sql": "SELECT example.type_info(42::UBIGINT);",
+      "replacement_sql": "SELECT example.type_info(arrow_cast(42, 'UInt64'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's arrow_cast supplies the same UInt64 overload key as DuckDB's UBIGINT cast."
+    }
+  ]
+}

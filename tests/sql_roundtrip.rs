@@ -17,6 +17,8 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use vgi_datafusion::{VgiConnection, VgiTableProvider};
 use vgi_datafusion::{VgiResolvedSecret, VgiRuntime, VgiSecretResolver, VgiSessionOptions};
 
+mod common;
+
 #[derive(Debug)]
 struct ExampleSecretResolver;
 
@@ -55,21 +57,7 @@ impl VgiSecretResolver for ExampleSecretResolver {
 /// `current_exe` — an earlier version of this got that count wrong by one, and
 /// every test in the file silently "passed" without ever reaching a worker.
 fn example_worker() -> Option<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .join("vgi-rust")
-        .join("target");
-    for profile in ["debug", "release"] {
-        let exe = root.join(profile).join(if cfg!(windows) {
-            "vgi-example-worker.exe"
-        } else {
-            "vgi-example-worker"
-        });
-        if exe.exists() {
-            return Some(exe);
-        }
-    }
-    None
+    common::example_worker()
 }
 
 macro_rules! skip_without_worker {
@@ -421,6 +409,50 @@ async fn concurrent_producer_cache_misses_share_one_fill() -> datafusion::error:
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpolled_cacheable_scan_does_not_claim_the_result_flight(
+) -> datafusion::error::Result<()> {
+    let worker = skip_without_worker!();
+    let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()])
+        .with_runtime(runtime.clone());
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote_lazy_cacheable",
+        VgiTableProvider::bind_with_arguments(
+            conn,
+            "example",
+            "main",
+            "cacheable_numbers",
+            vgi_client::Arguments::new().named("n", 10_i64),
+        )
+        .await?,
+    )?;
+
+    let plan = ctx
+        .sql("SELECT * FROM remote_lazy_cacheable")
+        .await?
+        .create_physical_plan()
+        .await?;
+    let unpolled = plan.execute(0, ctx.task_ctx())?;
+
+    let batches = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        ctx.sql("SELECT count(*) FROM remote_lazy_cacheable")
+            .await?
+            .collect(),
+    )
+    .await
+    .expect("an unpolled stream stranded the real cache producer")?;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+    assert_eq!(runtime.result_cache().stats().inserts, 1);
+    drop(unpolled);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn followers_fall_back_when_the_producer_declines_caching() -> datafusion::error::Result<()> {
     let worker = skip_without_worker!();
@@ -476,7 +508,7 @@ async fn followers_fall_back_when_the_producer_declines_caching() -> datafusion:
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn concurrent_revalidation_finishes_its_flight_and_stale_followers_retry(
+async fn concurrent_zero_ttl_revalidation_replays_one_validated_entry(
 ) -> datafusion::error::Result<()> {
     let worker = skip_without_worker!();
     let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions::default()));
@@ -522,8 +554,19 @@ async fn concurrent_revalidation_finishes_its_flight_and_stale_followers_retry(
     assert!(
         events
             .iter()
-            .any(|event| event.kind == "cache.coalesced_retry"),
-        "an immediately-stale follower did not retry: {events:?}"
+            .any(|event| event.kind == "cache.coalesced_hit"),
+        "an immediately-stale follower did not replay the validated entry: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind != "cache.coalesced_retry"),
+        "zero-TTL followers opened duplicate fallback scans: {events:?}"
+    );
+    assert_eq!(
+        runtime.result_cache().stats().revalidations,
+        1,
+        "{events:?}"
     );
     assert_eq!(
         runtime.result_cache().stats().capture_aborts,

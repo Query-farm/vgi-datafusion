@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 12,
+      "original_sql": "SELECT catalog_name, count(*) FROM vgi_global_functions() WHERE NOT live GROUP BY 1;",
+      "kind": "out_of_scope",
+      "reason": "DuckDB cannot unregister functions and therefore retains dead registration tombstones. DataFusion supports deregistration, so DETACH removes both the aliases and their live metadata."
+    }
+  ]
+}

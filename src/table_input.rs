@@ -42,21 +42,16 @@ use datafusion::physical_plan::ExecutionPlan;
 
 use crate::{to_df, VgiConnection, VgiEvent};
 
-/// Exchange tiers do not yet send conditional validators back to a worker.
-/// Refuse immediately-stale policies here instead of retaining bytes that a
-/// plain lookup can never reuse. Producer scans have a separate revalidation
-/// path and continue to accept this policy through `ResultCache` directly.
+/// Apply the shared result-cache eligibility rules to an exchange result.
+/// Zero-TTL entries are retained only when the worker supplied a conditional
+/// validator; the exchange paths revalidate those bytes before serving them.
 pub(crate) fn exchange_cache_ttl(
     cache: &vgi_client::ResultCache,
     control: Option<&vgi_client::CacheControl>,
     identity_scope: &str,
     bytes: usize,
 ) -> Result<std::time::Duration, vgi_client::cache::Ineligible> {
-    let ttl = cache.eligibility(control, Some(identity_scope), bytes)?;
-    if ttl.is_zero() {
-        return Err(vgi_client::cache::Ineligible::NoFreshness);
-    }
-    Ok(ttl)
+    cache.eligibility(control, Some(identity_scope), bytes)
 }
 
 /// The subquery behind a TABLE argument, plus where it sat in the call.
@@ -138,6 +133,20 @@ pub(crate) fn run_exchange(
 ) -> DFResult<Vec<datafusion::arrow::array::RecordBatch>> {
     use vgi_client::{BindSpec, ScanOptions};
 
+    enum UnitState {
+        Hit(Vec<datafusion::arrow::array::RecordBatch>),
+        Producer(Arc<crate::runtime::ResultFlightProducer>),
+        Follower(crate::runtime::ResultFlightWaiter),
+        Uncached,
+    }
+
+    struct Unit {
+        input: datafusion::arrow::array::RecordBatch,
+        key: Option<vgi_client::CacheKey>,
+        state: UnitState,
+        output: Option<Vec<datafusion::arrow::array::RecordBatch>>,
+    }
+
     let mut client = conn.connect()?;
     let attached = conn.attach(&mut client, catalog)?;
     let catalog_version = attached.info().catalog_version;
@@ -163,12 +172,10 @@ pub(crate) fn run_exchange(
         None
     };
 
-    // Probe every input unit before borrowing the client for an exchange. A
-    // fully warm call must not initialize a worker conversation, and doing the
-    // classification up front also keeps one clean mutable borrow for all
-    // misses that remain.
+    // Probe and claim every key before doing work. Claims are retained until
+    // their bytes have been stored (or the attempt aborts), so concurrent
+    // identical exchanges cannot stampede the worker.
     let mut units = Vec::with_capacity(inputs.len());
-    let mut has_miss = false;
     for batch in inputs {
         let cache_key = cache_key_template
             .as_ref()
@@ -181,82 +188,277 @@ pub(crate) fn run_exchange(
                 conn.runtime.note_exchange_cache_hit(entry.bytes());
                 entry.batches().to_vec()
             });
-        if cached.is_some() {
+        let state = if let Some(cached) = cached {
             emit_exchange_cache_event(conn, catalog, schema_name, function, "cache.hit", None);
+            UnitState::Hit(cached)
         } else if cache_key.is_some() {
             emit_exchange_cache_event(conn, catalog, schema_name, function, "cache.miss", None);
-            has_miss = true;
+            match conn
+                .runtime
+                .acquire_result_flight(cache_key.as_ref().expect("checked above"))
+            {
+                crate::runtime::ResultFlightClaim::Producer(producer) => {
+                    UnitState::Producer(producer)
+                }
+                crate::runtime::ResultFlightClaim::Follower(waiter) => UnitState::Follower(waiter),
+            }
         } else {
-            has_miss = true;
+            UnitState::Uncached
+        };
+        units.push(Unit {
+            input: batch,
+            key: cache_key,
+            state,
+            output: None,
+        });
+    }
+
+    // Revalidations need one init per key because the validator is init
+    // metadata. Ordinary cold producers and uncached inputs continue to share
+    // one exchange, preserving the existing streaming behavior.
+    let revalidations = units
+        .iter()
+        .enumerate()
+        .filter_map(|(index, unit)| match (&unit.state, &unit.key) {
+            (UnitState::Producer(_), Some(key)) => conn
+                .runtime
+                .result_cache()
+                .get_for_revalidation(key)
+                .map(|entry| (index, entry)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, stale) in revalidations {
+        let key = units[index].key.as_ref().expect("revalidation has key");
+        let opts = ScanOptions {
+            if_none_match: stale.etag.clone(),
+            if_modified_since: stale.last_modified.clone(),
+            ..Default::default()
+        };
+        let attempt = (|| -> DFResult<_> {
+            let mut exchange = client.open_exchange(&bound, &opts).map_err(to_df)?;
+            let answer = exchange.send(&units[index].input).map_err(to_df)?;
+            let control = exchange.cache_control().cloned();
+            exchange.close().map_err(to_df)?;
+            let answer = answer.ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "{function} ended a conditional exchange without an answer"
+                ))
+            })?;
+            Ok((answer, control))
+        })();
+        let (answer, control) = match attempt {
+            Ok(answer) => answer,
+            Err(error) if stale.may_serve_on_error_at(std::time::Instant::now()) => {
+                conn.runtime.result_cache().record_stale_serve();
+                conn.runtime.note_exchange_cache_hit(stale.bytes());
+                units[index].output = Some(stale.batches().to_vec());
+                if let UnitState::Producer(producer) = &units[index].state {
+                    producer.stored();
+                }
+                emit_exchange_cache_event(
+                    conn,
+                    catalog,
+                    schema_name,
+                    function,
+                    "cache.stale_if_error",
+                    Some(error.to_string()),
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if control.as_ref().is_some_and(|control| control.not_modified) {
+            if answer.num_rows() != 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "VGI function `{function}` returned rows and not_modified together"
+                )));
+            }
+            let ttl = match exchange_cache_ttl(
+                conn.runtime.result_cache(),
+                control.as_ref(),
+                &key.identity_scope,
+                stale.bytes(),
+            ) {
+                Ok(ttl) => ttl,
+                Err(reason) => {
+                    conn.runtime.result_cache().remove(key);
+                    if let UnitState::Producer(producer) = &units[index].state {
+                        producer.abort(format!("revalidation revoked cache: {reason:?}"));
+                    }
+                    return Err(DataFusionError::Execution(format!(
+                        "VGI function `{function}` returned not_modified with ineligible cache control: {reason:?}"
+                    )));
+                }
+            };
+            conn.runtime.result_cache().slide(key, ttl);
+            conn.runtime.note_exchange_cache_hit(stale.bytes());
+            units[index].output = Some(stale.batches().to_vec());
+            if let UnitState::Producer(producer) = &units[index].state {
+                producer.stored();
+            }
+            emit_exchange_cache_event(
+                conn,
+                catalog,
+                schema_name,
+                function,
+                "cache.revalidated",
+                None,
+            );
+        } else {
+            let bytes = answer
+                .columns()
+                .iter()
+                .map(|array| array.get_array_memory_size())
+                .sum();
+            match exchange_cache_ttl(
+                conn.runtime.result_cache(),
+                control.as_ref(),
+                &key.identity_scope,
+                bytes,
+            ) {
+                Ok(ttl) => {
+                    conn.runtime.result_cache().insert(
+                        key.clone(),
+                        vec![answer.clone()],
+                        ttl,
+                        control.as_ref(),
+                    );
+                    conn.runtime.note_exchange_cache_store();
+                    if let UnitState::Producer(producer) = &units[index].state {
+                        producer.stored();
+                    }
+                    units[index].output = Some(vec![answer]);
+                }
+                Err(reason) => {
+                    conn.runtime.result_cache().remove(key);
+                    if let UnitState::Producer(producer) = &units[index].state {
+                        producer.abort(format!("cache refused result: {reason:?}"));
+                    }
+                    units[index].output = Some(vec![answer]);
+                }
+            }
         }
-        units.push((batch, cache_key, cached));
+    }
+
+    let direct = units
+        .iter()
+        .enumerate()
+        .filter_map(|(index, unit)| {
+            (unit.output.is_none()
+                && matches!(&unit.state, UnitState::Producer(_) | UnitState::Uncached))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if !direct.is_empty() {
+        let mut exchange = client
+            .open_exchange(&bound, &ScanOptions::default())
+            .map_err(to_df)?;
+        for index in direct {
+            let answer = exchange.send(&units[index].input).map_err(to_df)?;
+            let control = exchange.cache_control().cloned();
+            if let Some(answer) = answer {
+                if let Some(key) = units[index].key.as_ref() {
+                    let bytes = answer
+                        .columns()
+                        .iter()
+                        .map(|array| array.get_array_memory_size())
+                        .sum();
+                    match exchange_cache_ttl(
+                        conn.runtime.result_cache(),
+                        control.as_ref(),
+                        &key.identity_scope,
+                        bytes,
+                    ) {
+                        Ok(ttl) => {
+                            conn.runtime.result_cache().insert(
+                                key.clone(),
+                                vec![answer.clone()],
+                                ttl,
+                                control.as_ref(),
+                            );
+                            conn.runtime.note_exchange_cache_store();
+                            if let UnitState::Producer(producer) = &units[index].state {
+                                producer.stored();
+                            }
+                            emit_exchange_cache_event(
+                                conn,
+                                catalog,
+                                schema_name,
+                                function,
+                                "cache.store",
+                                None,
+                            );
+                        }
+                        Err(reason) => {
+                            if let UnitState::Producer(producer) = &units[index].state {
+                                producer.abort(format!("cache refused result: {reason:?}"));
+                            }
+                            emit_exchange_cache_event(
+                                conn,
+                                catalog,
+                                schema_name,
+                                function,
+                                "cache.refused",
+                                Some(format!("exchange batch: {reason:?}")),
+                            );
+                        }
+                    }
+                }
+                units[index].output = Some(vec![answer]);
+            } else {
+                if let UnitState::Producer(producer) = &units[index].state {
+                    producer.abort("worker returned no cacheable answer");
+                }
+                units[index].output = Some(Vec::new());
+            }
+        }
+        exchange.close().map_err(to_df)?;
+    }
+
+    // Followers wake only after the producer has stored or aborted. On abort,
+    // run once without another cache claim so a worker refusing cache remains
+    // correct and cannot form a retry loop.
+    for index in 0..units.len() {
+        let UnitState::Follower(waiter) = &units[index].state else {
+            continue;
+        };
+        let key = units[index].key.as_ref().expect("follower has key");
+        if matches!(
+            waiter.wait_blocking_timeout(conn.rpc_timeout()),
+            crate::runtime::ResultFlightOutcome::Stored
+        ) {
+            if let Some(entry) = conn
+                .runtime
+                .result_cache()
+                .get(key)
+                .or_else(|| conn.runtime.result_cache().get_for_revalidation(key))
+            {
+                conn.runtime.note_exchange_cache_hit(entry.bytes());
+                units[index].output = Some(entry.batches().to_vec());
+                continue;
+            }
+        }
+        let mut exchange = client
+            .open_exchange(&bound, &ScanOptions::default())
+            .map_err(to_df)?;
+        units[index].output = Some(
+            exchange
+                .send(&units[index].input)
+                .map_err(to_df)?
+                .into_iter()
+                .collect(),
+        );
+        exchange.close().map_err(to_df)?;
     }
 
     let mut out = Vec::new();
-    if !has_miss {
-        for (_, _, cached) in units {
-            out.extend(cached.expect("all units were cache hits"));
-        }
-        return Ok(out);
-    }
-
-    let mut exchange = client
-        .open_exchange(&bound, &ScanOptions::default())
-        .map_err(to_df)?;
-    for (batch, cache_key, cached) in units {
-        if let Some(cached) = cached {
-            out.extend(cached);
-            continue;
-        }
-        if let Some(answer) = exchange.send(&batch).map_err(to_df)? {
-            if let Some(key) = cache_key {
-                let control = exchange.cache_control().cloned();
-                let bytes = answer
-                    .columns()
-                    .iter()
-                    .map(|array| array.get_array_memory_size())
-                    .sum();
-                match exchange_cache_ttl(
-                    conn.runtime.result_cache(),
-                    control.as_ref(),
-                    &key.identity_scope,
-                    bytes,
-                ) {
-                    Ok(ttl) => {
-                        conn.runtime.result_cache().insert(
-                            key,
-                            vec![answer.clone()],
-                            ttl,
-                            control.as_ref(),
-                        );
-                        conn.runtime.note_exchange_cache_store();
-                        emit_exchange_cache_event(
-                            conn,
-                            catalog,
-                            schema_name,
-                            function,
-                            "cache.store",
-                            None,
-                        );
-                    }
-                    Err(reason) => emit_exchange_cache_event(
-                        conn,
-                        catalog,
-                        schema_name,
-                        function,
-                        "cache.refused",
-                        Some(format!("exchange batch: {reason:?}")),
-                    ),
-                }
-            }
-            out.push(answer);
+    for unit in units {
+        match unit.state {
+            UnitState::Hit(cached) => out.extend(cached),
+            _ => out.extend(unit.output.unwrap_or_default()),
         }
     }
-    // Input EOS. A function with a FINALIZE phase would answer only after
-    // this, through `finalize_table_in_out`; that shape is not wired up yet, so
-    // a buffered function reached this way returns nothing rather than wrong
-    // rows.
-    exchange.close().map_err(to_df)?;
     Ok(out)
 }
 

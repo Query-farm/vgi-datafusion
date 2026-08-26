@@ -8,18 +8,18 @@
     "files_run": 278,
     "files_skipped": 49,
     "measured_records": 4126,
-    "executed": 3313,
+    "executed": 3311,
     "failed": 813,
     "not_applicable": 595,
     "adapted_records": 49,
     "blocked": 0,
-    "timed_out": 0,
+    "timed_out": 2,
     "expected_errors_ignored": 179,
     "values": {
       "exact": 2147,
       "rendering_equivalent": 110,
       "different": 184,
-      "unordered_subset": 42
+      "unordered_subset": 40
     }
   },
   "failure_buckets": {
@@ -88,12 +88,12 @@
       ],
       "files": 43,
       "files_skipped": 3,
-      "executed": 314,
+      "executed": 312,
       "failed": 232,
       "not_applicable": 59,
       "adapted_records": 2,
       "blocked": 0,
-      "timed_out": 0
+      "timed_out": 2
     },
     {
       "id": "filter_pushdown",
@@ -389,7 +389,7 @@
     {
       "group": "table_in_out",
       "area": "table_input",
-      "executed": 314,
+      "executed": 312,
       "failed": 232
     },
     {
@@ -7515,16 +7515,16 @@
       "records": 13,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 9,
+      "executed": 7,
       "failed": 3,
       "not_applicable": 1,
       "blocked": 0,
-      "timed_out": 0,
+      "timed_out": 2,
       "values": {
         "exact": 5,
         "rendering_equivalent": 0,
         "different": 0,
-        "unordered_subset": 2
+        "unordered_subset": 0
       },
       "failure_buckets": {
         "other": 3

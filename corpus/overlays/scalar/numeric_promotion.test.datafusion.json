@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 4,
+      "original_sql": "SELECT typeof(example.double(10::UTINYINT));",
+      "replacement_sql": "SELECT typeof(example.double(arrow_cast(10, 'UInt8')));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes Arrow UInt8 through arrow_cast rather than DuckDB's UTINYINT SQL type spelling."
+    },
+    {
+      "record": 5,
+      "original_sql": "SELECT example.double(10::UTINYINT);",
+      "replacement_sql": "SELECT example.double(arrow_cast(10, 'UInt8'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes Arrow UInt8 through arrow_cast rather than DuckDB's UTINYINT SQL type spelling."
+    },
+    {
+      "record": 6,
+      "original_sql": "SELECT typeof(example.double(100::UINTEGER));",
+      "replacement_sql": "SELECT typeof(example.double(arrow_cast(100, 'UInt32')));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion exposes Arrow UInt32 through arrow_cast rather than DuckDB's UINTEGER SQL type spelling."
+    },
+    {
+      "record": 9,
+      "original_sql": "SELECT typeof(example.add_values(2::INTEGER, 3::UINTEGER));",
+      "replacement_sql": "SELECT typeof(example.add_values(2::INTEGER, arrow_cast(3, 'UInt32')));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's arrow_cast supplies the same UInt32 input used by DuckDB's UINTEGER cast."
+    },
+    {
+      "record": 10,
+      "original_sql": "SELECT example.add_values(2::INTEGER, 3::UINTEGER);",
+      "replacement_sql": "SELECT example.add_values(2::INTEGER, arrow_cast(3, 'UInt32'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's arrow_cast supplies the same UInt32 input used by DuckDB's UINTEGER cast."
+    }
+  ]
+}

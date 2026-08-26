@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 2,
+      "original_sql": "SELECT round(example.geo_distance_struct(\n    {lat: 0.0, lon: 0.0}::STRUCT(lat DOUBLE, lon DOUBLE),\n    {lat: 3.0, lon: 4.0}::STRUCT(lat DOUBLE, lon DOUBLE)\n), 2);",
+      "replacement_sql": "SELECT round(example.geo_distance_struct(\n    named_struct('lat', arrow_cast(0.0, 'Float64'), 'lon', arrow_cast(0.0, 'Float64')),\n    named_struct('lat', arrow_cast(3.0, 'Float64'), 'lon', arrow_cast(4.0, 'Float64'))\n), 2);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals."
+    },
+    {
+      "record": 3,
+      "original_sql": "SELECT round(example.geo_distance_struct(\n    {lat: 1.5, lon: 2.5}::STRUCT(lat DOUBLE, lon DOUBLE),\n    {lat: 1.5, lon: 2.5}::STRUCT(lat DOUBLE, lon DOUBLE)\n), 2);",
+      "replacement_sql": "SELECT round(example.geo_distance_struct(\n    named_struct('lat', arrow_cast(1.5, 'Float64'), 'lon', arrow_cast(2.5, 'Float64')),\n    named_struct('lat', arrow_cast(1.5, 'Float64'), 'lon', arrow_cast(2.5, 'Float64'))\n), 2);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals."
+    },
+    {
+      "record": 4,
+      "original_sql": "SELECT round(example.geo_distance_struct(\n    {lat: a, lon: b}::STRUCT(lat DOUBLE, lon DOUBLE),\n    {lat: c, lon: d}::STRUCT(lat DOUBLE, lon DOUBLE)\n), 2)\nFROM (VALUES (0.0, 0.0, 3.0, 4.0), (1.0, 1.0, 4.0, 5.0), (0.0, 0.0, 0.0, 0.0)) t(a, b, c, d);",
+      "replacement_sql": "SELECT round(example.geo_distance_struct(\n    named_struct('lat', arrow_cast(a, 'Float64'), 'lon', arrow_cast(b, 'Float64')),\n    named_struct('lat', arrow_cast(c, 'Float64'), 'lon', arrow_cast(d, 'Float64'))\n), 2)\nFROM (VALUES (0.0, 0.0, 3.0, 4.0), (1.0, 1.0, 4.0, 5.0), (0.0, 0.0, 0.0, 0.0)) t(a, b, c, d);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same per-row typed points as DuckDB's typed struct literals."
+    }
+  ]
+}

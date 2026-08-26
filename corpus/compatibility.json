@@ -30,7 +30,7 @@
       "title": "Scalar functions and overloads",
       "status": "partial",
       "groups": ["scalar", "overload"],
-      "remaining": ["DuckDB unsigned type spellings", "struct field syntax", "remaining null-coercion cases"]
+      "remaining": ["remaining null-coercion cases"]
     },
     {
       "id": "aggregates",
@@ -65,7 +65,7 @@
       "title": "VGI result cache",
       "status": "partial",
       "groups": ["cache"],
-      "remaining": ["buffered whole-input result caching", "correlated 1:N per-value caching", "exchange conditional revalidation and single-flight", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events"]
+      "remaining": ["buffered whole-input result caching", "correlated 1:N per-value caching", "disk persistence and spilling", "compression", "stale-while-revalidate", "worker-log forwarding beyond adapter events"]
     },
     {
       "id": "catalog_metadata",

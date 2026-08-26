@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 2,
+      "original_sql": "SELECT example.geo_centroid_struct(\n    {lat: 3.0, lon: 4.0}::STRUCT(lat DOUBLE, lon DOUBLE)\n);",
+      "replacement_sql": "SELECT example.geo_centroid_struct(\n    named_struct('lat', arrow_cast(3.0, 'Float64'), 'lon', arrow_cast(4.0, 'Float64'))\n);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed point as DuckDB's typed struct literal."
+    },
+    {
+      "record": 3,
+      "original_sql": "SELECT example.geo_centroid_struct(\n    {lat: 0.0, lon: 0.0}::STRUCT(lat DOUBLE, lon DOUBLE),\n    {lat: 4.0, lon: 6.0}::STRUCT(lat DOUBLE, lon DOUBLE)\n);",
+      "replacement_sql": "SELECT example.geo_centroid_struct(\n    named_struct('lat', arrow_cast(0.0, 'Float64'), 'lon', arrow_cast(0.0, 'Float64')),\n    named_struct('lat', arrow_cast(4.0, 'Float64'), 'lon', arrow_cast(6.0, 'Float64'))\n);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals."
+    },
+    {
+      "record": 4,
+      "original_sql": "SELECT example.geo_centroid_struct(\n    {lat: 0.0, lon: 0.0}::STRUCT(lat DOUBLE, lon DOUBLE),\n    {lat: 3.0, lon: 0.0}::STRUCT(lat DOUBLE, lon DOUBLE),\n    {lat: 0.0, lon: 6.0}::STRUCT(lat DOUBLE, lon DOUBLE)\n);",
+      "replacement_sql": "SELECT example.geo_centroid_struct(\n    named_struct('lat', arrow_cast(0.0, 'Float64'), 'lon', arrow_cast(0.0, 'Float64')),\n    named_struct('lat', arrow_cast(3.0, 'Float64'), 'lon', arrow_cast(0.0, 'Float64')),\n    named_struct('lat', arrow_cast(0.0, 'Float64'), 'lon', arrow_cast(6.0, 'Float64'))\n);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals."
+    },
+    {
+      "record": 5,
+      "original_sql": "SELECT example.geo_centroid_struct(\n    {lat: a, lon: b}::STRUCT(lat DOUBLE, lon DOUBLE),\n    {lat: c, lon: d}::STRUCT(lat DOUBLE, lon DOUBLE)\n)\nFROM (VALUES (0.0, 0.0, 4.0, 6.0), (2.0, 2.0, 6.0, 10.0)) t(a, b, c, d);",
+      "replacement_sql": "SELECT example.geo_centroid_struct(\n    named_struct('lat', arrow_cast(a, 'Float64'), 'lon', arrow_cast(b, 'Float64')),\n    named_struct('lat', arrow_cast(c, 'Float64'), 'lon', arrow_cast(d, 'Float64'))\n)\nFROM (VALUES (0.0, 0.0, 4.0, 6.0), (2.0, 2.0, 6.0, 10.0)) t(a, b, c, d);",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same per-row typed points as DuckDB's typed struct literals."
+    }
+  ]
+}

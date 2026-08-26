@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "record": 3,
+      "original_sql": "SELECT length(example.main.unnest_tensor({tensor: [10, 20, 30], axes: {i: [0, 1, 2]}}));",
+      "replacement_sql": "SELECT array_length(example.main.unnest_tensor({tensor: [10, 20, 30], axes: {i: [0, 1, 2]}}));",
+      "kind": "equivalent_sql",
+      "reason": "DuckDB overloads length for lists; DataFusion exposes the equivalent list cardinality operation as array_length."
+    },
+    {
+      "record": 14,
+      "original_sql": "SELECT example.main.unnest_tensor(CAST(NULL AS STRUCT(tensor INTEGER[], axes STRUCT(i INTEGER[]))));",
+      "replacement_sql": "SELECT example.main.unnest_tensor(arrow_cast(NULL, 'Struct(\"tensor\": List(Int32), \"axes\": Struct(\"i\": List(Int32)))'));",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion arrow_cast expresses the same named nested Arrow struct type as DuckDB's STRUCT/list cast syntax."
+    }
+  ]
+}

@@ -5,11 +5,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use datafusion::arrow::array::StructArray;
 use datafusion::arrow::array::{
     new_empty_array, Array, ArrayRef, BooleanArray, Int64Array, ListArray, ListBuilder, MapBuilder,
-    StringArray, StringBuilder, UInt64Array,
+    StringArray, StringBuilder, TimestampMicrosecondArray, UInt64Array,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::buffer::OffsetBuffer;
+use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::{MemTable, TableFunctionArgs, TableFunctionImpl, TableProvider};
 use datafusion::common::{plan_err, Result as DFResult, ScalarValue};
@@ -30,6 +32,34 @@ struct DiagnosticsTable {
 #[derive(Debug)]
 struct TableStatistics {
     runtime: Arc<VgiRuntime>,
+}
+
+#[derive(Debug)]
+struct CatalogDiscovery {
+    runtime: Arc<VgiRuntime>,
+}
+
+impl TableFunctionImpl for CatalogDiscovery {
+    fn call_with_args(&self, args: TableFunctionArgs) -> DFResult<Arc<dyn TableProvider>> {
+        let [location] = literal_strings(args.exprs(), "vgi_catalogs")?
+            .try_into()
+            .map_err(|_| {
+                datafusion::common::plan_datafusion_err!(
+                    "vgi_catalogs expects one worker LOCATION argument"
+                )
+            })?;
+        let runtime = Arc::clone(&self.runtime);
+        let batch = crate::run_blocking_planner_call(move || {
+            let connection = crate::VgiConnection::from_location(&location)?.with_runtime(runtime);
+            let mut client = connection.connect()?;
+            let catalogs = client.catalogs().map_err(vgi_error)?;
+            catalog_discovery_batch(&catalogs)
+        })?;
+        Ok(Arc::new(MemTable::try_new(
+            batch.schema(),
+            vec![vec![batch]],
+        )?))
+    }
 }
 
 impl TableFunctionImpl for TableStatistics {
@@ -113,6 +143,157 @@ fn vgi_error(error: impl std::fmt::Display) -> datafusion::common::DataFusionErr
     datafusion::common::DataFusionError::External(Box::new(std::io::Error::other(
         error.to_string(),
     )))
+}
+
+fn catalog_discovery_batch(catalogs: &[vgi_client::dtos::CatalogInfo]) -> DFResult<RecordBatch> {
+    let option_fields = datafusion::arrow::datatypes::Fields::from(vec![
+        Arc::new(Field::new("name", DataType::Utf8, false)),
+        Arc::new(Field::new("description", DataType::Utf8, false)),
+        Arc::new(Field::new("type", DataType::Utf8, false)),
+        Arc::new(Field::new("default_value", DataType::Utf8, true)),
+        Arc::new(Field::new("required", DataType::Boolean, false)),
+    ]);
+    let mut offsets = Vec::with_capacity(catalogs.len() + 1);
+    offsets.push(0_i32);
+    let mut names = Vec::new();
+    let mut types = Vec::new();
+    let mut defaults = Vec::new();
+    let mut descriptions = Vec::new();
+    let mut required = Vec::new();
+    for catalog in catalogs {
+        for spec in vgi_client::decode_attach_option_specs(catalog).map_err(vgi_error)? {
+            let default = match spec.default_value.as_ref() {
+                None => None,
+                Some(array) => {
+                    let value = ScalarValue::try_from_array(array, 0).map_err(|error| {
+                        datafusion::common::plan_datafusion_err!(
+                            "could not render default for VGI catalog `{}` ATTACH option `{}`: {error}",
+                            catalog.name,
+                            spec.name
+                        )
+                    })?;
+                    (!value.is_null()).then(|| value.to_string())
+                }
+            };
+            names.push(spec.name);
+            descriptions.push(spec.description);
+            types.push(duckdb_type_name(&spec.data_type));
+            defaults.push(default);
+            required.push(spec.required);
+        }
+        offsets.push(i32::try_from(names.len()).map_err(|_| {
+            datafusion::common::plan_datafusion_err!(
+                "VGI catalog discovery returned too many attach options"
+            )
+        })?);
+    }
+    let option_values: ArrayRef = Arc::new(StructArray::new(
+        option_fields.clone(),
+        vec![
+            Arc::new(StringArray::from_iter_values(names)),
+            Arc::new(StringArray::from_iter_values(descriptions)),
+            Arc::new(StringArray::from_iter_values(types)),
+            Arc::new(StringArray::from(defaults)),
+            Arc::new(BooleanArray::from(required)),
+        ],
+        None,
+    ));
+    let option_item = Arc::new(Field::new("item", DataType::Struct(option_fields), true));
+    let attach_options: ArrayRef = Arc::new(ListArray::new(
+        Arc::clone(&option_item),
+        OffsetBuffer::new(offsets.into()),
+        option_values,
+        None,
+    ));
+
+    let release_fields = datafusion::arrow::datatypes::Fields::from(vec![
+        Arc::new(Field::new("version", DataType::Utf8, false)),
+        Arc::new(Field::new(
+            "released_at",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            true,
+        )),
+        Arc::new(Field::new("summary", DataType::Utf8, false)),
+        Arc::new(Field::new("notes_url", DataType::Utf8, true)),
+    ]);
+    let mut release_offsets = Vec::with_capacity(catalogs.len() + 1);
+    release_offsets.push(0_i32);
+    let mut release_versions = Vec::new();
+    let mut release_times = Vec::new();
+    let mut release_summaries = Vec::new();
+    let mut release_notes = Vec::new();
+    for catalog in catalogs {
+        for release in &catalog.releases {
+            release_versions.push(release.version.as_str());
+            release_times.push(
+                release
+                    .released_at
+                    .as_ref()
+                    .map(|timestamp| timestamp.0.timestamp_micros()),
+            );
+            release_summaries.push(release.summary.as_str());
+            release_notes.push(release.notes_url.as_deref());
+        }
+        release_offsets.push(i32::try_from(release_versions.len()).map_err(|_| {
+            datafusion::common::plan_datafusion_err!(
+                "VGI catalog discovery returned too many releases"
+            )
+        })?);
+    }
+    let release_values: ArrayRef = Arc::new(StructArray::new(
+        release_fields.clone(),
+        vec![
+            Arc::new(StringArray::from_iter_values(release_versions)),
+            Arc::new(TimestampMicrosecondArray::from(release_times).with_timezone("UTC")),
+            Arc::new(StringArray::from_iter_values(release_summaries)),
+            Arc::new(StringArray::from(release_notes)),
+        ],
+        None,
+    ));
+    let release_item = Arc::new(Field::new("item", DataType::Struct(release_fields), true));
+    let releases: ArrayRef = Arc::new(ListArray::new(
+        Arc::clone(&release_item),
+        OffsetBuffer::new(release_offsets.into()),
+        release_values,
+        None,
+    ));
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("catalog", DataType::Utf8, false),
+        Field::new("implementation_version", DataType::Utf8, true),
+        Field::new("data_version_spec", DataType::Utf8, true),
+        Field::new("attach_options", DataType::List(option_item), false),
+        Field::new("releases", DataType::List(release_item), false),
+        Field::new("source_url", DataType::Utf8, true),
+    ]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                catalogs.iter().map(|catalog| catalog.name.as_str()),
+            )),
+            Arc::new(StringArray::from(
+                catalogs
+                    .iter()
+                    .map(|catalog| catalog.implementation_version.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                catalogs
+                    .iter()
+                    .map(|catalog| catalog.data_version_spec.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            attach_options,
+            releases,
+            Arc::new(StringArray::from(
+                catalogs
+                    .iter()
+                    .map(|catalog| catalog.source_url.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )?)
 }
 
 fn table_statistics_schema() -> Arc<Schema> {
@@ -293,6 +474,7 @@ enum DiagnosticsKind {
     DuckDbLogs,
     DuckDbFunctions,
     DuckDbSettings,
+    VgiGlobalFunctions,
     DuckDbDatabases,
     DuckDbSchemas,
     DuckDbTables,
@@ -320,6 +502,7 @@ impl TableFunctionImpl for DiagnosticsTable {
             DiagnosticsKind::DuckDbLogs => duckdb_logs(&self.runtime)?,
             DiagnosticsKind::DuckDbFunctions => duckdb_functions(&self.runtime)?,
             DiagnosticsKind::DuckDbSettings => duckdb_settings(&self.runtime)?,
+            DiagnosticsKind::VgiGlobalFunctions => vgi_global_functions(&self.runtime)?,
             DiagnosticsKind::DuckDbDatabases => duckdb_databases(&self.runtime)?,
             DiagnosticsKind::DuckDbSchemas => duckdb_schemas(&self.runtime)?,
             DiagnosticsKind::DuckDbTables => duckdb_tables(&self.runtime)?,
@@ -936,6 +1119,69 @@ fn duckdb_settings(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
     )?)
 }
 
+fn vgi_global_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    let mut rows = Vec::new();
+    for (alias, metadata) in runtime.catalog_metadata() {
+        let mut seen = std::collections::HashSet::new();
+        for info in &metadata.global_functions {
+            let global_name = if metadata.global_function_prefix.is_empty() {
+                info.name.to_ascii_lowercase()
+            } else {
+                format!("{}_{}", metadata.global_function_prefix, info.name).to_ascii_lowercase()
+            };
+            if metadata
+                .published_global_functions
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&global_name))
+                && seen.insert(global_name.clone())
+            {
+                rows.push((
+                    global_name,
+                    alias.clone(),
+                    info.name.clone(),
+                    info.schema_name.clone(),
+                    info.function_type.0.to_ascii_lowercase(),
+                    metadata.connection.label().to_string(),
+                ));
+            }
+        }
+    }
+    rows.sort();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("global_name", DataType::Utf8, false),
+        Field::new("catalog_name", DataType::Utf8, false),
+        Field::new("function_name", DataType::Utf8, false),
+        Field::new("schema_name", DataType::Utf8, false),
+        Field::new("function_type", DataType::Utf8, false),
+        Field::new("worker_path", DataType::Utf8, false),
+        Field::new("live", DataType::Boolean, false),
+    ]));
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.0.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.1.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.2.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.3.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.4.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|row| row.5.as_str()),
+            )),
+            Arc::new(BooleanArray::from(vec![true; rows.len()])),
+        ],
+    )?)
+}
+
 /// Compatibility projection of attached VGI routine declarations through the
 /// columns the shared corpus reads from DuckDB's `duckdb_functions()`.
 fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
@@ -962,13 +1208,21 @@ fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
                 tags: info.tags.clone(),
             });
         }
+        let mut seen_globals = std::collections::HashSet::new();
         for info in &metadata.global_functions {
             let name = if metadata.global_function_prefix.is_empty() {
                 info.name.to_ascii_lowercase()
             } else {
                 format!("{}_{}", metadata.global_function_prefix, info.name).to_ascii_lowercase()
             };
-            rows.push(function_row("system".to_string(), name, info)?);
+            if metadata
+                .published_global_functions
+                .iter()
+                .any(|published| published.eq_ignore_ascii_case(&name))
+                && seen_globals.insert(name.clone())
+            {
+                rows.push(function_row("system".to_string(), name, info)?);
+            }
         }
     }
 
@@ -1934,6 +2188,7 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ("duckdb_logs", DiagnosticsKind::DuckDbLogs),
         ("duckdb_functions", DiagnosticsKind::DuckDbFunctions),
         ("duckdb_settings", DiagnosticsKind::DuckDbSettings),
+        ("vgi_global_functions", DiagnosticsKind::VgiGlobalFunctions),
         ("duckdb_databases", DiagnosticsKind::DuckDbDatabases),
         ("duckdb_schemas", DiagnosticsKind::DuckDbSchemas),
         ("duckdb_tables", DiagnosticsKind::DuckDbTables),
@@ -1961,6 +2216,15 @@ pub(crate) fn register(ctx: &SessionContext, runtime: Arc<VgiRuntime>) {
         ctx.register_udtf(
             "vgi_table_statistics",
             Arc::new(TableStatistics {
+                runtime: Arc::clone(&runtime),
+            }),
+        );
+    }
+
+    if !state.table_functions().contains_key("vgi_catalogs") {
+        ctx.register_udtf(
+            "vgi_catalogs",
+            Arc::new(CatalogDiscovery {
                 runtime: Arc::clone(&runtime),
             }),
         );

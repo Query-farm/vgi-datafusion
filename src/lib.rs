@@ -318,6 +318,14 @@ impl VgiConnection {
         self
     }
 
+    /// Deadline inherited from the session or overridden by this attachment.
+    ///
+    /// Cache followers are part of the attachment's RPC path, so they must use
+    /// the same effective deadline as the connection they are waiting behind.
+    pub(crate) fn rpc_timeout(&self) -> Option<std::time::Duration> {
+        self.connection_options.rpc_timeout
+    }
+
     /// Attach `catalog`, reusing the handle from a previous attach.
     ///
     /// Every call site should use this rather than `client.attach(...)`
@@ -1853,7 +1861,7 @@ pub struct VgiScanExec {
     cache_metrics: VgiCacheMetrics,
     cache_key: Option<vgi_client::CacheKey>,
     cache_probe: OnceLock<Option<vgi_client::CachedEntry>>,
-    cache_flight: OnceLock<crate::runtime::ResultFlightClaim>,
+    cache_flight: Arc<OnceLock<crate::runtime::ResultFlightClaim>>,
     cache_flight_probe: Arc<OnceLock<Option<vgi_client::CachedEntry>>>,
     cache_capture: Option<Arc<ScanCacheCapture>>,
     at: Option<vgi_client::At>,
@@ -2070,7 +2078,7 @@ impl VgiScanExec {
             cache_metrics,
             cache_key,
             cache_probe: OnceLock::new(),
-            cache_flight: OnceLock::new(),
+            cache_flight: Arc::new(OnceLock::new()),
             cache_flight_probe: Arc::new(OnceLock::new()),
             cache_capture,
             at,
@@ -2104,7 +2112,7 @@ impl VgiScanExec {
             // by its planning-time filter must never enter the VGI result cache.
             cache_key: None,
             cache_probe: OnceLock::new(),
-            cache_flight: OnceLock::new(),
+            cache_flight: Arc::new(OnceLock::new()),
             cache_flight_probe: Arc::new(OnceLock::new()),
             cache_capture: None,
             at: self.at.clone(),
@@ -2244,6 +2252,7 @@ impl ScanCacheCapture {
         }
         let Some(control) = state.controls.iter().flatten().next().cloned() else {
             state.aborted = true;
+            self.cache.remove(&self.key);
             if let Some(flight) = self.flight.lock().unwrap().as_ref() {
                 flight.abort("worker did not opt result into caching");
             }
@@ -2256,6 +2265,7 @@ impl ScanCacheCapture {
             .any(|candidate| candidate != &control)
         {
             state.aborted = true;
+            self.cache.remove(&self.key);
             self.cache.record_capture_abort();
             self.metrics.capture_aborts.add(1);
             if let Some(flight) = self.flight.lock().unwrap().as_ref() {
@@ -2293,6 +2303,7 @@ impl ScanCacheCapture {
             }
             Err(reason) => {
                 state.aborted = true;
+                self.cache.remove(&self.key);
                 self.metrics.refusals.add(1);
                 let mut event = VgiEvent::new("cache.refused");
                 event.catalog = Some(self.key.catalog.clone());
@@ -2775,7 +2786,6 @@ impl ExecutionPlan for VgiScanExec {
         _ctx: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let partition_metrics = VgiPartitionMetrics::new(&self.metrics, partition);
-        let mut cache_waiter = None;
         if let Some(key) = &self.cache_key {
             let first_probe = self.cache_probe.get().is_none();
             let cached = self
@@ -2806,20 +2816,6 @@ impl ExecutionPlan for VgiScanExec {
                 let stream = futures::stream::iter(batches.into_iter().map(Ok))
                     .map(move |batch| batch.record_output(&baseline));
                 return Ok(Box::pin(RecordBatchStreamAdapter::new(out_schema, stream)));
-            }
-
-            match self
-                .cache_flight
-                .get_or_init(|| self.conn.runtime.acquire_result_flight(key))
-            {
-                crate::runtime::ResultFlightClaim::Producer(flight) => {
-                    if let Some(capture) = &self.cache_capture {
-                        capture.set_flight(Arc::clone(flight));
-                    }
-                }
-                crate::runtime::ResultFlightClaim::Follower(waiter) => {
-                    cache_waiter = Some((waiter.clone(), key.clone()));
-                }
             }
         }
         let conn = self.conn.clone();
@@ -2852,13 +2848,9 @@ impl ExecutionPlan for VgiScanExec {
         let column_mapping = self.column_mapping.clone();
         let cache_capture = self.cache_capture.clone();
         let revalidation = if self.split_groups.is_none() {
-            self.cache_key.as_ref().and_then(|key| {
-                self.conn
-                    .runtime
-                    .result_cache()
-                    .get_for_revalidation(key)
-                    .filter(|entry| entry.bytes() >= 256 * 1024)
-            })
+            self.cache_key
+                .as_ref()
+                .and_then(|key| self.conn.runtime.result_cache().get_for_revalidation(key))
         } else {
             None
         };
@@ -2969,7 +2961,28 @@ impl ExecutionPlan for VgiScanExec {
                     (Some(plan), Some(tokens)) => plan.redemption_options(tokens, opts),
                     _ => opts,
                 };
-                let mut scan = client.scan(&bound, &opts).map_err(to_df)?;
+                let mut scan = match client.scan(&bound, &opts) {
+                    Ok(scan) => scan,
+                    Err(_error)
+                        if revalidation.as_ref().is_some_and(|entry| {
+                            entry.may_serve_on_error_at(std::time::Instant::now())
+                        }) =>
+                    {
+                        let entry = revalidation.as_ref().expect("checked above");
+                        for batch in entry.batches() {
+                            if tx.blocking_send(Ok(batch.clone())).is_err() {
+                                break;
+                            }
+                        }
+                        cache.record_stale_serve();
+                        cache_metrics.stale_serves.add(1);
+                        if let Some(capture) = &cache_capture {
+                            capture.revalidated();
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => return Err(to_df(error)),
+                };
                 worker_metrics.worker_scans.add(1);
 
                 let mut emitted = 0usize;
@@ -3009,6 +3022,9 @@ impl ExecutionPlan for VgiScanExec {
                                 }
                                 cache.record_stale_serve();
                                 cache_metrics.stale_serves.add(1);
+                                if let Some(capture) = &cache_capture {
+                                    capture.revalidated();
+                                }
                                 return Ok(());
                             }
                             if let Some(capture) = &cache_capture {
@@ -3078,22 +3094,25 @@ impl ExecutionPlan for VgiScanExec {
                                 "VGI function `{function}` returned rows and not_modified together"
                             )));
                         }
-                        let ttl = control
-                            .as_ref()
-                            .and_then(|control| {
-                                cache
-                                    .eligibility(
-                                        Some(control),
-                                        cache_key.as_ref().map(|key| key.identity_scope.as_str()),
-                                        entry.bytes(),
-                                    )
-                                    .ok()
-                            })
-                            .or_else(|| entry.freshness_lifetime())
-                            .unwrap_or_default();
-                        if let Some(key) = &cache_key {
-                            cache.slide(key, ttl);
-                        }
+                        let key = cache_key.as_ref().ok_or_else(|| {
+                            DataFusionError::Execution(format!(
+                                "VGI function `{function}` returned not_modified without a cache key"
+                            ))
+                        })?;
+                        let ttl = match cache.eligibility(
+                            control.as_ref(),
+                            Some(key.identity_scope.as_str()),
+                            entry.bytes(),
+                        ) {
+                            Ok(ttl) => ttl,
+                            Err(reason) => {
+                                cache.remove(key);
+                                return Err(DataFusionError::Execution(format!(
+                                    "VGI function `{function}` returned not_modified with ineligible cache control: {reason:?}"
+                                )));
+                            }
+                        };
+                        cache.slide(key, ttl);
                         for batch in entry.batches() {
                             tx.blocking_send(Ok(batch.clone())).map_err(|_| {
                                 DataFusionError::Execution(
@@ -3145,80 +3164,106 @@ impl ExecutionPlan for VgiScanExec {
         // join-key dynamic filter is ready. Starting the blocking RPC here
         // would consume the remote scan before DataFusion had a chance to
         // publish that filter.
-        let wait_context = cache_waiter.map(|(waiter, key)| {
+        let flight_context = self.cache_key.clone().map(|key| {
             (
-                waiter,
+                Arc::clone(&self.cache_flight),
                 key,
                 Arc::clone(self.conn.runtime.result_cache()),
                 Arc::clone(&self.cache_flight_probe),
                 Arc::clone(&self.conn.runtime),
+                self.conn.rpc_timeout(),
                 self.catalog.clone(),
                 format!("{}.{}", self.schema_name, self.function),
                 self.cache_metrics.clone(),
+                self.cache_capture.clone(),
             )
         });
         let stream = futures::stream::unfold(
-            (rx, Some(job), wait_context, VecDeque::new()),
-            move |(mut rx, mut job, wait_context, mut replay)| async move {
+            (rx, Some(job), flight_context, VecDeque::new()),
+            move |(mut rx, mut job, flight_context, mut replay)| async move {
                 if let Some((
-                    waiter,
+                    flight,
                     key,
                     cache,
                     probe,
                     runtime,
+                    rpc_timeout,
                     catalog,
                     function,
                     cache_metrics,
-                )) = wait_context
+                    capture,
+                )) = flight_context
                 {
-                    cache_metrics.waits.add(1);
-                    let mut event = VgiEvent::new("cache.wait");
-                    event.catalog = Some(catalog.clone());
-                    event.function = Some(function.clone());
-                    runtime.emit(event);
-                    match waiter.wait().await {
-                        crate::runtime::ResultFlightOutcome::Stored => {
-                            match probe.get_or_init(|| cache.get(&key)).clone() {
-                                Some(entry) => {
-                                    // Dropping the unstarted fallback job also
-                                    // drops its sender, so replay closes normally.
-                                    drop(job.take());
-                                    if partition == 0 {
-                                        replay.extend(entry.batches().iter().cloned().map(Ok));
-                                        cache_metrics.coalesced_hits.add(1);
-                                        let mut event = VgiEvent::new("cache.coalesced_hit");
-                                        event.catalog = Some(catalog);
-                                        event.function = Some(function);
-                                        runtime.emit(event);
+                    match flight.get_or_init(|| runtime.acquire_result_flight(&key)) {
+                        crate::runtime::ResultFlightClaim::Producer(producer) => {
+                            if let Some(capture) = &capture {
+                                capture.set_flight(Arc::clone(producer));
+                            }
+                            if let Some(job) = job.take() {
+                                tokio::task::spawn_blocking(job);
+                            }
+                        }
+                        crate::runtime::ResultFlightClaim::Follower(waiter) => {
+                            cache_metrics.waits.add(1);
+                            let mut event = VgiEvent::new("cache.wait");
+                            event.catalog = Some(catalog.clone());
+                            event.function = Some(function.clone());
+                            runtime.emit(event);
+                            match waiter.clone().wait_timeout(rpc_timeout).await {
+                                crate::runtime::ResultFlightOutcome::Stored => {
+                                    match probe
+                                        .get_or_init(|| {
+                                            cache
+                                                .get(&key)
+                                                .or_else(|| cache.get_for_revalidation(&key))
+                                        })
+                                        .clone()
+                                    {
+                                        Some(entry) => {
+                                            // Dropping the unstarted fallback job also
+                                            // drops its sender, so replay closes normally.
+                                            drop(job.take());
+                                            if partition == 0 {
+                                                replay.extend(
+                                                    entry.batches().iter().cloned().map(Ok),
+                                                );
+                                                cache_metrics.coalesced_hits.add(1);
+                                                let mut event =
+                                                    VgiEvent::new("cache.coalesced_hit");
+                                                event.catalog = Some(catalog);
+                                                event.function = Some(function);
+                                                runtime.emit(event);
+                                            }
+                                        }
+                                        None => {
+                                            // A zero-TTL revalidatable entry, short
+                                            // expiry, or intervening eviction can make
+                                            // a successful fill unavailable by the
+                                            // time this follower wakes. Cache policy
+                                            // must never turn that race into a query
+                                            // failure: execute this plan normally.
+                                            cache_metrics.coalesced_retries.add(1);
+                                            let mut event = VgiEvent::new("cache.coalesced_retry");
+                                            event.catalog = Some(catalog);
+                                            event.function = Some(function);
+                                            runtime.emit(event);
+                                            if let Some(job) = job.take() {
+                                                tokio::task::spawn_blocking(job);
+                                            }
+                                        }
                                     }
                                 }
-                                None => {
-                                    // A zero-TTL revalidatable entry, short
-                                    // expiry, or intervening eviction can make
-                                    // a successful fill unavailable by the
-                                    // time this follower wakes. Cache policy
-                                    // must never turn that race into a query
-                                    // failure: execute this plan normally.
-                                    cache_metrics.coalesced_retries.add(1);
-                                    let mut event = VgiEvent::new("cache.coalesced_retry");
+                                crate::runtime::ResultFlightOutcome::Aborted(reason) => {
+                                    cache_metrics.coalesced_aborts.add(1);
+                                    let mut event = VgiEvent::new("cache.coalesced_abort");
                                     event.catalog = Some(catalog);
                                     event.function = Some(function);
+                                    event.message = Some(reason);
                                     runtime.emit(event);
                                     if let Some(job) = job.take() {
                                         tokio::task::spawn_blocking(job);
                                     }
                                 }
-                            }
-                        }
-                        crate::runtime::ResultFlightOutcome::Aborted(reason) => {
-                            cache_metrics.coalesced_aborts.add(1);
-                            let mut event = VgiEvent::new("cache.coalesced_abort");
-                            event.catalog = Some(catalog);
-                            event.function = Some(function);
-                            event.message = Some(reason);
-                            runtime.emit(event);
-                            if let Some(job) = job.take() {
-                                tokio::task::spawn_blocking(job);
                             }
                         }
                     }

@@ -104,6 +104,14 @@ the same retained catalog state. VGI primary-key and unique constraints feed
 DataFusion's native optimizer constraint API, while check, foreign-key, and
 standalone NOT NULL metadata have no matching DataFusion constraint type.
 
+Catalog discovery is also available before `ATTACH`. The canonical VGI
+`vgi_catalogs` schema—including typed attach-option and release lists—is exposed
+directly from a worker LOCATION:
+
+```sql
+SELECT * FROM vgi_catalogs('https://worker.example/');
+```
+
 Worker-declared settings are installed in DataFusion's dynamic `vgi.*`
 configuration namespace and encoded to their advertised Arrow types at every
 bind. Once a worker is attached, its unqualified DuckDB spelling is accepted
@@ -152,13 +160,17 @@ list. The adapter discovers their Arrow types, evaluates constant SQL values,
 casts them to the declared schema, enforces required/unknown options, and sends
 one typed row to `catalog_attach`. Local options currently implemented are
 `pool`, `pool_max`, `pool_timeout`, `worker_debug`,
+`rpc_timeout`, `global_functions`,
 `launcher_idle_timeout`, `launcher_state_dir`, `data_version_spec`,
 `implementation_version`, `cache`, `attach_companions`, and
 `allow_local_format_paths`. Launcher options are
 rejected outside a `launch:` LOCATION. Worker-declared global functions are
-registered automatically. Raw `secrets` and `attach_companion_secrets` options
-fail explicitly; embedders instead install a scoped `VgiSecretResolver` on the
-session's `VgiRuntime`.
+registered automatically; `global_functions false` keeps their qualified
+catalog forms but suppresses global aliases. Existing native/global registry
+owners win collisions, concurrent attaches choose one owner, and `DETACH` or
+replacement removes only aliases still owned by that attachment. Raw `secrets`
+and `attach_companion_secrets` options fail explicitly; embedders instead
+install a scoped `VgiSecretResolver` on the session's `VgiRuntime`.
 
 Catalog scan branches may nominate CSV, Parquet, JSON/NDJSON, or Arrow files;
 the adapter reads them with DataFusion's registered native format factories.
@@ -208,9 +220,11 @@ DataFusion's types.
 **Worker RPCs are blocking.** `vgi-client` is synchronous, like the Python and
 Java VGI clients, so every call runs inside `spawn_blocking`. `VgiConnection` is
 a *factory* rather than a client: physical partitions use independent pooled
-connections. DataFusion cancellation still propagates to active scans, and an
-embedder may configure an RPC timeout; subprocess pipe I/O cannot yet enforce
-that timeout.
+connections. `rpc_timeout <positive-seconds>` on `ATTACH` overrides the session
+default for that attachment on HTTP, Unix, and TCP. Dropping an unfinished scan
+or satisfying a LIMIT sends protocol cancellation; failed open/header/read or
+cancel cleanup poisons that connection so the pool cannot reuse a desynchronized
+stream. Subprocess pipe I/O cannot yet enforce the timeout.
 
 ## Known gaps
 
@@ -227,13 +241,16 @@ that timeout.
   safe bounded memory tier with conditional revalidation and per-key
   single-flight for concurrent misses. Stateless streaming table-in/out calls
   additionally memoize complete input batches, and stable scalar functions may
-  opt into bounded per-value memoization. Secret-consuming calls bypass these
-  caches, and native DataFusion metrics expose producer cache/worker activity in
-  `EXPLAIN ANALYZE`. Cache diagnostics distinguish exchange hits, stores, and
-  bytes served. Buffered whole-input results, correlated 1:N per-value
-  calls, exchange conditional revalidation/single-flight, disk persistence,
-  stale-while-revalidate, compression, and persistent cross-process sharing
-  remain unimplemented.
+  opt into bounded per-value memoization. Both exchange tiers use validators for
+  immediate-stale conditional revalidation, coalesce identical misses, and honor
+  worker-authorized stale-if-error. A worker that withdraws caching with
+  `no_store` or another ineligible policy evicts the stale bytes instead of
+  replaying them. Secret-consuming calls bypass these caches, and native
+  DataFusion metrics expose producer cache/worker activity in `EXPLAIN ANALYZE`.
+  Cache diagnostics distinguish exchange hits, stores, and bytes served.
+  Buffered whole-input results, correlated 1:N per-value calls, disk
+  persistence, stale-while-revalidate, compression, and persistent
+  cross-process sharing remain unimplemented.
 - **Dynamic filters and join keys.** DataFusion 55 hash-join filters are linked
   to VGI scans. Completed single-column `IN` sets use `join_keys` side IPC at
   init (`vgi_join_keys_version=2`), while later range/constant refinements ride
@@ -267,6 +284,11 @@ completion rules, current EC2 baseline, adaptation policy, prioritized gaps,
 and regression command. [`corpus/compatibility.json`](corpus/compatibility.json)
 is the machine-readable status manifest; the runner rejects newly added corpus
 groups until they are assigned and reviewed.
+
+Reviewed scalar overlays use DataFusion's native `arrow_cast`, `named_struct`,
+`array_length`, and binary encoding functions for DuckDB-only unsigned,
+typed-struct, list-length, and binary-length spellings. They adapt SQL syntax,
+not VGI execution semantics.
 
 ## License
 

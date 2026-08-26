@@ -131,33 +131,36 @@ VGI_TEST_WORKER=../vgi-rust/target/release/vgi-example-worker \
 
 The JSON report contains totals plus outcomes by capability area, upstream
 group, and individual file. Improvements are accepted by reviewing the diff and
-replacing the baseline deliberately. Unix and HTTP baselines should remain
-separate because transport equivalence is itself part of completion.
+replacing the baseline deliberately. The historical
+`corpus/baselines/subprocess.json` filename contains the canonical Unix result;
+`corpus/baselines/http.json` records the corresponding HTTP run because
+transport equivalence is itself part of completion.
 
 ## Current baseline — 2026-08-26
 
-The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,127
+The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,126
 measured positive records. The historical `subprocess.json` filename is kept
 for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
 `duckdb_functions()`, `duckdb_settings()`, `vgi_function_arguments()`, and
 `vgi_table_statistics()` compatibility views backed by adapter state and the
-worker's retained discovery metadata. Catalog and bound-function column
+worker's retained discovery metadata. Pre-attach `vgi_catalogs(location)` uses
+the canonical VGI catalog-discovery schema. Catalog and bound-function column
 statistics also feed DataFusion's existing pruning API.
 
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 3,273 / 4,127 (79.3%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,270 / 2,457 (92.4%) |
-| Exact results | 1,567 | 2,122 |
-| Rendering-equivalent results | 37 | 106 |
-| Genuine value differences | 149 | 187 |
-| DuckDB/extension configuration records reported separately | 607 | 594 |
-| Timeouts | 0 | 1 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,313 / 4,126 (80.3%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,257 / 2,441 (92.5%) |
+| Exact results | 1,567 | 2,147 |
+| Rendering-equivalent results | 37 | 110 |
+| Genuine value differences | 149 | 184 |
+| Not-applicable records reported separately | 607 | 595 |
+| Timeouts | 0 | 0 |
 
-The HTTP run executes 3,271 records with the same 2,122 exact, 106
-rendering-equivalent, and 187 different results. It has two additional timeouts
+The HTTP run executes 3,311 records with the same 2,147 exact, 110
+rendering-equivalent, and 184 different results. It has two additional timeouts
 in `table_in_out/parallel_fanout.test`; all other completed classifications
 match Unix. `cache/basic.test` is fully executable with all 14 value checks
 exact. The settings slice is 42/42 with 14/14 exact, while reviewed
@@ -202,6 +205,18 @@ VGI window callback. Four SQL forms unsupported by DataFusion 55—three frame
 `EXCLUDE` variants and aggregate-local `ORDER BY` in a window—are retained as
 reviewed `out_of_scope` records rather than adapter failures.
 
+Reviewed scalar overlays now use DataFusion-native equivalents for DuckDB SQL
+spellings rather than adapter special cases: `arrow_cast` for unsigned Arrow
+types, `named_struct` for typed struct values, `array_length` for list
+cardinality, and hex encoding for binary byte length. The exact original SQL is
+still guarded in each sidecar, so upstream drift remains visible.
+
+Focused operability coverage also verifies the positive `rpc_timeout` ATTACH
+override, unfinished-scan Drop cancellation and failed-stream pool poisoning,
+pre-attach canonical catalog discovery, and the default-on/opt-out, collision,
+replacement, concurrent-owner, DETACH, and re-ATTACH lifecycle of nominated
+global functions.
+
 The 2026-08-26 promotion slice covers 13 aggregate, macro/catalog, typed-filter,
 and cache files over both Unix sockets and HTTP. Both transports execute
 145/173 measured records, and all 113 comparable queries agree (109 exact,
@@ -215,39 +230,41 @@ unique failure.
 The following order maximizes useful coverage while keeping new DataFusion
 engine work to a minimum:
 
-1. **Corpus adaptation and classification.** DuckDB/extension-surface failures
-   fell from 678 to 70; 118 parser failures remain. Continue with reviewable
-   equivalents for metadata queries, struct extraction, and harmless dialect
-   differences. Keep DuckDB storage internals and its hidden virtual-rowid
-   sentinel `out_of_scope` where DataFusion has no semantic equivalent.
-2. **Advertised function publication and binding.** The largest error shape is
-   now 138 instances of `table function ... not found`, down from 655. Resolve
-   the remainder by capability area, prioritizing functions that map to an
-   existing DataFusion table-provider or UDTF API.
+1. **Corpus adaptation and classification.** The current machine-readable
+   baseline records 18 DuckDB/extension-surface failures and 102 parser
+   failures. Continue with reviewable
+   equivalents for metadata queries and harmless dialect differences. Keep
+   DuckDB storage internals and its hidden virtual-rowid sentinel `out_of_scope`
+   where DataFusion has no semantic equivalent.
+2. **Advertised function publication and binding.** Remaining missing-function
+   errors should be resolved by capability area, prioritizing functions that
+   map to an existing DataFusion table-provider or UDTF API. Exact error-shape
+   counts remain console diagnostics rather than durable JSON fields.
 3. **Result cache breadth.** Memory producer/split caching, conditional
    revalidation, per-key single-flight, streaming per-input-batch caching,
    stable scalar per-value caching, diagnostics, flush/reap, compatible event
-   inspection, and native DataFusion scan metrics work. Buffered whole-input
-   caching, correlated 1:N per-value entries, exchange revalidation/single-flight,
-   disk persistence/spilling, compression, stale-while-revalidate, and
-   worker-log forwarding remain. Cache execution improved from 297/710 to
-   533/710 records before this focused promotion.
-4. **Table-in/out engine boundary.** Correlated LATERAL calls account for 53
-   explicit failures. Wide table subqueries account for at least another 70.
-   The adapter accepts the single-column expression shape DataFusion exposes
-   naturally, plus literal one-row exchange. These two gaps are tracked but are
-   not candidates for new DataFusion engine work in this project.
+   inspection, and native DataFusion scan metrics work. The two exchange tiers
+   also perform conditional revalidation, single-flight, stale-if-error, and
+   revocation eviction. Buffered whole-input caching, correlated 1:N per-value
+   entries, disk persistence/spilling, compression, stale-while-revalidate, and
+   worker-log forwarding remain. The promoted baseline executes 537/710 cache
+   records.
+4. **Table-in/out engine boundary.** Correlated LATERAL calls and wide table
+   subqueries remain the predominant engine-boundary failures. The adapter
+   accepts the single-column expression shape DataFusion exposes naturally,
+   plus literal one-row exchange. These gaps are tracked but are not candidates
+   for new DataFusion engine work in this project.
 5. **Catalog objects.** The focused scalar/table macro slice and the complete
    function/native-format multi-branch slice now pass. Catalog-table source
    arms now have a real companion-worker fixture and resolve existing DataFusion
    providers with cycle/ambiguity checks. Catalog-owned macro/view SQL qualifies
    worker objects inside the attachment. Custom formats without a registered
    DataFusion factory, broader views, and database metadata adaptations remain.
-   Function inventory,
-   overloads, argument docs/constraints, tags, categories, and global
-   nominations use retained worker metadata. The committed full baseline still
-   records 64/90 for catalog, 4/19 for macros, and 5/14 for views until the next
-   promotion run.
+   Pre-attach catalog discovery follows the canonical VGI schema. Function
+   inventory, overloads, argument docs/constraints, tags, categories, and global
+   nominations use retained worker metadata; global publication has explicit
+   opt-out and alias-safe lifecycle handling. The promoted full baseline records
+   89/90 for catalog, 19/19 for macros, and 14/14 for views.
 6. **Secrets and authenticated fixtures.** Deterministic read-only consumer
    tests cover table, lazy table, scalar, aggregate, and streaming binds; two
    same-type scopes; duplicate-name rejection; Bearer/OAuth identity isolation;

@@ -64,11 +64,12 @@ use datafusion::arrow::array::{ArrayRef, BinaryArray, LargeBinaryArray};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::MemoryCatalogProvider;
+use datafusion::catalog::{MemoryCatalogProvider, TableFunctionImpl};
 use datafusion::common::{plan_datafusion_err, plan_err, Result as DFResult};
 use datafusion::dataframe::DataFrame;
 use datafusion::logical_expr::async_udf::AsyncScalarUDF;
-use datafusion::logical_expr::AggregateUDF;
+use datafusion::logical_expr::registry::FunctionRegistry;
+use datafusion::logical_expr::{AggregateUDF, ScalarUDF};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::{DFParser, ResetStatement, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
@@ -657,19 +658,41 @@ fn runtime_registry() -> &'static Mutex<HashMap<String, Weak<VgiRuntime>>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+type SessionLifecycleLocks = HashMap<String, Weak<tokio::sync::Mutex<()>>>;
+
+fn lifecycle_lock_registry() -> &'static Mutex<SessionLifecycleLocks> {
+    static REGISTRY: OnceLock<Mutex<SessionLifecycleLocks>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn session_lifecycle_lock(ctx: &SessionContext) -> Arc<tokio::sync::Mutex<()>> {
+    let session_id = ctx.session_id();
+    let mut locks = lifecycle_lock_registry().lock().unwrap();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&session_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(session_id, Arc::downgrade(&lock));
+    lock
+}
+
 #[derive(Default)]
 struct RegisteredNames {
     scalar: HashSet<String>,
+    scalar_owners: HashMap<String, Weak<ScalarUDF>>,
     /// Published aggregate name -> whether its minimum positional arity is
     /// zero. Such invocations need a private row-witness argument because
     /// DataFusion's empty accumulator input does not carry a row count.
     aggregate: HashMap<String, bool>,
+    aggregate_owners: HashMap<String, Weak<AggregateUDF>>,
     /// Published table-function name -> worker-declared named arguments.
     ///
     /// Besides DETACH bookkeeping, this lets the SQL compatibility pass
     /// distinguish DuckDB's `name=value` named-argument spelling from an
     /// ordinary equality expression without guessing from syntax alone.
     table: HashMap<String, HashSet<String>>,
+    table_owners: HashMap<String, Weak<dyn TableFunctionImpl>>,
 }
 
 type SessionRegistrations = HashMap<String, HashMap<String, RegisteredNames>>;
@@ -713,9 +736,15 @@ fn remove_default_schema(ctx: &SessionContext, alias: &str) {
 }
 
 enum RegistrationKind {
-    Scalar,
-    Aggregate { nullary: bool },
-    Table(HashSet<String>),
+    Scalar(Weak<ScalarUDF>),
+    Aggregate {
+        nullary: bool,
+        owner: Weak<AggregateUDF>,
+    },
+    Table {
+        named_arguments: HashSet<String>,
+        owner: Weak<dyn TableFunctionImpl>,
+    },
 }
 
 fn record_registration(ctx: &SessionContext, alias: &str, kind: RegistrationKind, name: String) {
@@ -726,14 +755,99 @@ fn record_registration(ctx: &SessionContext, alias: &str, kind: RegistrationKind
         .entry(alias.to_ascii_lowercase())
         .or_default();
     match kind {
-        RegistrationKind::Scalar => registered.scalar.insert(name),
-        RegistrationKind::Aggregate { nullary } => {
-            registered.aggregate.insert(name, nullary).is_none()
+        RegistrationKind::Scalar(owner) => {
+            registered.scalar.insert(name.clone());
+            registered.scalar_owners.insert(name, owner).is_none()
         }
-        RegistrationKind::Table(named_arguments) => {
-            registered.table.insert(name, named_arguments).is_none()
+        RegistrationKind::Aggregate { nullary, owner } => {
+            registered.aggregate.insert(name.clone(), nullary);
+            registered.aggregate_owners.insert(name, owner).is_none()
+        }
+        RegistrationKind::Table {
+            named_arguments,
+            owner,
+        } => {
+            registered.table.insert(name.clone(), named_arguments);
+            registered.table_owners.insert(name, owner).is_none()
         }
     };
+}
+
+fn register_scalar_if_absent(
+    ctx: &SessionContext,
+    alias: &str,
+    name: String,
+    udf: ScalarUDF,
+) -> bool {
+    let owner = Arc::new(udf);
+    let state = ctx.state_ref();
+    let mut state = state.write();
+    if state.scalar_functions().contains_key(&name) {
+        return false;
+    }
+    state
+        .register_udf(Arc::clone(&owner))
+        .expect("live SessionState accepts scalar UDF registration");
+    record_registration(
+        ctx,
+        alias,
+        RegistrationKind::Scalar(Arc::downgrade(&owner)),
+        name,
+    );
+    true
+}
+
+fn register_aggregate_if_absent(
+    ctx: &SessionContext,
+    alias: &str,
+    name: String,
+    udaf: AggregateUDF,
+    nullary: bool,
+) -> bool {
+    let owner = Arc::new(udaf);
+    let state = ctx.state_ref();
+    let mut state = state.write();
+    if state.aggregate_functions().contains_key(&name) {
+        return false;
+    }
+    state
+        .register_udaf(Arc::clone(&owner))
+        .expect("live SessionState accepts aggregate UDF registration");
+    record_registration(
+        ctx,
+        alias,
+        RegistrationKind::Aggregate {
+            nullary,
+            owner: Arc::downgrade(&owner),
+        },
+        name,
+    );
+    true
+}
+
+fn register_table_if_absent(
+    ctx: &SessionContext,
+    alias: &str,
+    name: String,
+    function: Arc<dyn TableFunctionImpl>,
+    named_arguments: HashSet<String>,
+) -> bool {
+    let state = ctx.state_ref();
+    let mut state = state.write();
+    if state.table_functions().contains_key(&name) {
+        return false;
+    }
+    state.register_udtf(&name, Arc::clone(&function));
+    record_registration(
+        ctx,
+        alias,
+        RegistrationKind::Table {
+            named_arguments,
+            owner: Arc::downgrade(&function),
+        },
+        name,
+    );
+    true
 }
 
 fn named_arguments(specs: &vgi_client::ArgSpecs) -> HashSet<String> {
@@ -784,6 +898,8 @@ fn is_declared_nullary_aggregate(ctx: &SessionContext, function_name: &str) -> b
 }
 
 fn deregister_alias_functions(ctx: &SessionContext, alias: &str) {
+    let state = ctx.state_ref();
+    let mut state = state.write();
     let registered = registration_registry()
         .lock()
         .ok()
@@ -796,13 +912,55 @@ fn deregister_alias_functions(ctx: &SessionContext, alias: &str) {
         return;
     };
     for name in registered.scalar {
-        ctx.deregister_udf(&name);
+        let owned = registered
+            .scalar_owners
+            .get(&name)
+            .and_then(Weak::upgrade)
+            .is_some_and(|owner| {
+                state
+                    .scalar_functions()
+                    .get(&name)
+                    .is_some_and(|current| Arc::ptr_eq(current, &owner))
+            });
+        if owned {
+            state
+                .deregister_udf(&name)
+                .expect("live SessionState accepts scalar UDF deregistration");
+        }
     }
     for name in registered.aggregate.into_keys() {
-        ctx.deregister_udaf(&name);
+        let owned = registered
+            .aggregate_owners
+            .get(&name)
+            .and_then(Weak::upgrade)
+            .is_some_and(|owner| {
+                state
+                    .aggregate_functions()
+                    .get(&name)
+                    .is_some_and(|current| Arc::ptr_eq(current, &owner))
+            });
+        if owned {
+            state
+                .deregister_udaf(&name)
+                .expect("live SessionState accepts aggregate UDF deregistration");
+        }
     }
     for name in registered.table.into_keys() {
-        ctx.deregister_udtf(&name);
+        let owned = registered
+            .table_owners
+            .get(&name)
+            .and_then(Weak::upgrade)
+            .is_some_and(|owner| {
+                state
+                    .table_functions()
+                    .get(&name)
+                    .is_some_and(|current| Arc::ptr_eq(current.function(), &owner))
+            });
+        if owned {
+            state
+                .deregister_udtf(&name)
+                .expect("live SessionState accepts table UDF deregistration");
+        }
     }
 }
 
@@ -951,6 +1109,10 @@ fn reset_vgi_setting(
 pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
     ensure_vgi_settings(ctx);
     let runtime = session_runtime(ctx);
+    // Session-scoped diagnostics such as `vgi_catalogs(location)` are useful
+    // before the first ATTACH. Registration is idempotent, so install them at
+    // the adapter SQL boundary rather than waiting for attach discovery.
+    crate::diagnostics::register(ctx, Arc::clone(&runtime));
     sync_vgi_settings(ctx, &runtime);
 
     // DuckDB's own ATTACH spelling has to be handled before sqlparser sees it:
@@ -991,7 +1153,7 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
             ctx.read_empty()
         }
         Some(Intercepted::Detach { alias }) => {
-            detach(ctx, &alias)?;
+            detach(ctx, &alias).await?;
             ctx.read_empty()
         }
         None => {
@@ -1839,6 +2001,14 @@ impl AttachSpec {
 
         let location = vgi_client::VgiLocation::parse(&self.location).map_err(crate::to_df)?;
         let worker_debug = bool_option("worker_debug", false)?;
+        let rpc_timeout = integer_option("rpc_timeout")?
+            .map(|seconds| {
+                if seconds == 0 {
+                    return plan_err!("ATTACH option `rpc_timeout` must be greater than zero");
+                }
+                Ok(Duration::from_secs(seconds))
+            })
+            .transpose()?;
         let launcher_idle_timeout =
             integer_option("launcher_idle_timeout")?.map(Duration::from_secs);
         let launcher_state_dir = self
@@ -1879,7 +2049,7 @@ impl AttachSpec {
                 worker_debug,
                 launcher_idle_timeout,
                 launcher_state_dir: launcher_state_dir.map(Into::into),
-                rpc_timeout: None,
+                rpc_timeout,
             });
 
         let bearer = self
@@ -1908,9 +2078,24 @@ impl AttachSpec {
         }
         Ok(connection)
     }
+
+    fn connection_with_runtime(&self, runtime: Arc<VgiRuntime>) -> DFResult<VgiConnection> {
+        let mut connection = self.connection()?;
+        let attachment_timeout = connection.connection_options.rpc_timeout;
+        connection = connection.with_runtime(runtime);
+        // An ATTACH-local deadline is more specific than the session default.
+        // Keep VgiConnection::with_runtime replacement semantics intact for
+        // API callers that deliberately swap runtimes more than once.
+        if attachment_timeout.is_some() {
+            connection.connection_options.rpc_timeout = attachment_timeout;
+        }
+        Ok(connection)
+    }
 }
 
 async fn attach(ctx: &SessionContext, spec: &AttachSpec) -> DFResult<()> {
+    let lifecycle = session_lifecycle_lock(ctx);
+    let _guard = lifecycle.lock().await;
     let runtime = session_runtime(ctx);
     let companions_enabled = spec
         .options
@@ -2029,20 +2214,46 @@ async fn attach_one(
     spec: &AttachSpec,
     runtime: Arc<VgiRuntime>,
 ) -> DFResult<Vec<vgi_client::dtos::AttachCatalogInfo>> {
+    // Parse local policy before discovery or registry mutation. In particular,
+    // a malformed re-ATTACH must leave the existing attachment usable.
+    let global_functions_enabled = spec
+        .options
+        .get("global_functions")
+        .map(|value| option_string(value))
+        .transpose()?
+        .map(|value| match value.trim() {
+            value if value.eq_ignore_ascii_case("true") => Ok(true),
+            value if value.eq_ignore_ascii_case("false") => Ok(false),
+            _ => plan_err!("ATTACH option `global_functions` must be true or false"),
+        })
+        .transpose()?
+        .unwrap_or(true);
     let started = std::time::Instant::now();
-    let mut conn = spec.connection()?.with_runtime(runtime);
+    let mut conn = spec.connection_with_runtime(runtime)?;
     crate::diagnostics::register(ctx, Arc::clone(conn.runtime()));
     let options = build_attach_options(ctx, &conn, spec).await?;
     conn = conn.with_catalog_attach_options(&spec.catalog, options);
     let provider =
         VgiCatalogProvider::discover_as(conn.clone(), &spec.catalog, &spec.alias).await?;
+    // Every fallible declaration conversion happens before the old alias is
+    // removed. Applying this prepared set below is then registry-only and
+    // cannot strand a failed re-ATTACH between old metadata and new functions.
+    let prepared_global_functions = if global_functions_enabled {
+        prepare_global_functions(&provider)?
+    } else {
+        Vec::new()
+    };
     // Re-attaching an alias refreshes its flat function registrations as well
     // as its catalog provider.
     deregister_alias_functions(ctx, &spec.alias);
     register_table_functions(ctx, &conn, spec, &provider);
     register_scalar_functions(ctx, &conn, spec, &provider);
     register_aggregate_functions(ctx, &conn, spec, &provider);
-    register_global_functions(ctx, &conn, spec, &provider)?;
+    let published_global_functions = if global_functions_enabled {
+        register_global_functions(ctx, &conn, spec, &prepared_global_functions)
+    } else {
+        Vec::new()
+    };
     register_macros(ctx, spec, &provider);
     ctx.register_catalog(&spec.alias, provider.clone());
     register_views(ctx, spec, &provider).await;
@@ -2069,6 +2280,7 @@ async fn attach_one(
             settings: provider.settings().to_vec(),
             global_function_prefix: provider.global_function_prefix().to_string(),
             global_functions: provider.global_functions().to_vec(),
+            published_global_functions,
         },
     );
     let mut event = crate::VgiEvent::new("catalog.attached");
@@ -2189,25 +2401,85 @@ fn metadata_secrets(info: &vgi_client::dtos::FunctionInfo) -> Vec<vgi_client::Se
         .collect()
 }
 
-fn register_global_functions(
-    ctx: &SessionContext,
-    conn: &VgiConnection,
-    spec: &AttachSpec,
+enum PreparedGlobalKind {
+    Scalar {
+        overloads: Vec<vgi_client::ArgSpecs>,
+        volatility: datafusion::logical_expr::Volatility,
+    },
+    Aggregate {
+        specs: vgi_client::ArgSpecs,
+        nullary: bool,
+    },
+    Table(crate::catalog::TableFunctionMetadata),
+}
+
+struct PreparedGlobalFunction<'a> {
+    info: &'a vgi_client::dtos::FunctionInfo,
+    name: String,
+    kind: PreparedGlobalKind,
+}
+
+fn prepare_global_functions(
     provider: &VgiCatalogProvider,
-) -> DFResult<()> {
+) -> DFResult<Vec<PreparedGlobalFunction<'_>>> {
     let prefix = provider.global_function_prefix();
+    let mut prepared: Vec<PreparedGlobalFunction<'_>> = Vec::new();
     for info in provider.global_functions() {
         let name = if prefix.is_empty() {
             info.name.to_ascii_lowercase()
         } else {
             format!("{prefix}_{}", info.name).to_ascii_lowercase()
         };
-        let kind = info.function_type.0.to_ascii_lowercase();
-        let state = ctx.state();
-        let collision = match kind.as_str() {
-            "scalar" => state.scalar_functions().contains_key(&name),
-            "aggregate" => state.aggregate_functions().contains_key(&name),
-            "table" | "table_buffering" => state.table_functions().contains_key(&name),
+        let function_type = info.function_type.0.to_ascii_lowercase();
+        let specs = vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?;
+        if function_type == "scalar" {
+            // One DataFusion ScalarUDF owns all overloads for one concrete VGI
+            // dispatch target. A normalization collision between distinct
+            // worker targets remains first-wins below rather than being merged
+            // into an implementation that could dispatch to only one of them.
+            if let Some(existing) = prepared.iter_mut().find(|candidate| {
+                candidate.name == name
+                    && candidate.info.name.eq_ignore_ascii_case(&info.name)
+                    && candidate
+                        .info
+                        .schema_name
+                        .eq_ignore_ascii_case(&info.schema_name)
+                    && matches!(&candidate.kind, PreparedGlobalKind::Scalar { .. })
+            }) {
+                let PreparedGlobalKind::Scalar {
+                    overloads,
+                    volatility,
+                } = &mut existing.kind
+                else {
+                    unreachable!("scalar group predicate checked")
+                };
+                overloads.push(specs);
+                *volatility = most_volatile(*volatility, metadata_volatility(info));
+                continue;
+            }
+            prepared.push(PreparedGlobalFunction {
+                info,
+                name,
+                kind: PreparedGlobalKind::Scalar {
+                    overloads: vec![specs],
+                    volatility: metadata_volatility(info),
+                },
+            });
+            continue;
+        }
+        let kind = match function_type.as_str() {
+            "aggregate" => {
+                let nullary = specs.minimum_positional_arity() == 0;
+                PreparedGlobalKind::Aggregate { specs, nullary }
+            }
+            "table" | "table_buffering" => {
+                PreparedGlobalKind::Table(crate::catalog::TableFunctionMetadata {
+                    specs,
+                    buffered: function_type == "table_buffering",
+                    input_from_args: info.input_from_args,
+                    stream_cache_eligible: info.max_workers != Some(1) && !info.has_finalize,
+                })
+            }
             _ => {
                 return plan_err!(
                     "worker nominated global function `{}` with unsupported type `{}`",
@@ -2216,78 +2488,89 @@ fn register_global_functions(
                 )
             }
         };
-        if collision {
-            return plan_err!("global VGI function `{name}` collides with an existing function");
-        }
-        match kind.as_str() {
-            "scalar" => {
-                let specs = vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?;
-                ctx.register_udf(
-                    AsyncScalarUDF::new(Arc::new(VgiScalarUdf::discovered_with_volatility(
+        prepared.push(PreparedGlobalFunction { info, name, kind });
+    }
+    Ok(prepared)
+}
+
+fn most_volatile(
+    left: datafusion::logical_expr::Volatility,
+    right: datafusion::logical_expr::Volatility,
+) -> datafusion::logical_expr::Volatility {
+    use datafusion::logical_expr::Volatility;
+    match (left, right) {
+        (Volatility::Volatile, _) | (_, Volatility::Volatile) => Volatility::Volatile,
+        (Volatility::Stable, _) | (_, Volatility::Stable) => Volatility::Stable,
+        _ => Volatility::Immutable,
+    }
+}
+
+fn register_global_functions(
+    ctx: &SessionContext,
+    conn: &VgiConnection,
+    spec: &AttachSpec,
+    functions: &[PreparedGlobalFunction<'_>],
+) -> Vec<String> {
+    let mut published = Vec::new();
+    for function in functions {
+        let info = function.info;
+        let name = &function.name;
+        let registered = match &function.kind {
+            PreparedGlobalKind::Scalar {
+                overloads,
+                volatility,
+            } => {
+                let udf = AsyncScalarUDF::new(Arc::new(
+                    VgiScalarUdf::discovered_overloads_with_volatility(
                         conn.clone(),
                         &spec.catalog,
                         &info.schema_name,
                         &info.name,
-                        &name,
-                        specs,
-                        metadata_volatility(info),
-                    )))
-                    .into_scalar_udf(),
-                );
-                record_registration(ctx, &spec.alias, RegistrationKind::Scalar, name);
+                        name,
+                        overloads.clone(),
+                        *volatility,
+                    ),
+                ))
+                .into_scalar_udf();
+                register_scalar_if_absent(ctx, &spec.alias, name.clone(), udf)
             }
-            "aggregate" => {
-                let specs = vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?;
-                let nullary = specs.minimum_positional_arity() == 0;
-                ctx.register_udaf(AggregateUDF::new_from_impl(
+            PreparedGlobalKind::Aggregate { specs, nullary } => {
+                let udaf = AggregateUDF::new_from_impl(
                     VgiAggregateUdf::new_with_volatility(
                         conn.clone(),
                         &spec.catalog,
                         &info.schema_name,
                         &info.name,
-                        &name,
+                        name,
                         metadata_volatility(info),
                     )
-                    .with_arg_specs(specs)
+                    .with_arg_specs(specs.clone())
                     .with_window_support(info.supports_window)
                     .with_required_secrets(metadata_secrets(info)),
-                ));
-                record_registration(
-                    ctx,
-                    &spec.alias,
-                    RegistrationKind::Aggregate { nullary },
-                    name,
                 );
+                register_aggregate_if_absent(ctx, &spec.alias, name.clone(), udaf, *nullary)
             }
-            "table" | "table_buffering" => {
-                let metadata = crate::catalog::TableFunctionMetadata {
-                    specs: vgi_client::ArgSpecs::parse(&info.arguments.0).map_err(crate::to_df)?,
-                    buffered: kind == "table_buffering",
-                    input_from_args: info.input_from_args,
-                    stream_cache_eligible: info.max_workers != Some(1) && !info.has_finalize,
-                };
+            PreparedGlobalKind::Table(metadata) => {
                 let named_arguments = named_arguments(&metadata.specs);
-                ctx.register_udtf(
-                    &name,
-                    Arc::new(VgiTableFunction::new(
-                        conn.clone(),
-                        &spec.catalog,
-                        &info.schema_name,
-                        &info.name,
-                        Some(metadata),
-                    )),
-                );
-                record_registration(
-                    ctx,
-                    &spec.alias,
-                    RegistrationKind::Table(named_arguments),
-                    name,
-                );
+                let table: Arc<dyn TableFunctionImpl> = Arc::new(VgiTableFunction::new(
+                    conn.clone(),
+                    &spec.catalog,
+                    &info.schema_name,
+                    &info.name,
+                    Some(metadata.clone()),
+                ));
+                register_table_if_absent(ctx, &spec.alias, name.clone(), table, named_arguments)
             }
-            _ => unreachable!(),
+        };
+        if !registered {
+            // Global publication is an ergonomic alias. The qualified worker
+            // function remains available, so an earlier DataFusion registry
+            // owner wins without making this catalog impossible to attach.
+            continue;
         }
+        published.push(name.clone());
     }
-    Ok(())
+    published
 }
 
 const IMPLEMENTED_LOCAL_OPTIONS: &[&str] = &[
@@ -2295,6 +2578,7 @@ const IMPLEMENTED_LOCAL_OPTIONS: &[&str] = &[
     "pool",
     "pool_max",
     "pool_timeout",
+    "rpc_timeout",
     "worker_debug",
     "launcher_idle_timeout",
     "launcher_state_dir",
@@ -2303,6 +2587,7 @@ const IMPLEMENTED_LOCAL_OPTIONS: &[&str] = &[
     "bearer_token",
     "oauth_refresh_token",
     "attach_companions",
+    "global_functions",
     "allow_local_format_paths",
 ];
 
@@ -2610,7 +2895,7 @@ fn register_table_functions(
                 .as_ref()
                 .map(|metadata| named_arguments(&metadata.specs))
                 .unwrap_or_default();
-            let make = || {
+            let make = || -> Arc<dyn TableFunctionImpl> {
                 Arc::new(VgiTableFunction::new(
                     conn.clone(),
                     &spec.catalog,
@@ -2625,15 +2910,13 @@ fn register_table_functions(
                 // schema, so a name published in two schemas collides on them,
                 // and the fully qualified form is always there as the
                 // unambiguous way to say which one you meant.
-                if !ctx.state().table_functions().contains_key(&name) {
-                    ctx.register_udtf(&name, make());
-                    record_registration(
-                        ctx,
-                        &spec.alias,
-                        RegistrationKind::Table(declared_named_arguments.clone()),
-                        name,
-                    );
-                }
+                register_table_if_absent(
+                    ctx,
+                    &spec.alias,
+                    name,
+                    make(),
+                    declared_named_arguments.clone(),
+                );
             }
         }
     }
@@ -2693,9 +2976,6 @@ fn register_scalar_functions(
     for (schema_name, schema) in provider.vgi_schemas() {
         for (function, overloads, volatility) in schema.scalars() {
             let register = |name: String| {
-                if ctx.state().scalar_functions().contains_key(&name) {
-                    return;
-                }
                 let udf = VgiScalarUdf::discovered_overloads_with_volatility(
                     conn.clone(),
                     &spec.catalog,
@@ -2705,8 +2985,12 @@ fn register_scalar_functions(
                     overloads.clone(),
                     *volatility,
                 );
-                ctx.register_udf(AsyncScalarUDF::new(Arc::new(udf)).into_scalar_udf());
-                record_registration(ctx, &spec.alias, RegistrationKind::Scalar, name);
+                register_scalar_if_absent(
+                    ctx,
+                    &spec.alias,
+                    name,
+                    AsyncScalarUDF::new(Arc::new(udf)).into_scalar_udf(),
+                );
             };
             for name in publish_names(&spec.alias, schema_name, function) {
                 register(name);
@@ -2730,10 +3014,7 @@ fn register_aggregate_functions(
         for (function, specs, volatility, supports_window, required_secrets) in schema.aggregates()
         {
             for name in publish_names(&spec.alias, schema_name, function) {
-                if ctx.state().aggregate_functions().contains_key(&name) {
-                    continue;
-                }
-                ctx.register_udaf(AggregateUDF::new_from_impl(
+                let udaf = AggregateUDF::new_from_impl(
                     VgiAggregateUdf::new_with_volatility(
                         conn.clone(),
                         &spec.catalog,
@@ -2745,14 +3026,13 @@ fn register_aggregate_functions(
                     .with_arg_specs(specs.clone())
                     .with_window_support(*supports_window)
                     .with_required_secrets(required_secrets.clone()),
-                ));
-                record_registration(
+                );
+                register_aggregate_if_absent(
                     ctx,
                     &spec.alias,
-                    RegistrationKind::Aggregate {
-                        nullary: specs.minimum_positional_arity() == 0,
-                    },
                     name,
+                    udaf,
+                    specs.minimum_positional_arity() == 0,
                 );
             }
         }
@@ -2771,7 +3051,9 @@ fn register_aggregate_functions(
 /// offers no unload API for either.
 ///
 /// [`CatalogProviderList`]: datafusion::catalog::CatalogProviderList
-fn detach(ctx: &SessionContext, alias: &str) -> DFResult<()> {
+async fn detach(ctx: &SessionContext, alias: &str) -> DFResult<()> {
+    let lifecycle = session_lifecycle_lock(ctx);
+    let _guard = lifecycle.lock().await;
     if ctx.catalog(alias).is_none() {
         return plan_err!("no catalog attached as {alias:?}");
     }
@@ -2936,6 +3218,49 @@ mod tests {
     }
 
     #[test]
+    fn rpc_timeout_is_validated_and_overrides_the_session_default() {
+        let connection = spec("example?location=tcp://127.0.0.1:1&rpc_timeout=7")
+            .connection()
+            .expect("positive timeout");
+        assert_eq!(
+            connection.rpc_timeout(),
+            Some(std::time::Duration::from_secs(7))
+        );
+
+        let runtime = Arc::new(crate::VgiRuntime::new(crate::VgiSessionOptions {
+            rpc_timeout: Some(std::time::Duration::from_secs(11)),
+            ..Default::default()
+        }));
+        let connection = spec("example?location=tcp://127.0.0.1:1&rpc_timeout=7")
+            .connection_with_runtime(Arc::clone(&runtime))
+            .unwrap();
+        assert_eq!(
+            connection.rpc_timeout(),
+            Some(std::time::Duration::from_secs(7)),
+            "attachment timeout must win over the session default"
+        );
+
+        let inherited = spec("example?location=tcp://127.0.0.1:1")
+            .connection_with_runtime(runtime)
+            .unwrap();
+        assert_eq!(
+            inherited.rpc_timeout(),
+            Some(std::time::Duration::from_secs(11))
+        );
+
+        let error = spec("example?location=tcp://127.0.0.1:1&rpc_timeout=0")
+            .connection()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be greater than zero"), "{error}");
+        let error = spec("example?location=tcp://127.0.0.1:1&rpc_timeout=-1")
+            .connection()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("non-negative integer"), "{error}");
+    }
+
+    #[test]
     fn duckdb_attach_defaults_alias_and_keeps_nested_values() {
         let parsed = parse_duckdb_attach(
             "ATTACH 'example' (TYPE vgi, LOCATION 'worker', opt_list [1, 2], opt_struct {'a': 3, 'b': 'x,y'})",
@@ -2966,12 +3291,18 @@ mod tests {
     #[test]
     fn duckdb_equals_rewrites_only_declared_named_table_arguments() {
         let ctx = SessionContext::new();
-        record_registration(
-            &ctx,
-            "example",
-            RegistrationKind::Table(HashSet::from(["increment".to_string()])),
-            "example.sequence".to_string(),
-        );
+        registration_registry()
+            .lock()
+            .unwrap()
+            .entry(ctx.session_id())
+            .or_default()
+            .entry("example".to_string())
+            .or_default()
+            .table
+            .insert(
+                "example.sequence".to_string(),
+                HashSet::from(["increment".to_string()]),
+            );
         let parse_and_rewrite = |sql: &str| {
             let state = ctx.state();
             let dialect = state.config_options().sql_parser.dialect;
@@ -3005,12 +3336,15 @@ mod tests {
     #[test]
     fn zero_argument_aggregate_gets_an_invocation_marked_row_witness() {
         let ctx = SessionContext::new();
-        record_registration(
-            &ctx,
-            "example",
-            RegistrationKind::Aggregate { nullary: true },
-            "example.main.defaulted_count".to_string(),
-        );
+        registration_registry()
+            .lock()
+            .unwrap()
+            .entry(ctx.session_id())
+            .or_default()
+            .entry("example".to_string())
+            .or_default()
+            .aggregate
+            .insert("example.main.defaulted_count".to_string(), true);
         let parse_and_rewrite = |sql: &str| {
             let state = ctx.state();
             let dialect = state.config_options().sql_parser.dialect;

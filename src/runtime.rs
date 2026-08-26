@@ -36,6 +36,10 @@ pub(crate) struct VgiCatalogMetadata {
     pub settings: Vec<vgi_client::SettingSpec>,
     pub global_function_prefix: String,
     pub global_functions: Vec<vgi_client::dtos::FunctionInfo>,
+    /// Fully published global names owned by this live attachment. A worker
+    /// may nominate more functions than DataFusion publishes when the attach
+    /// opts out or an earlier registration owns a collision.
+    pub published_global_functions: Vec<String>,
 }
 
 /// Configuration for one DataFusion session's VGI runtime.
@@ -425,6 +429,8 @@ pub(crate) enum ResultFlightOutcome {
 #[derive(Debug)]
 struct ResultFlight {
     outcome: tokio::sync::watch::Sender<Option<ResultFlightOutcome>>,
+    blocking_outcome: Mutex<Option<ResultFlightOutcome>>,
+    blocking_ready: std::sync::Condvar,
 }
 
 #[derive(Debug, Default)]
@@ -438,10 +444,15 @@ impl ResultFlightRegistry {
         if let Some(flight) = flights.get(key) {
             return ResultFlightClaim::Follower(ResultFlightWaiter {
                 outcome: flight.outcome.subscribe(),
+                flight: Arc::clone(flight),
             });
         }
         let (outcome, _) = tokio::sync::watch::channel(None);
-        let flight = Arc::new(ResultFlight { outcome });
+        let flight = Arc::new(ResultFlight {
+            outcome,
+            blocking_outcome: Mutex::new(None),
+            blocking_ready: std::sync::Condvar::new(),
+        });
         flights.insert(key.clone(), Arc::clone(&flight));
         ResultFlightClaim::Producer(Arc::new(ResultFlightProducer {
             registry: Arc::downgrade(self),
@@ -465,6 +476,8 @@ impl ResultFlightRegistry {
             flights.remove(key);
         }
         drop(flights);
+        *flight.blocking_outcome.lock().unwrap() = Some(outcome.clone());
+        flight.blocking_ready.notify_all();
         flight.outcome.send_replace(Some(outcome));
     }
 }
@@ -478,6 +491,7 @@ pub(crate) enum ResultFlightClaim {
 #[derive(Debug, Clone)]
 pub(crate) struct ResultFlightWaiter {
     outcome: tokio::sync::watch::Receiver<Option<ResultFlightOutcome>>,
+    flight: Arc<ResultFlight>,
 }
 
 impl ResultFlightWaiter {
@@ -488,6 +502,51 @@ impl ResultFlightWaiter {
             }
             if self.outcome.changed().await.is_err() {
                 return ResultFlightOutcome::Aborted("cache producer disappeared".to_string());
+            }
+        }
+    }
+
+    pub(crate) async fn wait_timeout(self, timeout: Option<Duration>) -> ResultFlightOutcome {
+        let Some(timeout) = timeout else {
+            return self.wait().await;
+        };
+        match tokio::time::timeout(timeout, self.wait()).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                ResultFlightOutcome::Aborted("cache flight wait exceeded rpc_timeout".to_string())
+            }
+        }
+    }
+
+    /// Wait from the adapter's existing blocking RPC paths. Scalar and
+    /// table-input exchanges are synchronous already, so this does not block a
+    /// newly-async execution path; it only replaces duplicate worker calls.
+    pub(crate) fn wait_blocking_timeout(&self, timeout: Option<Duration>) -> ResultFlightOutcome {
+        let mut outcome = self.flight.blocking_outcome.lock().unwrap();
+        let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+        loop {
+            if let Some(outcome) = outcome.clone() {
+                return outcome;
+            }
+            if let Some(deadline) = deadline {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return ResultFlightOutcome::Aborted(
+                        "cache flight wait exceeded rpc_timeout".to_string(),
+                    );
+                };
+                let (guard, timed) = self
+                    .flight
+                    .blocking_ready
+                    .wait_timeout(outcome, remaining)
+                    .unwrap();
+                outcome = guard;
+                if timed.timed_out() && outcome.is_none() {
+                    return ResultFlightOutcome::Aborted(
+                        "cache flight wait exceeded rpc_timeout".to_string(),
+                    );
+                }
+            } else {
+                outcome = self.flight.blocking_ready.wait(outcome).unwrap();
             }
         }
     }
@@ -519,6 +578,8 @@ impl ResultFlightProducer {
         if let Some(registry) = self.registry.upgrade() {
             registry.finish(&self.key, &self.flight, outcome);
         } else {
+            *self.flight.blocking_outcome.lock().unwrap() = Some(outcome.clone());
+            self.flight.blocking_ready.notify_all();
             self.flight.outcome.send_replace(Some(outcome));
         }
     }
@@ -534,6 +595,11 @@ impl Drop for ResultFlightProducer {
                     &self.flight,
                     ResultFlightOutcome::Aborted("cache producer dropped".to_string()),
                 );
+            } else {
+                let outcome = ResultFlightOutcome::Aborted("cache producer dropped".to_string());
+                *self.flight.blocking_outcome.lock().unwrap() = Some(outcome.clone());
+                self.flight.blocking_ready.notify_all();
+                self.flight.outcome.send_replace(Some(outcome));
             }
         }
     }
@@ -668,6 +734,61 @@ mod result_flight_tests {
         assert!(matches!(
             runtime.acquire_result_flight(&key),
             ResultFlightClaim::Producer(_)
+        ));
+    }
+
+    #[test]
+    fn blocking_exchange_follower_observes_the_producer_outcome() {
+        let runtime = VgiRuntime::default();
+        let key = key("main.blocking");
+        let producer = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Producer(producer) => producer,
+            ResultFlightClaim::Follower(_) => panic!("first claim must produce"),
+        };
+        let follower = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Follower(follower) => follower,
+            ResultFlightClaim::Producer(_) => panic!("second claim must follow"),
+        };
+        producer.stored();
+        assert_eq!(
+            follower.wait_blocking_timeout(None),
+            ResultFlightOutcome::Stored
+        );
+    }
+
+    #[test]
+    fn blocking_exchange_follower_honors_rpc_timeout() {
+        let runtime = VgiRuntime::default();
+        let key = key("main.blocking_timeout");
+        let _producer = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Producer(producer) => producer,
+            ResultFlightClaim::Follower(_) => panic!("first claim must produce"),
+        };
+        let follower = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Follower(follower) => follower,
+            ResultFlightClaim::Producer(_) => panic!("second claim must follow"),
+        };
+        assert!(matches!(
+            follower.wait_blocking_timeout(Some(Duration::from_millis(1))),
+            ResultFlightOutcome::Aborted(reason) if reason.contains("rpc_timeout")
+        ));
+    }
+
+    #[tokio::test]
+    async fn async_scan_follower_honors_rpc_timeout() {
+        let runtime = VgiRuntime::default();
+        let key = key("main.async_timeout");
+        let _producer = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Producer(producer) => producer,
+            ResultFlightClaim::Follower(_) => panic!("first claim must produce"),
+        };
+        let follower = match runtime.acquire_result_flight(&key) {
+            ResultFlightClaim::Follower(follower) => follower,
+            ResultFlightClaim::Producer(_) => panic!("second claim must follow"),
+        };
+        assert!(matches!(
+            follower.wait_timeout(Some(Duration::from_millis(1))).await,
+            ResultFlightOutcome::Aborted(reason) if reason.contains("rpc_timeout")
         ));
     }
 }
