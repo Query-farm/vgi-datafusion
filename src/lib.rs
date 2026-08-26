@@ -39,7 +39,7 @@
 //! argument; DataFusion restricts that subquery to one column, so wider table
 //! inputs need an upstream planner change.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -87,6 +87,7 @@ mod catalog;
 mod diagnostics;
 mod filters;
 mod order_pushdown;
+mod profiling;
 mod runtime;
 mod sampling;
 mod scalar;
@@ -99,6 +100,7 @@ mod table_input_stream;
 pub use aggregate::VgiAggregateUdf;
 pub use catalog::{VgiCatalogProvider, VgiSchemaProvider};
 pub use order_pushdown::VgiOrderPushdownSessionStateBuilderExt;
+pub use profiling::VgiSessionStateBuilderExt;
 pub use runtime::{
     DiskCacheCodec, ExchangeCacheStats, PlanCacheStats, VgiDurableCacheOptions, VgiEvent,
     VgiEventSink, VgiLocalityHook, VgiResolvedSecret, VgiRuntime, VgiSecretResolver,
@@ -2074,7 +2076,74 @@ impl TableProvider for VgiTableProvider {
     }
 }
 
-/// The physical scan.
+/// Completed worker diagnostics retained until AnalyzeExec renders the plan.
+#[derive(Debug, Default)]
+struct DynamicProfile {
+    partitions: Mutex<BTreeMap<usize, DynamicProfilePartition>>,
+}
+
+#[derive(Debug, Default)]
+struct DynamicProfilePartition {
+    values: Vec<(String, String)>,
+    batches: usize,
+    rows: usize,
+    bytes: usize,
+    min_rows: Option<usize>,
+    max_rows: Option<usize>,
+    min_bytes: Option<usize>,
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Default)]
+struct DynamicProfileSnapshot {
+    values: BTreeMap<String, String>,
+    batches: usize,
+    rows: usize,
+    bytes: usize,
+    min_rows: Option<usize>,
+    max_rows: Option<usize>,
+    min_bytes: Option<usize>,
+    max_bytes: Option<usize>,
+}
+
+impl DynamicProfile {
+    fn record(&self, partition: usize, profile: DynamicProfilePartition) {
+        self.partitions.lock().unwrap().insert(partition, profile);
+    }
+
+    fn snapshot(&self) -> DynamicProfileSnapshot {
+        let mut snapshot = DynamicProfileSnapshot::default();
+        for profile in self.partitions.lock().unwrap().values() {
+            snapshot.batches += profile.batches;
+            snapshot.rows += profile.rows;
+            snapshot.bytes += profile.bytes;
+            snapshot.min_rows = min_option(snapshot.min_rows, profile.min_rows);
+            snapshot.max_rows = max_option(snapshot.max_rows, profile.max_rows);
+            snapshot.min_bytes = min_option(snapshot.min_bytes, profile.min_bytes);
+            snapshot.max_bytes = max_option(snapshot.max_bytes, profile.max_bytes);
+            for (key, value) in &profile.values {
+                snapshot.values.insert(key.clone(), value.clone());
+            }
+        }
+        snapshot
+    }
+}
+
+fn min_option(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+fn max_option(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+/// Physical execution plan for a bound VGI producer scan.
 #[derive(Debug)]
 pub struct VgiScanExec {
     conn: VgiConnection,
@@ -2138,6 +2207,9 @@ pub struct VgiScanExec {
     at: Option<vgi_client::At>,
     sample: Option<Sample>,
     column_mapping: Option<Arc<HashMap<String, String>>>,
+    /// Present only when a VGI optimizer rule found this scan below
+    /// `EXPLAIN ANALYZE`. Ordinary execution never pays the profiling RPC.
+    dynamic_profile: Option<Arc<DynamicProfile>>,
 }
 
 #[derive(Clone)]
@@ -2730,6 +2802,7 @@ impl VgiScanExec {
             at,
             sample,
             column_mapping,
+            dynamic_profile: None,
         }
     }
 
@@ -2779,6 +2852,46 @@ impl VgiScanExec {
             at: self.at.clone(),
             sample: self.sample,
             column_mapping: self.column_mapping.clone(),
+            dynamic_profile: self.dynamic_profile.clone(),
+        }
+    }
+
+    pub(crate) fn with_dynamic_profile(&self) -> Self {
+        Self {
+            conn: self.conn.clone(),
+            catalog: self.catalog.clone(),
+            schema_name: self.schema_name.clone(),
+            function: self.function.clone(),
+            arguments: self.arguments.clone(),
+            raw_arguments: self.raw_arguments.clone(),
+            projection: self.projection.clone(),
+            projection_pushdown: self.projection_pushdown,
+            filter_pushdown: self.filter_pushdown,
+            pushdown: self.pushdown.clone(),
+            dynamic_filters: self.dynamic_filters.clone(),
+            limit: self.limit,
+            schema: self.schema.clone(),
+            cache_storage_schema: self.cache_storage_schema.clone(),
+            properties: self.properties.clone(),
+            split_groups: self.split_groups.clone(),
+            statistics: self.statistics.clone(),
+            partition_statistics: self.partition_statistics.clone(),
+            metrics: self.metrics.clone(),
+            cache_metrics: self.cache_metrics.clone(),
+            cache_key: self.cache_key.clone(),
+            cache_ineligible_reason: self.cache_ineligible_reason,
+            cache_probe: OnceLock::new(),
+            disk_cache_probe: Arc::clone(&self.disk_cache_probe),
+            disk_cache_revalidation_probe: Arc::clone(&self.disk_cache_revalidation_probe),
+            cache_revalidation_probe: Arc::clone(&self.cache_revalidation_probe),
+            cache_observation: Arc::clone(&self.cache_observation),
+            cache_flight: Arc::clone(&self.cache_flight),
+            cache_flight_probe: Arc::clone(&self.cache_flight_probe),
+            cache_flight_disk_probe: Arc::clone(&self.cache_flight_disk_probe),
+            cache_capture: self.cache_capture.clone(),
+            at: self.at.clone(),
+            column_mapping: self.column_mapping.clone(),
+            dynamic_profile: Some(Arc::new(DynamicProfile::default())),
         }
     }
 }
@@ -3997,6 +4110,35 @@ impl DisplayAs for VgiScanExec {
         if !self.dynamic_filters.is_empty() {
             write!(f, ", dynamic_filters={}", self.dynamic_filters.len())?;
         }
+        if let Some(profile) = &self.dynamic_profile {
+            write!(
+                f,
+                ", Worker: {}, Function: {}",
+                self.conn.label(),
+                self.function
+            )?;
+            let snapshot = profile.snapshot();
+            if snapshot.batches > 0 {
+                write!(
+                    f,
+                    ", Batches: {} (rows: min {}, max {}, total {})",
+                    snapshot.batches,
+                    snapshot.min_rows.unwrap_or(0),
+                    snapshot.max_rows.unwrap_or(0),
+                    snapshot.rows
+                )?;
+                write!(
+                    f,
+                    ", Batch Bytes: min {}, max {}, total {}",
+                    snapshot.min_bytes.unwrap_or(0),
+                    snapshot.max_bytes.unwrap_or(0),
+                    snapshot.bytes
+                )?;
+            }
+            for (key, value) in snapshot.values {
+                write!(f, ", {key}: {value}")?;
+            }
+        }
         Ok(())
     }
 }
@@ -4206,6 +4348,7 @@ impl ExecutionPlan for VgiScanExec {
         let cache = Arc::clone(self.conn.runtime.result_cache());
         let worker_metrics = partition_metrics.worker.clone();
         let cache_metrics = self.cache_metrics.clone();
+        let dynamic_profile = self.dynamic_profile.clone();
 
         // A bounded channel so a slow consumer applies backpressure to the
         // worker rather than letting batches pile up in memory.
@@ -4485,9 +4628,11 @@ impl ExecutionPlan for VgiScanExec {
                     Err(error) => return Err(to_df(error)),
                 };
                 worker_metrics.worker_scans.add(1);
+                let execution_id = scan.execution_id().clone();
 
                 let mut emitted = 0usize;
                 let mut tick_pushdown: Option<filters::Pushdown> = None;
+                let mut completed_profile = DynamicProfilePartition::default();
                 loop {
                     let generation = dynamic_filter_generation(&dynamic_filters);
                     if generation != dynamic_generation {
@@ -4542,11 +4687,23 @@ impl ExecutionPlan for VgiScanExec {
                     let Some(batch) = next else {
                         break;
                     };
+                    let batch_rows = batch.num_rows();
+                    let batch_bytes =
+                        datafusion::common::utils::memory::get_record_batch_memory_size(&batch);
                     worker_metrics.worker_batches.add(1);
-                    worker_metrics.worker_rows.add(batch.num_rows());
-                    worker_metrics.worker_bytes.add(
-                        datafusion::common::utils::memory::get_record_batch_memory_size(&batch),
-                    );
+                    worker_metrics.worker_rows.add(batch_rows);
+                    worker_metrics.worker_bytes.add(batch_bytes);
+                    completed_profile.batches += 1;
+                    completed_profile.rows += batch_rows;
+                    completed_profile.bytes += batch_bytes;
+                    completed_profile.min_rows =
+                        min_option(completed_profile.min_rows, Some(batch_rows));
+                    completed_profile.max_rows =
+                        max_option(completed_profile.max_rows, Some(batch_rows));
+                    completed_profile.min_bytes =
+                        min_option(completed_profile.min_bytes, Some(batch_bytes));
+                    completed_profile.max_bytes =
+                        max_option(completed_profile.max_bytes, Some(batch_bytes));
                     // Non-pushdown projections are a local DataFusion concern.
                     // Retain the worker's full batch so every local projection
                     // shares one cache entry; projection-capable functions keep
@@ -4608,6 +4765,44 @@ impl ExecutionPlan for VgiScanExec {
                 }
                 if !limit.is_some_and(|l| emitted >= l) {
                     let control = scan.cache_control().cloned();
+                    drop(scan);
+                    if !control.as_ref().is_some_and(|control| control.not_modified) {
+                        if let Some(profile) = &dynamic_profile {
+                            match client.table_function_dynamic_to_string(&bound, execution_id) {
+                                Ok(response) if response.keys.len() == response.values.len() => {
+                                    let mut event =
+                                        VgiEvent::new("table_function.dynamic_to_string");
+                                    event.catalog = Some(catalog.clone());
+                                    event.function = Some(format!("{schema_name}.{function}"));
+                                    event.message = Some(format!("keys={}", response.keys.len()));
+                                    conn.runtime.emit(event);
+                                    completed_profile.values =
+                                        response.keys.into_iter().zip(response.values).collect();
+                                }
+                                Ok(response) => {
+                                    let mut event =
+                                        VgiEvent::new("table_function.dynamic_to_string_error");
+                                    event.catalog = Some(catalog.clone());
+                                    event.function = Some(format!("{schema_name}.{function}"));
+                                    event.message = Some(format!(
+                                        "worker returned {} profiling keys and {} values",
+                                        response.keys.len(),
+                                        response.values.len()
+                                    ));
+                                    conn.runtime.emit(event);
+                                }
+                                Err(error) => {
+                                    let mut event =
+                                        VgiEvent::new("table_function.dynamic_to_string_error");
+                                    event.catalog = Some(catalog.clone());
+                                    event.function = Some(format!("{schema_name}.{function}"));
+                                    event.message = Some(error.to_string());
+                                    conn.runtime.emit(event);
+                                }
+                            }
+                            profile.record(partition, completed_profile);
+                        }
+                    }
                     if control.as_ref().is_some_and(|control| control.not_modified) {
                         let mut entry = revalidation.clone().ok_or_else(|| {
                             DataFusionError::Execution(format!(
