@@ -308,7 +308,11 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   and replays only after unanimous compatible `not_modified` responses. Any
   fresh, mixed, or revoked response removes the selected generation and reruns
   every split without conditions; validation errors fail closed rather than
-  serving stale bytes. The durable tier is not used for exchange, scalar, correlated
+  serving stale bytes. Bounded non-split producer entries in memory honor a
+  worker-advertised stale-while-revalidate window when the attachment has an
+  RPC timeout: callers receive stale rows immediately while one runtime-local
+  background flight conditionally refreshes or revokes the entry. The durable
+  tier is not used for exchange, scalar, correlated
   1:N, dynamic-filtered, unbounded,
   ordered-split, secret-dependent, or non-catalog-scoped calls. Its recency
   ordering is approximate per process, and its crash-safety contract requires
@@ -316,8 +320,8 @@ stream. Subprocess pipe I/O cannot yet enforce the timeout.
   `fsync`. Constructor limits govern committed Arrow payload admission rather
   than forming a hard filesystem quota, are separate from live SQL memory
   limits, and should agree across processes sharing one root. Storage locks do
-  not coalesce worker calls across processes. Stale-while-revalidate remains
-  unimplemented.
+  not coalesce worker calls across processes. Durable, split, scalar, and
+  exchange stale-while-revalidate remain unimplemented.
 - **Dynamic filters and join keys.** DataFusion 55 hash-join filters are linked
   to VGI scans. Completed single-column `IN` sets use `join_keys` side IPC at
   init (`vgi_join_keys_version=2`), while later range/constant refinements ride

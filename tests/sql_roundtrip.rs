@@ -72,6 +72,16 @@ macro_rules! skip_without_worker {
     };
 }
 
+async fn first_i64(ctx: &SessionContext, sql: &str) -> datafusion::error::Result<i64> {
+    let batches = ctx.sql(sql).await?.collect().await?;
+    Ok(batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .expect("query result is Int64")
+        .value(0))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_function_metadata_is_queryable_and_detaches() -> datafusion::error::Result<()> {
     let worker = skip_without_worker!();
@@ -586,6 +596,117 @@ async fn concurrent_zero_ttl_revalidation_replays_one_validated_entry(
         runtime.result_cache().stats().capture_aborts,
         0,
         "successful revalidations must complete their captures: {events:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn stale_while_revalidate_serves_immediately_and_refreshes_once(
+) -> datafusion::error::Result<()> {
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let worker = skip_without_worker!();
+    let sync = std::env::temp_dir().join(format!(
+        "vgi-datafusion-swr-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&sync)?;
+    let _cleanup = Cleanup(sync.clone());
+    let entered = sync.join("entered");
+    let release = sync.join("release");
+    let policy = format!("blocked_swr|{}|{}", entered.display(), release.display());
+
+    let runtime = Arc::new(VgiRuntime::new(VgiSessionOptions {
+        rpc_timeout: Some(std::time::Duration::from_secs(5)),
+        ..VgiSessionOptions::default()
+    }));
+    let conn = VgiConnection::subprocess([worker.to_string_lossy().to_string()])
+        .with_runtime(runtime.clone());
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "remote_swr",
+        VgiTableProvider::bind_with_arguments(
+            conn,
+            "example",
+            "main",
+            "cache_revalidation_policy",
+            vgi_client::Arguments::new().positional(policy),
+        )
+        .await?,
+    )?;
+
+    let cold = first_i64(&ctx, "SELECT nonce FROM remote_swr").await?;
+    let warm = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        first_i64(&ctx, "SELECT nonce FROM remote_swr"),
+    )
+    .await
+    .expect("SWR read waited for its blocked refresh")?;
+    assert_eq!(warm, cold);
+
+    let entered_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !entered.exists() {
+        assert!(
+            tokio::time::Instant::now() < entered_deadline,
+            "background conditional refresh did not reach the worker: stats={:?}, events={:?}",
+            runtime.result_cache().stats(),
+            runtime.events()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let concurrency = 3;
+    let barrier = Arc::new(tokio::sync::Barrier::new(concurrency));
+    let queries = (0..concurrency).map(|_| {
+        let ctx = ctx.clone();
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                first_i64(&ctx, "SELECT nonce FROM remote_swr"),
+            )
+            .await
+            .expect("an SWR follower waited for the active refresh")
+        })
+    });
+    for query in futures::future::join_all(queries).await {
+        assert_eq!(query.expect("SWR query task panicked")?, cold);
+    }
+
+    std::fs::write(&release, b"release")?;
+    let refresh_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while runtime.result_cache().stats().revalidations != 1 {
+        assert!(
+            tokio::time::Instant::now() < refresh_deadline,
+            "background refresh did not complete: {:?}",
+            runtime.events()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let stats = runtime.result_cache().stats();
+    assert_eq!(stats.revalidations, 1, "refresh was not single-flight");
+    assert!(stats.stale_serves >= 4, "{stats:?}");
+    let events = runtime.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == "cache.stale_while_revalidate"),
+        "missing SWR event: {events:?}"
+    );
+    assert!(
+        events.iter().all(|event| event.kind != "cache.wait"),
+        "SWR followers entered the blocking wait path: {events:?}"
     );
     Ok(())
 }

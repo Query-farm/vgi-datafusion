@@ -41,6 +41,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
@@ -2232,6 +2233,17 @@ impl ScanCacheRevalidation {
         }
     }
 
+    fn memory_stale_while_revalidate(&self) -> Option<vgi_client::CachedEntry> {
+        match self {
+            Self::Memory { entry, .. }
+                if entry.may_serve_while_revalidate_at(std::time::Instant::now()) =>
+            {
+                Some(entry.clone())
+            }
+            Self::Memory { .. } | Self::Disk(_) => None,
+        }
+    }
+
     fn replay(
         &self,
         tx: &tokio::sync::mpsc::Sender<DFResult<datafusion::arrow::array::RecordBatch>>,
@@ -4200,6 +4212,8 @@ impl ExecutionPlan for VgiScanExec {
         let (tx, rx) =
             tokio::sync::mpsc::channel::<DFResult<datafusion::arrow::array::RecordBatch>>(2);
         let durable_replay_tx = tx.clone();
+        let background_revalidation = Arc::new(AtomicBool::new(false));
+        let job_background_revalidation = Arc::clone(&background_revalidation);
 
         let job = move || {
             if let Some(capture) = &cache_capture {
@@ -4384,7 +4398,9 @@ impl ExecutionPlan for VgiScanExec {
                                     freshness,
                                     control,
                                 )?;
-                                entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
+                                if !job_background_revalidation.load(AtomicOrdering::Acquire) {
+                                    entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
+                                }
                                 if let Some(capture) = &cache_capture {
                                     capture.revalidated();
                                 }
@@ -4447,9 +4463,10 @@ impl ExecutionPlan for VgiScanExec {
                 let mut scan = match client.scan(&bound, &opts) {
                     Ok(scan) => scan,
                     Err(_error)
-                        if revalidation
-                            .as_ref()
-                            .is_some_and(ScanCacheRevalidation::may_serve_on_error) =>
+                        if !job_background_revalidation.load(AtomicOrdering::Acquire)
+                            && revalidation
+                                .as_ref()
+                                .is_some_and(ScanCacheRevalidation::may_serve_on_error) =>
                     {
                         let entry = revalidation.as_ref().expect("checked above");
                         entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
@@ -4497,6 +4514,7 @@ impl ExecutionPlan for VgiScanExec {
                         Ok(next) => next,
                         Err(error) => {
                             if emitted == 0
+                                && !job_background_revalidation.load(AtomicOrdering::Acquire)
                                 && revalidation
                                     .as_ref()
                                     .is_some_and(ScanCacheRevalidation::may_serve_on_error)
@@ -4715,7 +4733,9 @@ impl ExecutionPlan for VgiScanExec {
                                 }
                             }
                         }
-                        entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
+                        if !job_background_revalidation.load(AtomicOrdering::Acquire) {
+                            entry.replay(&tx, &scan_schema, column_mapping.as_deref())?;
+                        }
                         if let Some(capture) = &cache_capture {
                             capture.revalidated();
                         }
@@ -4786,6 +4806,8 @@ impl ExecutionPlan for VgiScanExec {
                 self.cache_storage_schema.clone(),
                 self.column_mapping.clone(),
                 durable_replay_tx,
+                background_revalidation,
+                self.split_groups.is_none() && self.conn.rpc_timeout().is_some(),
             )
         });
         let stream = futures::stream::unfold(
@@ -4813,6 +4835,8 @@ impl ExecutionPlan for VgiScanExec {
                     storage_schema,
                     column_mapping,
                     durable_replay_tx,
+                    background_revalidation,
+                    stale_while_revalidate_allowed,
                 )) = flight_context
                 {
                     let durable = plan_disk_probe
@@ -4887,12 +4911,63 @@ impl ExecutionPlan for VgiScanExec {
                         } else {
                             let _ = revalidation_probe.set(None);
                         }
+                        let stale_while_revalidate = stale_while_revalidate_allowed
+                            .then(|| {
+                                revalidation_probe
+                                    .get()
+                                    .and_then(Option::as_ref)
+                                    .and_then(ScanCacheRevalidation::memory_stale_while_revalidate)
+                            })
+                            .flatten();
                         if cache_observation.set(()).is_ok() {
                             cache_metrics.misses.add(1);
-                            let mut event = VgiEvent::new("cache.miss");
+                            let mut event = if stale_while_revalidate.is_some() {
+                                cache.record_stale_serve();
+                                cache_metrics.stale_serves.add(1);
+                                VgiEvent::new("cache.stale_while_revalidate")
+                            } else {
+                                VgiEvent::new("cache.miss")
+                            };
                             event.catalog = Some(catalog.clone());
                             event.function = Some(function.clone());
+                            if stale_while_revalidate.is_some() {
+                                event.message = Some("tier=memory".to_string());
+                            }
                             runtime.emit(event);
+                        }
+                        if let Some(entry) = stale_while_revalidate {
+                            background_revalidation.store(true, AtomicOrdering::Release);
+                            if partition == 0 {
+                                replay.extend(entry.batches().iter().cloned().map(|batch| {
+                                    conform(batch, &replay_schema, column_mapping.as_deref())
+                                }));
+                            }
+                            match flight.get_or_init(|| runtime.acquire_result_flight(&key)) {
+                                crate::runtime::ResultFlightClaim::Producer(producer) => {
+                                    if let Some(capture) = &capture {
+                                        capture.set_flight(Arc::clone(producer));
+                                    }
+                                    let (closed_tx, closed_rx) = tokio::sync::mpsc::channel(1);
+                                    drop(closed_tx);
+                                    let mut refresh_rx = std::mem::replace(&mut rx, closed_rx);
+                                    tokio::spawn(async move {
+                                        while refresh_rx.recv().await.is_some() {}
+                                    });
+                                    if let Some(job) = job.take() {
+                                        tokio::task::spawn_blocking(job);
+                                    }
+                                }
+                                crate::runtime::ResultFlightClaim::Follower(_) => {
+                                    drop(job.take());
+                                    if let Some(capture) = &capture {
+                                        capture.discard_unstarted();
+                                    }
+                                }
+                            }
+                            if let Some(item) = replay.pop_front() {
+                                return Some((item, (rx, job, None, replay)));
+                            }
+                            return rx.recv().await.map(|item| (item, (rx, job, None, replay)));
                         }
                         match flight.get_or_init(|| runtime.acquire_result_flight(&key)) {
                             crate::runtime::ResultFlightClaim::Producer(producer) => {

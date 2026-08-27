@@ -312,8 +312,10 @@ engine work to a minimum:
    directory-`fsync` semantics. Durable split validators now use serial
    all-group agreement before replay and an unconditional whole-result rerun
    after any fresh, mixed, or revoked vote; validation errors fail closed.
+   Bounded non-split memory producers now honor stale-while-revalidate under
+   an effective RPC timeout with runtime-local background single-flight.
    Durable scalar and exchange entries, correlated 1:N per-value entries,
-   stale-while-revalidate, and
+   durable/split/exchange/scalar stale-while-revalidate, and
    cross-process request coalescing remain. In-band worker logs and sanitized
    cache-ineligibility reasons are now available through SQL history and the
    embedder event sink. The promoted baseline executes 646/783 cache records;

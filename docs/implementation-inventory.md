@@ -44,6 +44,13 @@ DataFusion where there is no matching planning or execution seam.
   entries, and buffered whole-input results support ETag/Last-Modified
   conditional revalidation, including immediate-stale validator policies, and
   worker-authorized stale-if-error fallback.
+- Bounded non-split producer entries in memory honor worker-advertised
+  stale-while-revalidate when the effective attachment has an RPC timeout. The
+  query replays stale bytes immediately, while one runtime-local result flight
+  refreshes in the background; fresh rows are captured atomically, validator
+  responses slide the entry, and errors or revocation affect later reads rather
+  than the stale response already authorized by the worker. Split, durable,
+  scalar, and table-input SWR remain excluded.
 - The durable tier persists validators for complete, bounded, catalog-scoped
   producer and split scans. Non-split producers can conditionally revalidate
   after runtime restart, atomically slide the observed generation, honor
@@ -110,8 +117,9 @@ DataFusion where there is no matching planning or execution seam.
 The durable tier is intentionally narrower than the memory tier: it currently
 covers bounded producer and split scans, not scalar values, streaming or
 buffered table-input exchanges, correlated 1:N calls, dynamic-filtered scans,
-unbounded scans, or secret-dependent calls. Stale-while-revalidate also remains
-deferred. Eviction recency is approximate and process-local, although bounds
+unbounded scans, or secret-dependent calls. Stale-while-revalidate remains
+memory-only for bounded non-split producers. Eviction recency is approximate
+and process-local, although bounds
 and publication are coordinated across processes. Crash-durability relies on a
 local Unix filesystem with advisory locks, atomic same-filesystem rename, and
 directory `fsync`; network filesystems with weaker semantics are unsupported.
@@ -237,7 +245,7 @@ replay remains physically present until release and a later reap.
 | Cardinality metadata | Supported | Catalog-inlined estimate/max values feed `TableProvider::statistics()` and `VgiScanExec` through DataFusion 55's `StatisticsContext`; equal estimate/max is exact, other estimates remain inexact, and historical scans do not reuse current-table cardinality |
 | Set operations and joins | Supported | VGI scans compose with UNION/INTERSECT/EXCEPT, IN/EXISTS, CTEs, and DataFusion semi/anti plans; the SQL adapter maps DuckDB's unqualified `SEMI JOIN`/`ANTI JOIN` spelling to the equivalent left-directed plans, including in nested SELECTs |
 | Split planning | Supported | Parallel partitions, ordering properties, plan cache, unbounded metadata |
-| Session result cache | Partial | The bounded memory tier covers producer/split scans, streaming per-batch, stable scalar per-value, and unordered buffered whole-input results with conditional revalidation, runtime-local single-flight, stale-if-error, and revocation eviction. An opt-in Arrow IPC tier (Zstandard by default) durably shares complete bounded producer/split results across local processes with leases, atomic publication, restart recovery, and combined SQL diagnostics/maintenance. Non-split producer validators survive restart with conditional refresh, stale-if-error, and exact-generation revocation. Split validators require unanimous serial all-group agreement before replay; fresh, mixed, or revoked votes trigger an unconditional whole-result rerun, while validation errors fail closed. Durable bounds are constructor-owned; live SQL limits govern memory. Durable exchange/scalar/correlated entries and SWR remain unwired |
+| Session result cache | Partial | The bounded memory tier covers producer/split scans, streaming per-batch, stable scalar per-value, and unordered buffered whole-input results with conditional revalidation, runtime-local single-flight, stale-if-error, and revocation eviction. Bounded non-split producer entries additionally honor worker SWR under an effective RPC timeout, serving immediately while one background flight refreshes. An opt-in Arrow IPC tier (Zstandard by default) durably shares complete bounded producer/split results across local processes with leases, atomic publication, restart recovery, and combined SQL diagnostics/maintenance. Non-split producer validators survive restart with conditional refresh, stale-if-error, and exact-generation revocation. Split validators require unanimous serial all-group agreement before replay; fresh, mixed, or revoked votes trigger an unconditional whole-result rerun, while validation errors fail closed. Durable bounds are constructor-owned; live SQL limits govern memory. Durable exchange/scalar/correlated entries and durable/split/exchange/scalar SWR remain unwired |
 | Logs and diagnostics | Supported | SQL tables/scalars plus an embedder event sink; built-in transports forward in-band worker logs, without request/function correlation, access logs, or stderr |
 | Worker-requested secrets | Supported | Host resolver API; no SQL secret store |
 | Locality | Partial | Host callback exists; DataFusion CLI has no distributed scheduler |
@@ -257,8 +265,8 @@ replay remains physically present until release and a later reap.
 1. **Cache breadth with matching semantics.** Add correlated 1:N entries only
    where a complete deterministic key and cancellation boundary can be proved.
    Keep durable storage opt-in, evaluate compact scalar/exchange packing, and
-   add bounded stale-while-revalidate only with deterministic scheduling
-   semantics.
+   extend the bounded non-split producer SWR contract only where equivalent
+   cancellation and atomic replacement semantics exist.
 2. **Unbounded execution hardening.** Gate resume on worker advertisement and
    add checkpoint/reconnect, cancellation, backpressure, and soak coverage.
 3. **Catalog and function breadth.** Broaden view translation and keep
