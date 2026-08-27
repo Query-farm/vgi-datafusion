@@ -57,6 +57,25 @@ against their entries in the full committed baseline. Use ordinary `--compare`
 for promotion runs: it additionally rejects any baseline file missing from the
 new full report.
 
+Each record has a 10-second timeout by default so an intentionally large case
+cannot stall an ordinary compatibility survey. Slow/stress gates can raise it
+with `--record-timeout SECONDS` (or `CORPUS_RECORD_TIMEOUT_SECS`) and pass
+`.test_slow` files explicitly; directory discovery deliberately includes only
+`.test` files. For example:
+
+```bash
+VGI_TEST_WORKER=http://127.0.0.1:18130 \
+  target/release/corpus --jobs 1 --record-timeout 300 \
+  --json target/corpus-slow-http.json \
+  ../vgi/test/sql/integration/cache/parallel_2gb.test_slow
+```
+
+That upstream file still contains DuckDB extension configuration and logging
+assertions. In DataFusion it exercises the 2 GB producer/transport path, but it
+does not by itself activate or prove the adapter's durable cache: durable cache
+roots and resource bounds are constructor-owned rather than mutable SQL
+session settings.
+
 ## DataFusion SQL overlays
 
 The upstream `.test` file is the only copy of record order and expected rows.
@@ -138,7 +157,7 @@ transport equivalence is itself part of completion.
 
 ## Current promoted baseline — 2026-08-27
 
-The canonical EC2 Unix-socket run of the 328-file normal corpus contains 4,155
+The canonical EC2 Unix-socket run of the 328-file normal corpus contains 4,198
 measured positive records. The historical `subprocess.json` filename is kept
 for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
@@ -151,16 +170,16 @@ statistics also feed DataFusion's existing pruning API.
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 279 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 3,580 / 4,155 (86.2%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,440 / 2,595 (94.0%) |
-| Exact results | 1,567 | 2,301 |
-| Rendering-equivalent results | 37 | 139 |
-| Genuine value differences | 149 | 155 |
-| Not-applicable records reported separately | 607 | 593 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,725 / 4,198 (88.7%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,568 / 2,737 (93.8%) |
+| Exact results | 1,567 | 2,422 |
+| Rendering-equivalent results | 37 | 146 |
+| Genuine value differences | 149 | 169 |
+| Not-applicable records reported separately | 607 | 550 |
 | Timeouts | 0 | 0 |
 
-The HTTP run executes the same 3,580 records with 2,301 exact, 139
-rendering-equivalent, and 155 different results. Both transports have zero
+The HTTP run executes the same 3,725 records with 2,422 exact, 146
+rendering-equivalent, and 169 different results. Both transports have zero
 timeouts and byte-identical reports. `cache/basic.test` is fully
 executable with all 14 value checks
 exact. The settings slice is 42/42 with 14/14 exact, while reviewed

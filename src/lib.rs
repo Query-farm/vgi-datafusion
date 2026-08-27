@@ -3056,11 +3056,53 @@ fn scan_cache_storage_control(
 mod scan_cache_contract_tests {
     use super::{
         completed_scan_cache_control, declared_secret_dependency, executed_cache_substreams,
-        scan_cache_storage_control, worker_log_event, ExecutionObservation,
+        pack_splits, scan_cache_storage_control, worker_log_event, ExecutionObservation,
         ScanCachePartitionOutcome, VgiConnection,
     };
     use datafusion::execution::TaskContext;
     use std::sync::Arc;
+
+    #[test]
+    fn start_only_scan_plans_are_unbounded() {
+        let unbounded = pack_splits(
+            vgi_client::ScanPlan {
+                start_position: Some(b"checkpoint".to_vec()),
+                end_position: None,
+                ..Default::default()
+            },
+            1,
+        );
+        assert!(unbounded.unbounded);
+
+        let bounded = pack_splits(
+            vgi_client::ScanPlan {
+                start_position: Some(b"checkpoint".to_vec()),
+                end_position: Some(b"frontier".to_vec()),
+                ..Default::default()
+            },
+            1,
+        );
+        assert!(!bounded.unbounded);
+
+        let split_unbounded = pack_splits(
+            vgi_client::ScanPlan {
+                splits: vec![vgi_client::ScanSplitInfo {
+                    token: b"split".to_vec(),
+                    estimated_rows: None,
+                    rows_exact: false,
+                    estimated_bytes: None,
+                    partition_bounds: None,
+                    column_statistics: None,
+                    location_ids: None,
+                    start_position: Some(b"split-checkpoint".to_vec()),
+                    end_position: None,
+                }],
+                ..Default::default()
+            },
+            1,
+        );
+        assert!(split_unbounded.unbounded);
+    }
 
     #[test]
     fn declared_secret_request_is_a_dependency_even_without_resolved_rows() {

@@ -104,8 +104,8 @@ impl Bucket {
     }
 }
 
-/// How long one record may take before it is set aside.
-const RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Default time one record may take before it is set aside.
+const DEFAULT_RECORD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Default)]
 struct Tally {
@@ -987,7 +987,12 @@ fn render(batches: &[datafusion::arrow::array::RecordBatch]) -> Vec<String> {
     rows
 }
 
-async fn run_file(path: &Path, tally: &mut Tally, overlays: Option<&[RecordOverlay]>) {
+async fn run_file(
+    path: &Path,
+    tally: &mut Tally,
+    overlays: Option<&[RecordOverlay]>,
+    record_timeout: std::time::Duration,
+) {
     let file_label = corpus_relative(path);
     let group = corpus_group(&file_label).to_string();
     let Some(records) = parse(path) else {
@@ -1105,7 +1110,7 @@ async fn run_file(path: &Path, tally: &mut Tally, overlays: Option<&[RecordOverl
         // lot of data on purpose, and this is a survey of what *works*, not a
         // benchmark — a timeout is counted separately so it is never mistaken
         // for a missing feature.
-        let outcome = tokio::time::timeout(RECORD_TIMEOUT, async {
+        let outcome = tokio::time::timeout(record_timeout, async {
             let df = vgi_datafusion::sql(&ctx, &sql).await?;
             df.collect().await
         })
@@ -1761,6 +1766,12 @@ async fn main() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
+    let mut record_timeout = std::env::var("CORPUS_RECORD_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DEFAULT_RECORD_TIMEOUT);
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("corpus")
         .join("compatibility.json");
@@ -1815,9 +1826,24 @@ async fn main() {
                     }
                 };
             }
+            "--record-timeout" => {
+                let Some(value) = args.next() else {
+                    eprintln!("--record-timeout requires a positive number of seconds");
+                    std::process::exit(2);
+                };
+                record_timeout = match value.parse::<u64>() {
+                    Ok(value) if value > 0 => std::time::Duration::from_secs(value),
+                    _ => {
+                        eprintln!(
+                            "--record-timeout requires a positive number of seconds, found {value:?}"
+                        );
+                        std::process::exit(2);
+                    }
+                };
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: corpus [--jobs N] [--json REPORT.json] \
+                    "Usage: corpus [--jobs N] [--record-timeout SECONDS] [--json REPORT.json] \
                      [--compare BASELINE.json | --compare-selected BASELINE.json] \
                      [--manifest compatibility.json] [--overlays DIR | --no-overlays] [PATH ...]"
                 );
@@ -1885,7 +1911,13 @@ async fn main() {
                 }
                 let mut tally = Tally::default();
                 let label = corpus_relative(&file);
-                run_file(&file, &mut tally, overlays.get(&label).map(Vec::as_slice)).await;
+                run_file(
+                    &file,
+                    &mut tally,
+                    overlays.get(&label).map(Vec::as_slice),
+                    record_timeout,
+                )
+                .await;
                 (i, tally)
             }
         })
@@ -1942,7 +1974,7 @@ async fn main() {
     if tally.timed_out > 0 {
         println!(
             "         {} timed out after {:?} (not counted as failures)",
-            tally.timed_out, RECORD_TIMEOUT
+            tally.timed_out, record_timeout
         );
     }
     let compared = tally.values_matched + tally.values_rendering + tally.values_differed;
