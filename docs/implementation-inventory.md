@@ -211,8 +211,10 @@ replay remains physically present until release and a later reap.
 - `VgiLocalityHook` exposes planned split locations to an embedding scheduler.
   The adapter does not invent DataFusion hash partitioning from VGI transforms.
 - `VgiSessionOptions` configures cache bounds, event history, and an optional
-  RPC timeout. HTTP, Unix, and TCP clients honor that timeout; `None` leaves
-  long-lived calls unbounded. Subprocess pipe deadlines remain unavailable.
+  RPC timeout. HTTP, Unix, and TCP clients honor that timeout; subprocess
+  response reads do as well, killing and poisoning a child when the deadline
+  expires. `None` leaves long-lived calls unbounded. Rust's standard anonymous
+  pipe writer cannot interrupt a request write that has already blocked.
 - A positive `rpc_timeout` ATTACH option overrides that session default for one
   attachment. Blocking exchange followers use the same deadline.
 - Dropping an unfinished producer scan sends one protocol cancellation. Open,
@@ -300,9 +302,10 @@ rendering-equivalent, and 169 genuinely different results. The promoted reports
 are byte-identical.
 The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
 and diagnostics, correlated table calls, wide table input, writes, and secret
-host configuration. Publishing, stalled subprocess-RPC cancellation,
-long-lived unbounded-stream tests, and consuming a released `vgi-rpc` with the
-HTTP blocking-dispatch fix remain release gates.
+host configuration. `vgi-rpc` 0.23.3 and `vgi-rust` 0.31.0 now provide the HTTP
+blocking-dispatch and stalled subprocess-response fixes. Promoting a corpus run
+against those releases and adding long-lived unbounded-stream tests remain
+release gates.
 
 The focused 10-file multi-branch slice additionally executes 75/75 positive
 records with all 53 comparable results exact over subprocess, Unix sockets, and

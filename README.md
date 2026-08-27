@@ -256,7 +256,9 @@ connections. `rpc_timeout <positive-seconds>` on `ATTACH` overrides the session
 default for that attachment on HTTP, Unix, and TCP. Dropping an unfinished scan
 or satisfying a LIMIT sends protocol cancellation; failed open/header/read or
 cancel cleanup poisons that connection so the pool cannot reuse a desynchronized
-stream. Subprocess pipe I/O cannot yet enforce the timeout.
+stream. Subprocess response reads honor the same deadline and a timeout kills
+and poisons the child so it cannot re-enter the pool; Rust's standard anonymous
+pipe writer still cannot interrupt a request write that has already blocked.
 
 ## Known gaps
 

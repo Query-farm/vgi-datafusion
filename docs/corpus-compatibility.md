@@ -222,9 +222,10 @@ replacement, concurrent-owner, DETACH, and re-ATTACH lifecycle of nominated
 global functions. New Unix/HTTP hardening contracts cover bounded producer
 backpressure, early-LIMIT cancellation, actionable expired-split errors, and
 post-error connection recovery. The server-side fix that prevents synchronous
-RPC callbacks from occupying Tokio HTTP workers is still unreleased in the
-sibling `vgi-rpc-rust` checkout; consuming that release and rerunning these
-contracts remains a production gate.
+RPC callbacks from occupying Tokio HTTP workers is released in `vgi-rpc`
+0.23.3, and subprocess response deadlines are released in `vgi-rust` 0.31.0.
+Rerunning and promoting the corpus against those releases remains a production
+gate.
 
 Reviewed DataFusion-native overlays also broaden scalar and table-input wire
 coverage without adding adapter-only SQL. Constant-column calls cover unsigned
