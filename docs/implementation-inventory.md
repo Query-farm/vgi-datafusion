@@ -249,7 +249,7 @@ replay remains physically present until release and a later reap.
 | Scalar and SQL macro functions | Supported | Async scalar UDFs plus scalar/table macro expansion with typed defaults and named arguments |
 | Typed session settings | Supported | DataFusion `ConfigExtension`, `SET`/`RESET`, Arrow scalar and Struct encoding, metadata view, cache isolation |
 | Aggregate/window-frame use | Partial | ConstParams, retract, and advertised sliding-window callbacks work; DataFusion lacks EXCLUDE and aggregate-local ORDER BY window forms |
-| Table and buffered functions | Supported | One input column can carry nested Arrow values; multiple top-level input columns remain constrained by scalar-subquery planning |
+| Table and buffered functions | Supported | A DataFusion 55 `RelationPlanner` preserves multi-column, empty, and partitioned TABLE subqueries through the existing streaming/buffered providers; nested Arrow values remain supported and foldable list/struct/cast constants use DataFusion's native simplifier |
 | Global functions | Supported | Default-on/opt-out policy, collision ownership, concurrent attach linearization, replacement, and DETACH cleanup included |
 | Projection, static filters, LIMIT | Supported | Direct functions preserve exactness; lazy catalog tables recheck filters |
 | Cardinality metadata | Supported | Catalog-inlined estimate/max values feed `TableProvider::statistics()` and `VgiScanExec` through DataFusion 55's `StatisticsContext`; equal estimate/max is exact, other estimates remain inexact, and historical scans do not reuse current-table cardinality |
@@ -294,8 +294,7 @@ replay remains physically present until release and a later reap.
 
 ## Deliberately deferred boundaries
 
-Correlated LATERAL table functions, multi-column streaming table inputs, and
-late-materialization rewrites do not map
+Correlated LATERAL table functions and late-materialization rewrites do not map
 cleanly onto the current `TableProvider` callback. They should remain explicit
 gaps unless DataFusion exposes a suitable API or the project chooses to own a
 custom logical/physical extension. That keeps the integration focused on
@@ -309,7 +308,7 @@ executes 3,580 records with zero timeouts and produces 2,301 exact, 139
 rendering-equivalent, and 155 genuinely different results. The promoted reports
 are byte-identical.
 The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
-and diagnostics, correlated table calls, wide table input, writes, and secret
+and diagnostics, correlated table calls, writes, and secret
 host configuration. `vgi-rpc` 0.23.3 and `vgi-rust` 0.31.0 now provide the HTTP
 blocking-dispatch and stalled subprocess-response fixes. The corpus is now
 promoted against those releases; long-lived unbounded-stream tests remain a
@@ -348,9 +347,9 @@ producer contract over both Unix sockets and patched-transport HTTP. The final
 staged release corpus also passes over both transports with byte-identical reports:
 3,580 executed records, 575 classified compatibility gaps, zero blocked cases,
 zero timeouts, and no regressions against either promoted baseline.
-The typed static/dynamic filter-pushdown area executes 185/185 applicable
-records with every comparable result agreeing; its remaining records are
-reviewed DataFusion SQL/planning boundaries rather than failed VGI filters.
+The typed static/dynamic filter-pushdown area executes 228/228 applicable
+records with all 207 comparable results agreeing; its six remaining records are
+reviewed DataFusion SQL/type boundaries rather than failed VGI filters.
 The settings slice executes 42/42 records with all 14 results exact, and the
 required-filter slice executes 45/45 applicable records with all 25 results
 exact, over both Unix and HTTP. A 13-file

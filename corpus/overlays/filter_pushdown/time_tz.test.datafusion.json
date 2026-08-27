@@ -11,7 +11,7 @@
       "record": 3,
       "original_sql": "SELECT n FROM example.echo((SELECT * FROM (VALUES\n  (1, '08:00:00+00'::TIMETZ),\n  (2, '12:00:00+00'::TIMETZ),\n  (3, NULL::TIMETZ),\n  (4, '18:00:00+00'::TIMETZ)\n) v(n, t)))\nWHERE t = '12:00:00+00'::TIMETZ ORDER BY n;",
       "kind": "out_of_scope",
-      "reason": "DataFusion 55 cannot construct TIMETZ values and also cannot pass the two top-level input columns through the scalar-subquery table-function seam. A text or struct substitute would not test the same VGI filter."
+      "reason": "DataFusion 55 has no TIME WITH TIME ZONE SQL type or equivalent Arrow logical type constructor. A text substitute would not test the same VGI filter."
     },
     {
       "record": 4,
@@ -23,7 +23,7 @@
       "record": 5,
       "original_sql": "SELECT n FROM example.echo((SELECT * FROM (VALUES (1, '12:00:00+00'::TIMETZ), (2, NULL::TIMETZ)) v(n, t)))\nWHERE t IS NULL ORDER BY n;",
       "kind": "out_of_scope",
-      "reason": "DataFusion 55 cannot construct TIMETZ values and also cannot pass the two top-level input columns through the scalar-subquery table-function seam. Substitution would hide both protocol boundaries."
+      "reason": "DataFusion 55 has no TIME WITH TIME ZONE SQL type or equivalent Arrow logical type constructor. Substituting another nullable type would not test the TIMETZ validity path."
     }
   ]
 }

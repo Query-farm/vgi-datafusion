@@ -17,8 +17,9 @@
     {
       "record": 4,
       "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, NULL::color), (4, 'blue'::color)) v(n, c)))\nWHERE c = 'green'::color ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path."
+      "kind": "equivalent_sql",
+      "reason": "Arrow dictionary values preserve the enum comparison semantics; the VGI relation planner preserves both top-level input columns.",
+      "replacement_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast('green', 'Dictionary(UInt8, Utf8)')), (3, arrow_cast(NULL, 'Dictionary(UInt8, Utf8)')), (4, arrow_cast('blue', 'Dictionary(UInt8, Utf8)'))) v(n, c)))\nWHERE c = arrow_cast('green', 'Dictionary(UInt8, Utf8)') ORDER BY n;"
     },
     {
       "record": 5,
@@ -30,8 +31,9 @@
     {
       "record": 6,
       "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, 'green'::color), (3, 'blue'::color)) v(n, c)))\nWHERE c IN ('red'::color, 'blue'::color) ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path."
+      "kind": "equivalent_sql",
+      "reason": "Arrow dictionary values preserve the enum comparison semantics; the VGI relation planner preserves both top-level input columns.",
+      "replacement_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast('green', 'Dictionary(UInt8, Utf8)')), (3, arrow_cast('blue', 'Dictionary(UInt8, Utf8)'))) v(n, c)))\nWHERE c IN (arrow_cast('red', 'Dictionary(UInt8, Utf8)'), arrow_cast('blue', 'Dictionary(UInt8, Utf8)')) ORDER BY n;"
     },
     {
       "record": 7,
@@ -43,8 +45,9 @@
     {
       "record": 8,
       "original_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, 'red'::color), (2, NULL::color)) v(n, c)))\nWHERE c IS NULL ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path."
+      "kind": "equivalent_sql",
+      "reason": "Arrow dictionary values preserve the enum comparison semantics; the VGI relation planner preserves both top-level input columns.",
+      "replacement_sql": "SELECT n, c FROM example.echo((SELECT * FROM (VALUES (1, arrow_cast('red', 'Dictionary(UInt8, Utf8)')), (2, arrow_cast(NULL, 'Dictionary(UInt8, Utf8)'))) v(n, c)))\nWHERE c IS NULL ORDER BY n;"
     },
     {
       "record": 9,

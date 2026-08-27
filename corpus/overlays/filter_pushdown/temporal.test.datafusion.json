@@ -2,42 +2,6 @@
   "schema_version": 1,
   "records": [
     {
-      "record": 3,
-      "original_sql": "SELECT n, d FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-01-01'::DATE),\n  (2, '2026-05-06'::DATE),\n  (3, NULL::DATE),\n  (4, '2027-01-01'::DATE)\n) v(n, d)))\nWHERE d = '2026-05-06'::DATE ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and d into one struct would change the VGI input schema and no longer test filter pushdown on the original date column."
-    },
-    {
-      "record": 5,
-      "original_sql": "SELECT n, d FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-01-01'::DATE),\n  (2, '2026-05-06'::DATE),\n  (3, '2027-01-01'::DATE)\n) v(n, d)))\nWHERE d > '2026-03-01'::DATE ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and d into one struct would change the VGI input schema and no longer test range pushdown on the original date column."
-    },
-    {
-      "record": 7,
-      "original_sql": "SELECT n, t FROM example.echo((SELECT * FROM (VALUES (1, '08:00:00'::TIME), (2, '12:34:56'::TIME), (3, '18:00:00'::TIME)) v(n, t)))\nWHERE t = '12:34:56'::TIME ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and t into one struct would change the VGI input schema and no longer test filter pushdown on the original time column."
-    },
-    {
-      "record": 9,
-      "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 08:00:00'::TIMESTAMP),\n  (2, '2026-05-06 12:34:56.123456'::TIMESTAMP),\n  (3, '2026-05-06 18:00:00'::TIMESTAMP)\n) v(n, ts)))\nWHERE ts = '2026-05-06 12:34:56.123456'::TIMESTAMP ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timestamp field."
-    },
-    {
-      "record": 11,
-      "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 08:00:00'::TIMESTAMP),\n  (2, '2026-05-06 12:00:00'::TIMESTAMP),\n  (3, '2026-05-06 18:00:00'::TIMESTAMP)\n) v(n, ts)))\nWHERE ts > '2026-05-06 10:00:00'::TIMESTAMP ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timestamp field."
-    },
-    {
-      "record": 13,
-      "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 12:00:00+00'::TIMESTAMPTZ),\n  (2, '2026-05-06 13:00:00+01'::TIMESTAMPTZ),\n  (3, '2026-05-06 14:00:00+02'::TIMESTAMPTZ)\n) v(n, ts)))\nWHERE ts = '2026-05-06 12:00:00+00'::TIMESTAMPTZ ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timezone-bearing timestamp field."
-    },
-    {
       "record": 14,
       "original_sql": "SELECT n, ts FROM (VALUES\n  (1, '2026-05-06 12:00:00.123'::TIMESTAMP_MS),\n  (2, '2026-05-06 12:00:00.456'::TIMESTAMP_MS)\n) t(n, ts)\nWHERE ts = '2026-05-06 12:00:00.456'::TIMESTAMP_MS ORDER BY n;",
       "replacement_sql": "SELECT n, ts FROM (VALUES (1, arrow_cast('2026-05-06 12:00:00.123', 'Timestamp(Millisecond, None)')), (2, arrow_cast('2026-05-06 12:00:00.456', 'Timestamp(Millisecond, None)'))) t(n, ts) WHERE ts = arrow_cast('2026-05-06 12:00:00.456', 'Timestamp(Millisecond, None)') ORDER BY n;",
@@ -47,8 +11,9 @@
     {
       "record": 15,
       "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 12:00:00.123'::TIMESTAMP_MS),\n  (2, '2026-05-06 12:00:00.456'::TIMESTAMP_MS)\n) v(n, ts)))\nWHERE ts = '2026-05-06 12:00:00.456'::TIMESTAMP_MS ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "DataFusion can construct millisecond timestamps with arrow_cast, but its table-function scalar-subquery seam cannot carry both n and ts as top-level columns. Struct packing would change the VGI input schema."
+      "replacement_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES (1, arrow_cast('2026-05-06 12:00:00.123', 'Timestamp(Millisecond, None)')), (2, arrow_cast('2026-05-06 12:00:00.456', 'Timestamp(Millisecond, None)'))) v(n, ts))) WHERE ts = arrow_cast('2026-05-06 12:00:00.456', 'Timestamp(Millisecond, None)') ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's native arrow_cast constructs the same Arrow millisecond timestamps; the VGI relation planner now preserves both top-level input columns."
     },
     {
       "record": 16,
@@ -60,8 +25,9 @@
     {
       "record": 17,
       "original_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES\n  (1, '2026-05-06 12:00:00.000000001'::TIMESTAMP_NS),\n  (2, '2026-05-06 12:00:00.000000002'::TIMESTAMP_NS)\n) v(n, ts)))\nWHERE ts = '2026-05-06 12:00:00.000000002'::TIMESTAMP_NS ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "DataFusion can construct nanosecond timestamps with arrow_cast, but its table-function scalar-subquery seam cannot carry both n and ts as top-level columns. Struct packing would change the VGI input schema."
+      "replacement_sql": "SELECT n, ts FROM example.echo((SELECT * FROM (VALUES (1, arrow_cast('2026-05-06 12:00:00.000000001', 'Timestamp(Nanosecond, None)')), (2, arrow_cast('2026-05-06 12:00:00.000000002', 'Timestamp(Nanosecond, None)'))) v(n, ts))) WHERE ts = arrow_cast('2026-05-06 12:00:00.000000002', 'Timestamp(Nanosecond, None)') ORDER BY n;",
+      "kind": "equivalent_sql",
+      "reason": "DataFusion's native arrow_cast constructs the same Arrow nanosecond timestamps; the VGI relation planner now preserves both top-level input columns."
     }
   ]
 }

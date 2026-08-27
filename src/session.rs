@@ -692,7 +692,7 @@ struct RegisteredNames {
     /// distinguish DuckDB's `name=value` named-argument spelling from an
     /// ordinary equality expression without guessing from syntax alone.
     table: HashMap<String, HashSet<String>>,
-    table_owners: HashMap<String, Weak<dyn TableFunctionImpl>>,
+    table_owners: HashMap<String, Weak<VgiTableFunction>>,
 }
 
 type SessionRegistrations = HashMap<String, HashMap<String, RegisteredNames>>;
@@ -743,7 +743,7 @@ enum RegistrationKind {
     },
     Table {
         named_arguments: HashSet<String>,
-        owner: Weak<dyn TableFunctionImpl>,
+        owner: Weak<VgiTableFunction>,
     },
 }
 
@@ -829,7 +829,7 @@ fn register_table_if_absent(
     ctx: &SessionContext,
     alias: &str,
     name: String,
-    function: Arc<dyn TableFunctionImpl>,
+    function: Arc<VgiTableFunction>,
     named_arguments: HashSet<String>,
 ) -> bool {
     let state = ctx.state_ref();
@@ -837,7 +837,8 @@ fn register_table_if_absent(
     if state.table_functions().contains_key(&name) {
         return false;
     }
-    state.register_udtf(&name, Arc::clone(&function));
+    let registered: Arc<dyn TableFunctionImpl> = function.clone();
+    state.register_udtf(&name, registered);
     record_registration(
         ctx,
         alias,
@@ -878,6 +879,31 @@ fn is_declared_named_table_argument(
             })
         })
         .unwrap_or(false)
+}
+
+/// Resolve a VGI-owned table function for the relation planner.
+///
+/// The public DataFusion registry erases implementations behind
+/// `dyn TableFunctionImpl`; retaining the concrete weak owner here lets the
+/// VGI relation planner reuse the same attachment and discovery metadata. Only
+/// successfully registered names are recorded, so an existing non-VGI UDTF
+/// always keeps precedence.
+pub(crate) fn registered_vgi_table_function(
+    session_id: &str,
+    function_name: &str,
+) -> Option<Arc<VgiTableFunction>> {
+    registration_registry()
+        .lock()
+        .ok()?
+        .get(session_id)?
+        .values()
+        .find_map(|registered| {
+            registered
+                .table_owners
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(function_name))
+                .and_then(|(_, owner)| owner.upgrade())
+        })
 }
 
 fn is_declared_nullary_aggregate(ctx: &SessionContext, function_name: &str) -> bool {
@@ -951,6 +977,7 @@ fn deregister_alias_functions(ctx: &SessionContext, alias: &str) {
             .get(&name)
             .and_then(Weak::upgrade)
             .is_some_and(|owner| {
+                let owner: Arc<dyn TableFunctionImpl> = owner;
                 state
                     .table_functions()
                     .get(&name)
@@ -1115,6 +1142,7 @@ pub async fn sql(ctx: &SessionContext, query: &str) -> DFResult<DataFrame> {
     let runtime = session_runtime(ctx);
     ensure_vgi_settings(ctx, &runtime);
     crate::sampling::ensure_registered(ctx, &runtime)?;
+    crate::table_input_planner::ensure_registered(ctx, &runtime)?;
     // Session-scoped diagnostics such as `vgi_catalogs(location)` are useful
     // before the first ATTACH. Registration is idempotent, so install them at
     // the adapter SQL boundary rather than waiting for attach discovery.
@@ -2594,7 +2622,7 @@ fn register_global_functions(
             }
             PreparedGlobalKind::Table(metadata) => {
                 let named_arguments = named_arguments(&metadata.specs);
-                let table: Arc<dyn TableFunctionImpl> = Arc::new(VgiTableFunction::new(
+                let table = Arc::new(VgiTableFunction::new(
                     conn.clone(),
                     &spec.catalog,
                     &info.schema_name,
@@ -2937,7 +2965,7 @@ fn register_table_functions(
                 .as_ref()
                 .map(|metadata| named_arguments(&metadata.specs))
                 .unwrap_or_default();
-            let make = || -> Arc<dyn TableFunctionImpl> {
+            let make = || -> Arc<VgiTableFunction> {
                 Arc::new(VgiTableFunction::new(
                     conn.clone(),
                     &spec.catalog,

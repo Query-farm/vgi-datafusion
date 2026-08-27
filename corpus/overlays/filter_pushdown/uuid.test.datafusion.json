@@ -11,8 +11,9 @@
     {
       "record": 3,
       "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u = '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths."
+      "kind": "equivalent_sql",
+      "reason": "Canonical UUID text preserves the compared values; the VGI relation planner preserves both top-level input columns.",
+      "replacement_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, NULL::VARCHAR),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) v(n, u)))\nWHERE u = '00000000-0000-0000-0000-000000000002'\nORDER BY n;"
     },
     {
       "record": 4,
@@ -24,8 +25,9 @@
     {
       "record": 5,
       "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, NULL::UUID),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u != '00000000-0000-0000-0000-000000000002'::UUID\nORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths."
+      "kind": "equivalent_sql",
+      "reason": "Canonical UUID text preserves the compared values; the VGI relation planner preserves both top-level input columns.",
+      "replacement_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, NULL::VARCHAR),\n  (4, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) v(n, u)))\nWHERE u != '00000000-0000-0000-0000-000000000002'\nORDER BY n;"
     },
     {
       "record": 6,
@@ -37,8 +39,9 @@
     {
       "record": 7,
       "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, NULL::UUID)\n) v(n, u)))\nWHERE u IS NULL ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths."
+      "kind": "equivalent_sql",
+      "reason": "Canonical UUID text preserves the compared values; the VGI relation planner preserves both top-level input columns.",
+      "replacement_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, NULL::VARCHAR)\n) v(n, u)))\nWHERE u IS NULL ORDER BY n;"
     },
     {
       "record": 8,
@@ -50,8 +53,9 @@
     {
       "record": 9,
       "original_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'::UUID),\n  (2, '00000000-0000-0000-0000-000000000002'::UUID),\n  (3, 'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID)\n) v(n, u)))\nWHERE u IN (\n  '00000000-0000-0000-0000-000000000001'::UUID,\n  'ffffffff-ffff-ffff-ffff-ffffffffffff'::UUID\n)\nORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths."
+      "kind": "equivalent_sql",
+      "reason": "Canonical UUID text preserves the compared values; the VGI relation planner preserves both top-level input columns.",
+      "replacement_sql": "SELECT n, u FROM example.echo((SELECT * FROM (VALUES\n  (1, '00000000-0000-0000-0000-000000000001'),\n  (2, '00000000-0000-0000-0000-000000000002'),\n  (3, 'ffffffff-ffff-ffff-ffff-ffffffffffff')\n) v(n, u)))\nWHERE u IN (\n  '00000000-0000-0000-0000-000000000001',\n  'ffffffff-ffff-ffff-ffff-ffffffffffff'\n)\nORDER BY n;"
     }
   ]
 }

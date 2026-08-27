@@ -41,7 +41,9 @@ use std::sync::Arc;
 
 use datafusion::catalog::{TableFunctionArgs, TableFunctionImpl, TableProvider};
 use datafusion::common::{plan_err, Result as DFResult, ScalarValue};
+use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::logical_expr::Expr;
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use vgi_client::{ArgValue, Arguments};
 
 use crate::{catalog::TableFunctionMetadata, VgiConnection, VgiTableProvider};
@@ -78,6 +80,50 @@ impl VgiTableFunction {
     pub fn function(&self) -> &str {
         &self.function
     }
+
+    /// Bind a relation-valued argument after a
+    /// [`RelationPlanner`](datafusion::logical_expr::planner::RelationPlanner)
+    /// has planned it as a real multi-column
+    /// [`datafusion::logical_expr::LogicalPlan`].
+    ///
+    /// The ordinary [`TableFunctionImpl`] path receives only expressions and
+    /// therefore sees subqueries as single-column scalar expressions. Keeping
+    /// the actual bind here gives both planner paths exactly the same worker
+    /// protocol, constant-argument handling, and provider implementation.
+    pub(crate) fn bind_table_argument(
+        &self,
+        table_arg: crate::table_input::TableArgument,
+        scalar_exprs: &[Expr],
+    ) -> DFResult<Arc<dyn TableProvider>> {
+        let arguments = to_arguments(&self.function, scalar_exprs)?;
+        let conn = self.conn.clone();
+        let catalog = self.catalog.clone();
+        let schema_name = self.schema_name.clone();
+        let function = self.function.clone();
+        let buffered = self.metadata.as_ref().is_some_and(|m| m.buffered);
+        let sink_order_dependent = self
+            .metadata
+            .as_ref()
+            .is_some_and(|m| m.sink_order_dependent);
+        let stream_cache_eligible = self
+            .metadata
+            .as_ref()
+            .is_some_and(|m| m.stream_cache_eligible);
+        crate::run_blocking_planner_call(move || {
+            crate::table_input::VgiTableInputProvider::bind_blocking(
+                conn,
+                &catalog,
+                &schema_name,
+                &function,
+                arguments,
+                table_arg,
+                buffered,
+                sink_order_dependent,
+                stream_cache_eligible,
+            )
+        })
+        .map(|provider| provider as Arc<dyn TableProvider>)
+    }
 }
 
 impl TableFunctionImpl for VgiTableFunction {
@@ -93,34 +139,7 @@ impl TableFunctionImpl for VgiTableFunction {
                 .filter(|(i, _)| *i != table_arg.index)
                 .map(|(_, e)| e.clone())
                 .collect();
-            let arguments = to_arguments(&self.function, &scalars)?;
-            let conn = self.conn.clone();
-            let catalog = self.catalog.clone();
-            let schema_name = self.schema_name.clone();
-            let function = self.function.clone();
-            let buffered = self.metadata.as_ref().is_some_and(|m| m.buffered);
-            let sink_order_dependent = self
-                .metadata
-                .as_ref()
-                .is_some_and(|m| m.sink_order_dependent);
-            let stream_cache_eligible = self
-                .metadata
-                .as_ref()
-                .is_some_and(|m| m.stream_cache_eligible);
-            return crate::run_blocking_planner_call(move || {
-                crate::table_input::VgiTableInputProvider::bind_blocking(
-                    conn,
-                    &catalog,
-                    &schema_name,
-                    &function,
-                    arguments,
-                    table_arg,
-                    buffered,
-                    sink_order_dependent,
-                    stream_cache_eligible,
-                )
-            })
-            .map(|p| p as Arc<dyn TableProvider>);
+            return self.bind_table_argument(table_arg, &scalars);
         }
 
         // A blended table-in/out function exposes its positional arguments as
@@ -283,7 +302,20 @@ fn to_arg_value(function: &str, i: usize, expr: &Expr) -> DFResult<ArgValue> {
              table function's arguments are bound during planning, before any row \
              exists; pass a constant"
         ),
-        other => plan_err!("VGI function `{function}` argument {i} is not a constant: {other}"),
+        other => {
+            // SQL constants are not necessarily delivered as Literal nodes.
+            // DataFusion represents list/struct constructors, casts, and
+            // arithmetic as ordinary expressions until its constant evaluator
+            // runs. Use that public evaluator here so VGI named options can
+            // accept the same foldable values as native DataFusion UDTFs.
+            let folded = ExprSimplifier::new(SimplifyContext::default()).simplify(other.clone())?;
+            match folded {
+                Expr::Literal(value, _) => scalar_to_arg(function, i, &value),
+                folded => {
+                    plan_err!("VGI function `{function}` argument {i} is not a constant: {folded}")
+                }
+            }
+        }
     }
 }
 
@@ -377,6 +409,16 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("before any row exists"), "{err}");
+    }
+
+    #[test]
+    fn foldable_expressions_are_constant_arguments() {
+        let expr = lit(ScalarValue::Int64(Some(20))) + lit(ScalarValue::Int64(Some(22)));
+        let ArgValue::Arrow(array) = to_arg_value("f", 0, &expr).unwrap() else {
+            panic!("folded non-null arguments use Arrow values");
+        };
+        let value = ScalarValue::try_from_array(&array, 0).unwrap();
+        assert_eq!(value, ScalarValue::Int64(Some(42)));
     }
 
     #[test]

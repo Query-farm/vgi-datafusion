@@ -14,23 +14,16 @@
 //! `bind_with_input` to resolve the output schema, then `open_exchange` to push
 //! batches and read answers.
 //!
-//! # Only single-column tables, and why that is not my choice
+//! # Preserving a relation through DataFusion planning
 //!
-//! DataFusion plans a table-function argument as an ordinary expression, and a
-//! subquery in expression position is a **scalar** subquery — which by
-//! definition yields one column. A wider one is refused during planning, before
-//! any of this code runs:
-//!
-//! ```text
-//! SELECT * FROM f('x', (SELECT * FROM (VALUES (1,2)) AS t(a,b)));
-//! Error during planning: Too many columns! The subquery should only return
-//! one column: t.a, t.b
-//! ```
-//!
-//! There is no hook to intercept that — the rejection happens in the expression
-//! planner, and `TableFunctionArgs` only ever sees `Expr`s. Widening it needs a
-//! change in DataFusion itself, so a multi-column table argument is out of
-//! reach here rather than merely unimplemented.
+//! DataFusion's ordinary `TableFunctionImpl` hook receives expressions, so a
+//! subquery there has scalar semantics and is limited to one column. The
+//! adapter also installs a DataFusion 55 `RelationPlanner`, which recognizes
+//! attached VGI table functions while their SQL subquery is still a relation.
+//! It passes the complete logical plan here, preserving wide, empty, and
+//! partitioned inputs without a custom DataFusion logical or physical node.
+//! The original expression path remains as a compatibility path for
+//! single-column calls.
 
 use std::sync::{Arc, Mutex};
 

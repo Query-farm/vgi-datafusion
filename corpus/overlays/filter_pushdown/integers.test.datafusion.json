@@ -65,29 +65,11 @@
       "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate."
     },
     {
-      "record": 47,
-      "original_sql": "SELECT n, t FROM example.echo((\n  SELECT n, t FROM (VALUES (1::BIGINT, 'x'),\n                           (2::BIGINT, NULL),\n                           (3::BIGINT, 'y'),\n                           (4::BIGINT, NULL)) v(n, t)\n)) WHERE n > 1 AND t IS NOT NULL ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API."
-    },
-    {
       "record": 49,
       "original_sql": "SELECT n FROM example.echo((SELECT range AS n FROM range(0, 20))) WHERE n < 3 OR n > 17 ORDER BY n;",
       "replacement_sql": "SELECT n FROM example.echo((SELECT value AS n FROM range(0, 20))) WHERE n < 3 OR n > 17 ORDER BY n;",
       "kind": "equivalent_sql",
       "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate."
-    },
-    {
-      "record": 51,
-      "original_sql": "SELECT n, t FROM example.echo((\n  SELECT n, t FROM (VALUES (1::BIGINT, 'a'),\n                           (2::BIGINT, NULL),\n                           (3::BIGINT, 'c')) v(n, t)\n)) WHERE n = 2 OR t = 'c' ORDER BY n;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API."
-    },
-    {
-      "record": 53,
-      "original_sql": "SELECT n, m FROM example.echo((\n  SELECT n, m FROM (VALUES (1::BIGINT, 100::BIGINT),\n                           (2::BIGINT, 200::BIGINT),\n                           (2::BIGINT, 300::BIGINT),\n                           (3::BIGINT, 400::BIGINT)) v(n, m)\n)) WHERE n = 2 AND m >= 250 ORDER BY n, m;",
-      "kind": "out_of_scope",
-      "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API."
     }
   ]
 }

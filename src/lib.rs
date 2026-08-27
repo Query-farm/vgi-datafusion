@@ -35,9 +35,11 @@
 //!
 //! Producer-mode table functions map onto `TableProvider` almost exactly:
 //! projection, filters, limit and split claims all ride VGI's scan calls.
-//! Exchange-mode and buffered functions use a scalar subquery as their TABLE
-//! argument; DataFusion restricts that subquery to one column, so wider table
-//! inputs need an upstream planner change.
+//! Exchange-mode and buffered functions use a subquery as their TABLE
+//! argument. A DataFusion 55 relation planner preserves multi-column inputs
+//! before ordinary scalar-subquery validation, while the established
+//! table-input provider handles their physical execution. Correlated `LATERAL`
+//! calls remain outside that bind-time API because no outer row is available.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -95,6 +97,7 @@ mod session;
 mod settings;
 mod table_function;
 mod table_input;
+mod table_input_planner;
 mod table_input_stream;
 
 pub use aggregate::VgiAggregateUdf;

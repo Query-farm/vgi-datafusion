@@ -37,11 +37,13 @@ ctx.sql("SELECT count(*) FROM orders").await?.show().await?;
 | Typed session settings | DataFusion `ConfigExtension` + `SET` / `RESET` | ✅ |
 | Worker secrets | host `VgiSecretResolver` | ✅ |
 | Structured diagnostics and worker logs | SQL functions + host event sink | ✅ |
-| Table-in-out / buffered | table-valued subquery argument | ✅, one input column |
+| Table-in-out / buffered | relation planner + table-valued subquery argument | ✅, multi-column |
 
-An exchange-mode VGI function is reached with a scalar subquery as its TABLE
-argument. DataFusion constrains a scalar subquery to one column, so wider table
-inputs remain unavailable without an upstream DataFusion planner change.
+An exchange-mode VGI function is reached with a subquery as its TABLE argument.
+The adapter's DataFusion 55 `RelationPlanner` preserves that subquery as a real
+relation, including multiple top-level columns, empty results, and partitioned
+inputs. Correlated `LATERAL` calls remain separate: DataFusion still binds a
+table function before an outer row is available.
 
 ## VGI-enabled DataFusion CLI
 

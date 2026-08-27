@@ -230,11 +230,11 @@ gate.
 Reviewed DataFusion-native overlays also broaden scalar and table-input wire
 coverage without adding adapter-only SQL. Constant-column calls cover unsigned
 Arrow integers, Decimal256, timestamp units, maps, lists, and nested structs.
-The single table-input column round-trips maps, structs, nested/fixed-size
-lists, dictionaries, temporal values, decimals, and binary values. DataFusion
-55 still cannot construct Arrow Union or DuckDB BIT values in SQL, and the
-logical table-function seam still cannot express multiple top-level input
-columns.
+Table inputs round-trip multiple top-level columns as well as maps, structs,
+nested/fixed-size lists, dictionaries, temporal values, decimals, and binary
+values. The adapter uses DataFusion 55's relation-planner seam and its existing
+streaming/buffered providers rather than a custom logical node. DataFusion 55
+still cannot construct Arrow Union or DuckDB BIT values in SQL.
 
 The 2026-08-26 promotion slice covers 13 aggregate, macro/catalog, typed-filter,
 and cache files over both Unix sockets and HTTP. Both transports execute
@@ -253,13 +253,13 @@ has not yet been regenerated, so it remains historical evidence rather than a
 retroactive pass claim. This is focused post-baseline evidence, not a new
 full-corpus total.
 
-The complete typed filter-pushdown slice executes 185/185 applicable records
-with zero failures over both transports. All 164 comparable assertions agree
-(151 exact and 13 rendering-only). Thirty reviewed SQL adaptations use
-DataFusion-native Arrow casts or column aliases; 49 records remain explicitly
-non-applicable because they require multiple top-level scalar-subquery columns,
-DuckDB enum DDL, or a TIMETZ constructor unavailable in DataFusion 55. No
-filter result mismatch is hidden by those classifications.
+The complete typed filter-pushdown slice executes 228/228 applicable records
+with zero failures over both transports. All 207 comparable assertions agree
+(187 exact and 20 rendering-only). Forty-six reviewed SQL adaptations use
+DataFusion-native Arrow casts or column aliases. Six records remain explicitly
+non-applicable because they require DuckDB enum DDL or a TIMETZ constructor
+unavailable in DataFusion 55. No filter result mismatch is hidden by those
+classifications.
 
 The focused set-operation/subquery file now executes 21/21 applicable records:
 all 20 comparable queries agree exactly, and the attach statement succeeds.
@@ -321,11 +321,11 @@ engine work to a minimum:
    cache-ineligibility reasons are now available through SQL history and the
    embedder event sink. The promoted baseline executes 646/783 cache records;
    its focused cache batch remains historical evidence until regenerated.
-4. **Table-in/out engine boundary.** Correlated LATERAL calls and wide table
-   subqueries remain the predominant engine-boundary failures. The adapter
-   accepts the single-column expression shape DataFusion exposes naturally,
-   plus literal one-row exchange. These gaps are tracked but are not candidates
-   for new DataFusion engine work in this project.
+4. **Table-in/out engine boundary.** Wide, empty, and partitioned table
+   subqueries use DataFusion's relation-planner API and the existing exchange
+   providers. Correlated LATERAL calls remain the engine boundary because no
+   outer row exists when DataFusion binds a table function; they are not a
+   candidate for new DataFusion engine work in this project.
 5. **Catalog objects.** The focused scalar/table macro slice and the complete
    function/native-format multi-branch slice now pass. Catalog-table source
    arms now have a real companion-worker fixture and resolve existing DataFusion

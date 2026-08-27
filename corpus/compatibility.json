@@ -44,7 +44,7 @@
       "title": "Table-in/out and buffering functions",
       "status": "partial",
       "groups": ["table_in_out"],
-      "remaining": ["correlated LATERAL calls (existing DataFusion table-function boundary; no engine work planned)", "multi-column table inputs (existing DataFusion expression boundary; no engine work planned)", "buffering/finalize parallel semantics"]
+      "remaining": ["correlated LATERAL calls (existing DataFusion table-function boundary; no engine work planned)", "buffering/finalize parallel semantics"]
     },
     {
       "id": "filter_pushdown",
