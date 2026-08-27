@@ -166,8 +166,9 @@ replay remains physically present until release and a later reap.
   functions map exact worker filter application to
   `TableProviderFilterPushDown::Exact`; lazy catalog tables recheck locally.
 - Aggregate functions preserve bind-time ConstParams. DataFusion sliding
-  accumulators use the worker's dedicated VGI window callback when advertised;
-  ordinary `GROUP BY` continues through aggregate update/finalize.
+  accumulators retain one blocking worker thread, connection, and bind across
+  their frames while using the dedicated VGI window callback; ordinary
+  `GROUP BY` continues through aggregate update/finalize.
 - Scalar overload selection rejects incompatible typed arms without losing
   ConstParam literal coercion, allowing `ANY` arms or the worker's authoritative
   bind error instead of silently casting into the wrong overload.
@@ -302,17 +303,17 @@ wiring VGI into DataFusion rather than developing a parallel query engine.
 
 ## Production verification gate
 
-The current promoted 327-file shared VGI SQLLogicTest baseline completes
+The current promoted 328-file shared VGI SQLLogicTest baseline completes
 against both HTTP and an explicitly managed Unix-socket worker. Each transport
-executes 3,554 records with zero timeouts and produces 2,278 exact, 128
-rendering-equivalent, and 169 genuinely different results. The promoted reports
+executes 3,580 records with zero timeouts and produces 2,301 exact, 139
+rendering-equivalent, and 155 genuinely different results. The promoted reports
 are byte-identical.
 The remaining failures are tracked capability gaps, primarily DuckDB-only SQL
 and diagnostics, correlated table calls, wide table input, writes, and secret
 host configuration. `vgi-rpc` 0.23.3 and `vgi-rust` 0.31.0 now provide the HTTP
-blocking-dispatch and stalled subprocess-response fixes. Promoting a corpus run
-against those releases and adding long-lived unbounded-stream tests remain
-release gates.
+blocking-dispatch and stalled subprocess-response fixes. The corpus is now
+promoted against those releases; long-lived unbounded-stream tests remain a
+release gate.
 
 The focused 10-file multi-branch slice additionally executes 75/75 positive
 records with all 53 comparable results exact over subprocess, Unix sockets, and
@@ -345,7 +346,7 @@ suite (215 unit tests, 39 integration tests, and one doctest), including a true
 multi-process initialization/reopen test, and the four-test DataFusion durable
 producer contract over both Unix sockets and patched-transport HTTP. The final
 staged release corpus also passes over both transports with byte-identical reports:
-3,554 executed records, 580 classified compatibility gaps, zero blocked cases,
+3,580 executed records, 575 classified compatibility gaps, zero blocked cases,
 zero timeouts, and no regressions against either promoted baseline.
 The typed static/dynamic filter-pushdown area executes 185/185 applicable
 records with every comparable result agreeing; its remaining records are

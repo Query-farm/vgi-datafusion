@@ -136,9 +136,9 @@ replacing the baseline deliberately. The historical
 `corpus/baselines/http.json` records the corresponding HTTP run because
 transport equivalence is itself part of completion.
 
-## Current promoted baseline — 2026-08-26
+## Current promoted baseline — 2026-08-27
 
-The canonical EC2 Unix-socket run of the 327-file normal corpus contains 4,134
+The canonical EC2 Unix-socket run of the 328-file normal corpus contains 4,155
 measured positive records. The historical `subprocess.json` filename is kept
 for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
@@ -150,17 +150,17 @@ statistics also feed DataFusion's existing pruning API.
 
 | Metric | Initial | Current |
 |---|---:|---:|
-| Files run / skipped by missing environment | 278 / 49 | 278 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 3,554 / 4,134 (86.0%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,406 / 2,575 (93.4%) |
-| Exact results | 1,567 | 2,278 |
-| Rendering-equivalent results | 37 | 128 |
-| Genuine value differences | 149 | 169 |
-| Not-applicable records reported separately | 607 | 587 |
+| Files run / skipped by missing environment | 278 / 49 | 279 / 49 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,580 / 4,155 (86.2%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,440 / 2,595 (94.0%) |
+| Exact results | 1,567 | 2,301 |
+| Rendering-equivalent results | 37 | 139 |
+| Genuine value differences | 149 | 155 |
+| Not-applicable records reported separately | 607 | 593 |
 | Timeouts | 0 | 0 |
 
-The HTTP run executes the same 3,554 records with 2,278 exact, 128
-rendering-equivalent, and 169 different results. Both transports have zero
+The HTTP run executes the same 3,580 records with 2,301 exact, 139
+rendering-equivalent, and 155 different results. Both transports have zero
 timeouts and byte-identical reports. `cache/basic.test` is fully
 executable with all 14 value checks
 exact. The settings slice is 42/42 with 14/14 exact, while reviewed
@@ -169,7 +169,7 @@ transports.
 
 The deferred writable corpus under `../vgi/test_deferred/writable` is tracked
 as a future input, not mixed into this baseline. Six `.test_slow` files are also
-excluded from the normal 327-file count and should be separate soak/performance
+excluded from the normal 328-file count and should be separate soak/performance
 gates.
 
 Post-baseline focused verification now completes the macro slice. Scalar and

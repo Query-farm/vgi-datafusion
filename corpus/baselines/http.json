@@ -3,28 +3,28 @@
   "source_roots": [
     "/home/ec2-user/Development/vgi/test/sql/integration"
   ],
-  "source_files": 327,
+  "source_files": 328,
   "totals": {
-    "files_run": 278,
+    "files_run": 279,
     "files_skipped": 49,
-    "measured_records": 4134,
-    "executed": 3554,
-    "failed": 580,
-    "not_applicable": 587,
-    "adapted_records": 213,
+    "measured_records": 4155,
+    "executed": 3580,
+    "failed": 575,
+    "not_applicable": 593,
+    "adapted_records": 221,
     "blocked": 0,
     "timed_out": 0,
     "expected_errors_ignored": 179,
     "values": {
-      "exact": 2278,
-      "rendering_equivalent": 128,
-      "different": 169,
+      "exact": 2301,
+      "rendering_equivalent": 139,
+      "different": 155,
       "unordered_subset": 42
     }
   },
   "failure_buckets": {
     "DuckDB-only surface (typeof / duckdb_* / vgi_*)": 17,
-    "parse error (dialect)": 87,
+    "parse error (dialect)": 82,
     "type / signature mismatch": 50,
     "other": 426
   },
@@ -38,10 +38,10 @@
       ],
       "files": 59,
       "files_skipped": 1,
-      "executed": 1151,
-      "failed": 102,
-      "not_applicable": 85,
-      "adapted_records": 35,
+      "executed": 1164,
+      "failed": 88,
+      "not_applicable": 88,
+      "adapted_records": 43,
       "blocked": 0,
       "timed_out": 0
     },
@@ -134,11 +134,11 @@
       "groups": [
         "cache"
       ],
-      "files": 52,
+      "files": 53,
       "files_skipped": 2,
-      "executed": 646,
-      "failed": 137,
-      "not_applicable": 283,
+      "executed": 653,
+      "failed": 146,
+      "not_applicable": 284,
       "adapted_records": 36,
       "blocked": 0,
       "timed_out": 0
@@ -156,9 +156,9 @@
       ],
       "files": 26,
       "files_skipped": 10,
-      "executed": 151,
+      "executed": 157,
       "failed": 0,
-      "not_applicable": 24,
+      "not_applicable": 26,
       "adapted_records": 5,
       "blocked": 0,
       "timed_out": 0
@@ -293,8 +293,8 @@
     {
       "group": "cache",
       "area": "result_cache",
-      "executed": 646,
-      "failed": 137
+      "executed": 653,
+      "failed": 146
     },
     {
       "group": "catalog",
@@ -335,7 +335,7 @@
     {
       "group": "macro",
       "area": "catalog_metadata",
-      "executed": 19,
+      "executed": 25,
       "failed": 0
     },
     {
@@ -383,8 +383,8 @@
     {
       "group": "table",
       "area": "table_scans",
-      "executed": 1151,
-      "failed": 102
+      "executed": 1164,
+      "failed": 88
     },
     {
       "group": "table_in_out",
@@ -806,7 +806,7 @@
       "adaptations": [
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion uses named_struct for row-dependent Struct construction and get_field for field access on a function result; both preserve the aggregate's Arrow Struct argument and return value.",
           "issue": null,
@@ -815,7 +815,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve the aggregate's Arrow Struct argument and axes result.",
           "issue": null,
@@ -824,7 +824,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve the aggregate's Arrow Struct argument and tensor result.",
           "issue": null,
@@ -833,7 +833,7 @@
         },
         {
           "record": 6,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve the aggregate's Arrow Struct argument and axes result.",
           "issue": null,
@@ -842,7 +842,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve the two-axis Arrow Struct argument and tensor result.",
           "issue": null,
@@ -851,7 +851,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve the two-axis Arrow Struct argument and axes result.",
           "issue": null,
@@ -860,7 +860,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve sparse tensor construction and null cells.",
           "issue": null,
@@ -869,7 +869,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The corpus gives each file a fresh DataFusion SessionContext, so a session-local CREATE TABLE has the same lifetime and contents as DuckDB's TEMP table without requiring a new DataFusion temporary-table implementation.",
           "issue": null,
@@ -878,7 +878,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve the three-axis Arrow Struct argument and axes result.",
           "issue": null,
@@ -887,7 +887,7 @@
         },
         {
           "record": 12,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's SELECT-list unnest expands the same list without a correlated LATERAL table input; named_struct and get_field preserve the nested Arrow values.",
           "issue": null,
@@ -896,7 +896,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve grouped tensor aggregation and both returned Struct fields.",
           "issue": null,
@@ -905,7 +905,7 @@
         },
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's SELECT-list unnest expands the same dense list without a correlated LATERAL table input; named_struct and get_field preserve the nested Arrow values.",
           "issue": null,
@@ -914,7 +914,7 @@
         },
         {
           "record": 15,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's SELECT-list unnest expands the same sparse Cartesian tensor without a correlated LATERAL table input and preserves null cells.",
           "issue": null,
@@ -923,7 +923,7 @@
         },
         {
           "record": 16,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve a null tensor cell and the aggregate's Arrow types.",
           "issue": null,
@@ -932,7 +932,7 @@
         },
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus a typed null Struct represents the same nullable axes column, and get_field accesses the aggregate result.",
           "issue": null,
@@ -941,7 +941,7 @@
         },
         {
           "record": 20,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve string tensor values.",
           "issue": null,
@@ -950,7 +950,7 @@
         },
         {
           "record": 21,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve Float64 tensor values.",
           "issue": null,
@@ -959,7 +959,7 @@
         },
         {
           "record": 22,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve string axis coordinates and ordering.",
           "issue": null,
@@ -968,7 +968,7 @@
         },
         {
           "record": 23,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve string-axis sorting and tensor placement.",
           "issue": null,
@@ -977,7 +977,7 @@
         },
         {
           "record": 27,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve the parallel aggregate input and tensor result.",
           "issue": null,
@@ -986,7 +986,7 @@
         },
         {
           "record": 28,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/nest_tensor.test.datafusion.json",
+          "mechanism": "overlay:aggregate/nest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct and get_field spellings preserve parallel grouped tensor aggregation.",
           "issue": null,
@@ -1101,7 +1101,7 @@
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/window.test.datafusion.json",
+          "mechanism": "overlay:aggregate/window.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring.",
           "issue": null,
@@ -1110,7 +1110,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/window.test.datafusion.json",
+          "mechanism": "overlay:aggregate/window.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring.",
           "issue": null,
@@ -1119,7 +1119,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/window.test.datafusion.json",
+          "mechanism": "overlay:aggregate/window.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not parse SQL window-frame EXCLUDE clauses; supporting this requires a DataFusion parser/planner feature rather than VGI adapter wiring.",
           "issue": null,
@@ -1128,7 +1128,7 @@
         },
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/aggregate/window.test.datafusion.json",
+          "mechanism": "overlay:aggregate/window.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not implement aggregate-local ORDER BY inside a window function; supporting this requires a DataFusion planner feature rather than VGI adapter wiring.",
           "issue": null,
@@ -1585,7 +1585,7 @@
       "adaptations": [
         {
           "record": 16,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/compression.test.datafusion.json",
+          "mechanism": "overlay:cache/compression.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This assertion specifically requires a compressed disk-tier hit after memory eviction; DataFusion's VGI cache is memory-only and does not claim disk compression support.",
           "issue": null,
@@ -1662,7 +1662,7 @@
       "adaptations": [
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/disk.test.datafusion.json",
+          "mechanism": "overlay:cache/disk.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The nonce can remain equal only when the unsupported persistent disk tier serves the entry after the memory cap evicts it.",
           "issue": null,
@@ -1671,7 +1671,7 @@
         },
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/disk.test.datafusion.json",
+          "mechanism": "overlay:cache/disk.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This assertion specifically requires a disk-tier cache hit; the DataFusion adapter currently provides a bounded session-memory tier only.",
           "issue": null,
@@ -1746,7 +1746,7 @@
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -1755,7 +1755,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
           "issue": null,
@@ -1764,7 +1764,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -1773,7 +1773,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
           "issue": null,
@@ -1782,7 +1782,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
           "issue": null,
@@ -1791,7 +1791,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -1800,7 +1800,7 @@
         },
         {
           "record": 15,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
           "issue": null,
@@ -1809,7 +1809,7 @@
         },
         {
           "record": 18,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -1818,7 +1818,7 @@
         },
         {
           "record": 20,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -1827,7 +1827,7 @@
         },
         {
           "record": 22,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
           "issue": null,
@@ -1836,7 +1836,7 @@
         },
         {
           "record": 27,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -1845,7 +1845,7 @@
         },
         {
           "record": 29,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
           "issue": null,
@@ -1854,7 +1854,7 @@
         },
         {
           "record": 32,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -1863,7 +1863,7 @@
         },
         {
           "record": 34,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_buffered.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_buffered.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB log predicate.",
           "issue": null,
@@ -1944,7 +1944,7 @@
       "adaptations": [
         {
           "record": 6,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_revalidate.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_revalidate.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter clears its bounded SQL-visible VGI event history with vgi_logs_clear().",
           "issue": null,
@@ -1953,7 +1953,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_revalidate.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_revalidate.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field.",
           "issue": null,
@@ -1962,7 +1962,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_revalidate.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_revalidate.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter clears its bounded SQL-visible VGI event history with vgi_logs_clear().",
           "issue": null,
@@ -1971,7 +1971,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_revalidate.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_revalidate.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field.",
           "issue": null,
@@ -2002,7 +2002,7 @@
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter clears its bounded SQL-visible VGI event history with vgi_logs_clear().",
           "issue": null,
@@ -2011,7 +2011,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field.",
           "issue": null,
@@ -2020,7 +2020,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field.",
           "issue": null,
@@ -2029,7 +2029,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter clears its bounded SQL-visible VGI event history with vgi_logs_clear().",
           "issue": null,
@@ -2038,7 +2038,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field.",
           "issue": null,
@@ -2047,7 +2047,7 @@
         },
         {
           "record": 12,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field.",
           "issue": null,
@@ -2056,7 +2056,7 @@
         },
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter clears its bounded SQL-visible VGI event history with vgi_logs_clear().",
           "issue": null,
@@ -2065,7 +2065,7 @@
         },
         {
           "record": 19,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field.",
           "issue": null,
@@ -2074,7 +2074,7 @@
         },
         {
           "record": 23,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter clears its bounded SQL-visible VGI event history with vgi_logs_clear().",
           "issue": null,
@@ -2083,7 +2083,7 @@
         },
         {
           "record": 26,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/exchange_streaming.test.datafusion.json",
+          "mechanism": "overlay:cache/exchange_streaming.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion regexp_match returns capture groups as a list, and the adapter serializes the structured event name as the leading message field.",
           "issue": null,
@@ -2212,16 +2212,16 @@
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 7,
+        "exact": 8,
         "rendering_equivalent": 0,
-        "different": 2,
+        "different": 1,
         "unordered_subset": 0
       },
       "failure_buckets": {},
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/ineligible_reasons.test.datafusion.json",
+          "mechanism": "overlay:cache/ineligible_reasons.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion spells DuckDB's LIST aggregate array_agg; retaining the explicit element order preserves the exact result.",
           "issue": null,
@@ -2264,9 +2264,9 @@
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 6,
+        "exact": 7,
         "rendering_equivalent": 0,
-        "different": 3,
+        "different": 2,
         "unordered_subset": 0
       },
       "failure_buckets": {},
@@ -2609,7 +2609,7 @@
       "adaptations": [
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion plans this VGI table function before a prepared parameter has a literal value, so the worker's bind-time ConstParam cannot be formed.",
           "issue": null,
@@ -2618,7 +2618,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "Depends on the preceding unsupported prepared VGI ConstParam bind.",
           "issue": null,
@@ -2627,7 +2627,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "Depends on the preceding unsupported prepared VGI ConstParam bind.",
           "issue": null,
@@ -2636,7 +2636,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This hit assertion depends on the unsupported prepared VGI ConstParam execution above.",
           "issue": null,
@@ -2645,7 +2645,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "Depends on the preceding unsupported prepared VGI ConstParam bind.",
           "issue": null,
@@ -2654,7 +2654,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The expected entries are produced only by the unsupported prepared executions above.",
           "issue": null,
@@ -2663,7 +2663,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The expected parameterized keys are produced only by the unsupported prepared executions above.",
           "issue": null,
@@ -2672,7 +2672,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "One byte is an engine-independent over-cap bound for this Arrow result and preserves the test's intended refusal followed by RESET behavior.",
           "issue": null,
@@ -2681,7 +2681,7 @@
         },
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The statement discards its rows and exists to fill or refuse the cache; selecting the value column prevents DataFusion's zero-byte count(*) projection from making the one-byte cap inapplicable.",
           "issue": null,
@@ -2690,7 +2690,7 @@
         },
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/prepared_reset.test.datafusion.json",
+          "mechanism": "overlay:cache/prepared_reset.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The statement discards its rows and exists to verify that RESET permits the same full result to cache again; selecting the value column retains that cache-size witness.",
           "issue": null,
@@ -2763,7 +2763,7 @@
       "adaptations": [
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/query_shapes.test.datafusion.json",
+          "mechanism": "overlay:cache/query_shapes.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes the same ordered list aggregate as array_agg; ordering and element type are unchanged.",
           "issue": null,
@@ -2794,7 +2794,7 @@
       "adaptations": [
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/replay_shapes.test.datafusion.json",
+          "mechanism": "overlay:cache/replay_shapes.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion requires unique projection names; aliasing the duplicate expression changes only its column label, not its value or cache projection.",
           "issue": null,
@@ -2803,7 +2803,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/replay_shapes.test.datafusion.json",
+          "mechanism": "overlay:cache/replay_shapes.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion requires unique aggregate output names; the alias preserves the duplicated aggregate value asserted by SQLLogicTest.",
           "issue": null,
@@ -2812,7 +2812,7 @@
         },
         {
           "record": 12,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/replay_shapes.test.datafusion.json",
+          "mechanism": "overlay:cache/replay_shapes.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's array_agg is the equivalent list aggregate; explicit ordering preserves the replay window exactly.",
           "issue": null,
@@ -2864,6 +2864,30 @@
       "adaptations": []
     },
     {
+      "path": "cache/secret_ineligible.test",
+      "area": "result_cache",
+      "skipped": false,
+      "records": 17,
+      "expected_errors_ignored": 0,
+      "adapted_records": 0,
+      "executed": 7,
+      "failed": 9,
+      "not_applicable": 1,
+      "blocked": 0,
+      "timed_out": 0,
+      "values": {
+        "exact": 2,
+        "rendering_equivalent": 0,
+        "different": 1,
+        "unordered_subset": 0
+      },
+      "failure_buckets": {
+        "parse error (dialect)": 2,
+        "other": 7
+      },
+      "adaptations": []
+    },
+    {
       "path": "cache/spill.test",
       "area": "result_cache",
       "skipped": false,
@@ -2887,7 +2911,7 @@
       "adaptations": [
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/spill.test.datafusion.json",
+          "mechanism": "overlay:cache/spill.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DuckDB expects an over-memory-cap capture to spill instead of abort; the DataFusion adapter intentionally refuses it because no disk tier is implemented.",
           "issue": null,
@@ -2896,7 +2920,7 @@
         },
         {
           "record": 16,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/spill.test.datafusion.json",
+          "mechanism": "overlay:cache/spill.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "Requires serving a spilled entry from the unsupported streaming disk tier.",
           "issue": null,
@@ -2905,7 +2929,7 @@
         },
         {
           "record": 20,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/spill.test.datafusion.json",
+          "mechanism": "overlay:cache/spill.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DuckDB expects an over-memory-cap producer capture to spill instead of abort; DataFusion currently has no disk tier.",
           "issue": null,
@@ -2914,7 +2938,7 @@
         },
         {
           "record": 22,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/spill.test.datafusion.json",
+          "mechanism": "overlay:cache/spill.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "Requires serving a spilled producer entry from the unsupported streaming disk tier.",
           "issue": null,
@@ -2991,7 +3015,7 @@
       "adaptations": [
         {
           "record": 20,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/cache/spill_lifecycle.test.datafusion.json",
+          "mechanism": "overlay:cache/spill_lifecycle.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This assertion proves a whole-file hash crossover from the unsupported disk spill tier back into memory.",
           "issue": null,
@@ -3493,7 +3517,7 @@
       "adaptations": [
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/catalog/multi_branch_writes_refused.test.datafusion.json",
+          "mechanism": "overlay:catalog/multi_branch_writes_refused.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion does not parse DESCRIBE as a derived table; typeof inspects the same writable result column through the existing DataFusion compatibility function.",
           "issue": null,
@@ -3524,7 +3548,7 @@
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/catalog/window_self_join.test.datafusion.json",
+          "mechanism": "overlay:catalog/window_self_join.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion 55 does not execute this correlated scalar subquery shape; joining the independently grouped totals preserves the same per-row correctness assertion using its existing join and window APIs.",
           "issue": null,
@@ -3533,7 +3557,7 @@
         },
         {
           "record": 6,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/catalog/window_self_join.test.datafusion.json",
+          "mechanism": "overlay:catalog/window_self_join.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DuckDB resolves catalog scans through a synthetic vgi_table_scan function, while DataFusion resolves the equivalent provider through its catalog; information_schema.tables verifies that the attached scan remains resolvable after window planning.",
           "issue": null,
@@ -3967,7 +3991,7 @@
         },
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/blob.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/blob.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The runner can map DuckDB BLOB literals to DataFusion Binary, but DataFusion 55 cannot pass both n and b as top-level columns through this scalar-subquery table-function argument. Struct packing would change the VGI input schema.",
           "issue": null,
@@ -3985,7 +4009,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/blob.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/blob.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The runner can map DuckDB BLOB literals to DataFusion Binary, but DataFusion 55 cannot pass both n and b as top-level columns through this scalar-subquery table-function argument. Struct packing would change the VGI input schema.",
           "issue": null,
@@ -4016,7 +4040,7 @@
       "adaptations": [
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column.",
           "issue": null,
@@ -4025,7 +4049,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column.",
           "issue": null,
@@ -4034,7 +4058,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and filtered boolean column.",
           "issue": null,
@@ -4043,7 +4067,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would no longer test the original boolean validity path.",
           "issue": null,
@@ -4052,7 +4076,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would no longer test the original boolean validity path.",
           "issue": null,
@@ -4061,7 +4085,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and boolean membership filter.",
           "issue": null,
@@ -4070,7 +4094,7 @@
         },
         {
           "record": 15,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass the two top-level columns n and b through this scalar-subquery table-function argument; struct packing would change the VGI schema and boolean membership filter.",
           "issue": null,
@@ -4079,7 +4103,7 @@
         },
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This compound filter requires both input columns, but DataFusion 55 permits only one top-level scalar-subquery column for the table-function argument. Struct packing would change both referenced filter paths.",
           "issue": null,
@@ -4088,7 +4112,7 @@
         },
         {
           "record": 19,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/booleans.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/booleans.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This compound filter requires both input columns, but DataFusion 55 permits only one top-level scalar-subquery column for the table-function argument. Struct packing would change both referenced filter paths.",
           "issue": null,
@@ -4119,7 +4143,7 @@
       "adaptations": [
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/decimals.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/decimals.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) values and comparison literal without DataFusion literal simplification widening the near-cap integers.",
           "issue": null,
@@ -4128,7 +4152,7 @@
         },
         {
           "record": 15,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/decimals.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/decimals.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) input and pushed comparison literal, preserving the near-cap filter-pushdown assertion.",
           "issue": null,
@@ -4137,7 +4161,7 @@
         },
         {
           "record": 16,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/decimals.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/decimals.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) values and comparison literal without DataFusion literal simplification widening the near-cap integers.",
           "issue": null,
@@ -4146,7 +4170,7 @@
         },
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/decimals.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/decimals.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same Arrow Decimal128(38,0) input and pushed comparison literal, preserving the near-cap filter-pushdown assertion.",
           "issue": null,
@@ -4198,7 +4222,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/enums.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion has no session DDL for DuckDB enum types; adjacent reference values use Arrow Dictionary<UInt8, Utf8> directly.",
           "issue": null,
@@ -4207,7 +4231,7 @@
         },
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/enums.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference equality semantics without session enum DDL.",
           "issue": null,
@@ -4216,7 +4240,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/enums.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path.",
           "issue": null,
@@ -4225,7 +4249,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/enums.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference membership semantics without session enum DDL.",
           "issue": null,
@@ -4234,7 +4258,7 @@
         },
         {
           "record": 6,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/enums.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path.",
           "issue": null,
@@ -4243,7 +4267,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/enums.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same nullable Arrow Dictionary<UInt8, Utf8> values and preserves the enum reference NULL semantics without session enum DDL.",
           "issue": null,
@@ -4252,7 +4276,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/enums.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing the dictionary column into a struct would not test the same enum filter-pushdown path.",
           "issue": null,
@@ -4261,7 +4285,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/enums.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/enums.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion has no corresponding session enum type to drop; the reference dictionary values are exercised directly above.",
           "issue": null,
@@ -4292,7 +4316,7 @@
       "adaptations": [
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/floats.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and filtered floating-point column.",
           "issue": null,
@@ -4301,7 +4325,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/floats.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and range-filtered floating-point column.",
           "issue": null,
@@ -4310,7 +4334,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/floats.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and filtered Float32 column.",
           "issue": null,
@@ -4319,7 +4343,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/floats.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and would not validate NaN filter pushdown.",
           "issue": null,
@@ -4328,7 +4352,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/floats.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/floats.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot pass n and x as two top-level scalar-subquery columns to the table function. Struct packing would change the VGI input schema and would not validate infinity range pushdown.",
           "issue": null,
@@ -4359,7 +4383,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
           "issue": null,
@@ -4368,7 +4392,7 @@
         },
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
           "issue": null,
@@ -4377,7 +4401,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
           "issue": null,
@@ -4386,7 +4410,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
           "issue": null,
@@ -4395,7 +4419,7 @@
         },
         {
           "record": 6,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
           "issue": null,
@@ -4404,7 +4428,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
           "issue": null,
@@ -4413,7 +4437,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
           "issue": null,
@@ -4422,7 +4446,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
           "issue": null,
@@ -4431,7 +4455,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion uses only values within Decimal128(38,0); DataFusion arrow_cast preserves the exact integer values and comparison semantics without DuckDB HUGEINT/UHUGEINT syntax.",
           "issue": null,
@@ -4440,7 +4464,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/hugeint.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/hugeint.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and packing them into a struct would not test the same table-input or filter-pushdown path.",
           "issue": null,
@@ -4471,7 +4495,7 @@
       "adaptations": [
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4480,7 +4504,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4489,7 +4513,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4498,7 +4522,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4507,7 +4531,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4516,7 +4540,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4525,7 +4549,7 @@
         },
         {
           "record": 39,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4534,7 +4558,7 @@
         },
         {
           "record": 43,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4543,7 +4567,7 @@
         },
         {
           "record": 45,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4552,7 +4576,7 @@
         },
         {
           "record": 47,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API.",
           "issue": null,
@@ -4561,7 +4585,7 @@
         },
         {
           "record": 49,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's range table names its output value rather than DuckDB's range; aliasing it to n preserves the identical Int64 input and pushed predicate.",
           "issue": null,
@@ -4570,7 +4594,7 @@
         },
         {
           "record": 51,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API.",
           "issue": null,
@@ -4579,7 +4603,7 @@
         },
         {
           "record": 53,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/integers.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/integers.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, so this multi-column predicate cannot reach the worker through the existing table-function expression API.",
           "issue": null,
@@ -4610,7 +4634,7 @@
       "adaptations": [
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/null_logic.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/null_logic.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The SQL three-valued AND assertion needs both n and t, but DataFusion 55 permits only one top-level scalar-subquery column for the table function. Struct packing would change the VGI filter paths.",
           "issue": null,
@@ -4619,7 +4643,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/null_logic.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/null_logic.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The SQL three-valued OR assertion needs both n and t, but DataFusion 55 permits only one top-level scalar-subquery column for the table function. Struct packing would change the VGI filter paths.",
           "issue": null,
@@ -4628,7 +4652,7 @@
         },
         {
           "record": 19,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/null_logic.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/null_logic.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The equality-plus-validity assertion needs both n and t, but DataFusion 55 permits only one top-level scalar-subquery column for the table function. Struct packing would change the VGI filter paths.",
           "issue": null,
@@ -4659,7 +4683,7 @@
       "adaptations": [
         {
           "record": 39,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/strings.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/strings.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This compound predicate requires both s and t, but DataFusion 55 permits only one top-level scalar-subquery column for the table-function argument. Struct packing would change the VGI input schema and filter paths.",
           "issue": null,
@@ -4690,7 +4714,7 @@
       "adaptations": [
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and d into one struct would change the VGI input schema and no longer test filter pushdown on the original date column.",
           "issue": null,
@@ -4699,7 +4723,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and d into one struct would change the VGI input schema and no longer test range pushdown on the original date column.",
           "issue": null,
@@ -4708,7 +4732,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Packing n and t into one struct would change the VGI input schema and no longer test filter pushdown on the original time column.",
           "issue": null,
@@ -4717,7 +4741,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timestamp field.",
           "issue": null,
@@ -4726,7 +4750,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timestamp field.",
           "issue": null,
@@ -4735,7 +4759,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 permits only one top-level column in the scalar subquery used as a table-function argument. Struct packing would change the two-column VGI input and the filtered timezone-bearing timestamp field.",
           "issue": null,
@@ -4744,7 +4768,7 @@
         },
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's native arrow_cast constructs and compares the same Arrow millisecond-resolution timestamps without DuckDB's TIMESTAMP_MS type spelling.",
           "issue": null,
@@ -4753,7 +4777,7 @@
         },
         {
           "record": 15,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion can construct millisecond timestamps with arrow_cast, but its table-function scalar-subquery seam cannot carry both n and ts as top-level columns. Struct packing would change the VGI input schema.",
           "issue": null,
@@ -4762,7 +4786,7 @@
         },
         {
           "record": 16,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's native arrow_cast constructs and compares the same Arrow nanosecond-resolution timestamps without DuckDB's TIMESTAMP_NS type spelling.",
           "issue": null,
@@ -4771,7 +4795,7 @@
         },
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/temporal.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/temporal.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion can construct nanosecond timestamps with arrow_cast, but its table-function scalar-subquery seam cannot carry both n and ts as top-level columns. Struct packing would change the VGI input schema.",
           "issue": null,
@@ -4802,7 +4826,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/time_tz.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/time_tz.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no TIME WITH TIME ZONE SQL type or equivalent Arrow logical type constructor. Replacing TIMETZ with TIME, text, or binary would change the comparison semantics this record tests.",
           "issue": null,
@@ -4811,7 +4835,7 @@
         },
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/time_tz.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/time_tz.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot construct TIMETZ values and also cannot pass the two top-level input columns through the scalar-subquery table-function seam. A text or struct substitute would not test the same VGI filter.",
           "issue": null,
@@ -4820,7 +4844,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/time_tz.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/time_tz.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no TIME WITH TIME ZONE SQL type or equivalent Arrow logical type constructor. Substituting another nullable type would no longer exercise the TIMETZ validity path.",
           "issue": null,
@@ -4829,7 +4853,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/time_tz.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/time_tz.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot construct TIMETZ values and also cannot pass the two top-level input columns through the scalar-subquery table-function seam. Substitution would hide both protocol boundaries.",
           "issue": null,
@@ -4860,7 +4884,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/uuid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type.",
           "issue": null,
@@ -4869,7 +4893,7 @@
         },
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/uuid.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths.",
           "issue": null,
@@ -4878,7 +4902,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/uuid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type.",
           "issue": null,
@@ -4887,7 +4911,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/uuid.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths.",
           "issue": null,
@@ -4896,7 +4920,7 @@
         },
         {
           "record": 6,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/uuid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type.",
           "issue": null,
@@ -4905,7 +4929,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/uuid.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths.",
           "issue": null,
@@ -4914,7 +4938,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/uuid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This reference assertion compares only the UUID's canonical textual value, which DataFusion represents losslessly as UTF-8 despite having no UUID SQL type.",
           "issue": null,
@@ -4923,7 +4947,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/filter_pushdown/uuid.test.datafusion.json",
+          "mechanism": "overlay:filter_pushdown/uuid.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "The echo input has two top-level columns; DataFusion rejects a multi-column scalar subquery before VGI binds, and replacing UUID with text inside a packed struct would hide both the wide-input and UUID filter-pushdown paths.",
           "issue": null,
@@ -5017,7 +5041,7 @@
       "adaptations": [
         {
           "record": 12,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/global_functions/lifecycle.test.datafusion.json",
+          "mechanism": "overlay:global_functions/lifecycle.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DuckDB cannot unregister functions and therefore retains dead registration tombstones. DataFusion supports deregistration, so DETACH removes both the aliases and their live metadata.",
           "issue": null,
@@ -5177,25 +5201,25 @@
       "path": "macro/macros.test",
       "area": "catalog_metadata",
       "skipped": false,
-      "records": 19,
+      "records": 27,
       "expected_errors_ignored": 0,
       "adapted_records": 2,
-      "executed": 19,
+      "executed": 25,
       "failed": 0,
-      "not_applicable": 0,
+      "not_applicable": 2,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 17,
+        "exact": 19,
         "rendering_equivalent": 0,
-        "different": 0,
+        "different": 2,
         "unordered_subset": 0
       },
       "failure_buckets": {},
       "adaptations": [
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/macro/macros.test.datafusion.json",
+          "mechanism": "overlay:macro/macros.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's built-in range table function names its output column `value`; DuckDB names the equivalent column `range`.",
           "issue": null,
@@ -5204,7 +5228,7 @@
         },
         {
           "record": 18,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/macro/macros.test.datafusion.json",
+          "mechanism": "overlay:macro/macros.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's built-in range table function names its output column `value`; DuckDB names the equivalent column `range`.",
           "issue": null,
@@ -5256,7 +5280,7 @@
       "adaptations": [
         {
           "record": 22,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/overload/scalar_overload.test.datafusion.json",
+          "mechanism": "overlay:overload/scalar_overload.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast supplies the same UInt32 overload key as DuckDB's UINTEGER cast.",
           "issue": null,
@@ -5265,7 +5289,7 @@
         },
         {
           "record": 23,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/overload/scalar_overload.test.datafusion.json",
+          "mechanism": "overlay:overload/scalar_overload.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast supplies the same UInt64 overload key as DuckDB's UBIGINT cast.",
           "issue": null,
@@ -5548,7 +5572,7 @@
         },
         {
           "record": 16,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/binary_packet.test.datafusion.json",
+          "mechanism": "overlay:scalar/binary_packet.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's built-in octet_length accepts strings; encode the Binary result as two hex characters per byte and divide by two.",
           "issue": null,
@@ -5609,7 +5633,7 @@
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "mechanism": "overlay:scalar/dedup.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -5618,7 +5642,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "mechanism": "overlay:scalar/dedup.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion.",
           "issue": null,
@@ -5627,7 +5651,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "mechanism": "overlay:scalar/dedup.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -5636,7 +5660,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "mechanism": "overlay:scalar/dedup.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion.",
           "issue": null,
@@ -5645,7 +5669,7 @@
         },
         {
           "record": 16,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "mechanism": "overlay:scalar/dedup.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -5654,7 +5678,7 @@
         },
         {
           "record": 18,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/dedup.test.datafusion.json",
+          "mechanism": "overlay:scalar/dedup.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion.",
           "issue": null,
@@ -5685,7 +5709,7 @@
       "adaptations": [
         {
           "record": 44,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/double.test.datafusion.json",
+          "mechanism": "overlay:scalar/double.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DuckDB's HUGEINT crosses VGI as decimal128(38, 0); DataFusion spells that same Arrow physical type as DECIMAL(38, 0).",
           "issue": null,
@@ -5737,7 +5761,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_centroid.test.datafusion.json",
+          "mechanism": "overlay:scalar/geo_centroid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed point as DuckDB's typed struct literal.",
           "issue": null,
@@ -5746,7 +5770,7 @@
         },
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_centroid.test.datafusion.json",
+          "mechanism": "overlay:scalar/geo_centroid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -5755,7 +5779,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_centroid.test.datafusion.json",
+          "mechanism": "overlay:scalar/geo_centroid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -5764,7 +5788,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_centroid.test.datafusion.json",
+          "mechanism": "overlay:scalar/geo_centroid.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same per-row typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -5795,7 +5819,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_distance.test.datafusion.json",
+          "mechanism": "overlay:scalar/geo_distance.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -5804,7 +5828,7 @@
         },
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_distance.test.datafusion.json",
+          "mechanism": "overlay:scalar/geo_distance.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -5813,7 +5837,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/geo_distance.test.datafusion.json",
+          "mechanism": "overlay:scalar/geo_distance.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct plus Arrow Float64 casts constructs the same per-row typed points as DuckDB's typed struct literals.",
           "issue": null,
@@ -5844,7 +5868,7 @@
       "adaptations": [
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/hash_seed.test.datafusion.json",
+          "mechanism": "overlay:scalar/hash_seed.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's existing async-UDF executor evaluates remote functions in a projection; the derived table exposes that projection before the identical COUNT(DISTINCT) aggregate.",
           "issue": null,
@@ -5896,7 +5920,7 @@
       "adaptations": [
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "overlay:scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes Arrow UInt8 through arrow_cast rather than DuckDB's UTINYINT SQL type spelling.",
           "issue": null,
@@ -5905,7 +5929,7 @@
         },
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "overlay:scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes Arrow UInt8 through arrow_cast rather than DuckDB's UTINYINT SQL type spelling.",
           "issue": null,
@@ -5914,7 +5938,7 @@
         },
         {
           "record": 6,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "overlay:scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes Arrow UInt32 through arrow_cast rather than DuckDB's UINTEGER SQL type spelling.",
           "issue": null,
@@ -5923,7 +5947,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "overlay:scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast supplies the same UInt32 input used by DuckDB's UINTEGER cast.",
           "issue": null,
@@ -5932,7 +5956,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/numeric_promotion.test.datafusion.json",
+          "mechanism": "overlay:scalar/numeric_promotion.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast supplies the same UInt32 input used by DuckDB's UINTEGER cast.",
           "issue": null,
@@ -5963,7 +5987,7 @@
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "mechanism": "overlay:scalar/per_value.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -5972,7 +5996,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "mechanism": "overlay:scalar/per_value.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting each one-based first capture preserves the DuckDB assertion.",
           "issue": null,
@@ -5981,7 +6005,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "mechanism": "overlay:scalar/per_value.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -5990,7 +6014,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "mechanism": "overlay:scalar/per_value.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion.",
           "issue": null,
@@ -5999,7 +6023,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "mechanism": "overlay:scalar/per_value.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion.",
           "issue": null,
@@ -6008,7 +6032,7 @@
         },
         {
           "record": 18,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "mechanism": "overlay:scalar/per_value.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The DataFusion adapter exposes bounded session event history through vgi_logs() and clears that same history with vgi_logs_clear().",
           "issue": null,
@@ -6017,7 +6041,7 @@
         },
         {
           "record": 20,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/per_value.test.datafusion.json",
+          "mechanism": "overlay:scalar/per_value.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's regexp_match returns capture groups as a list, while this adapter serializes the structured event name as the first message field; selecting its one-based first capture preserves the DuckDB assertion.",
           "issue": null,
@@ -6090,7 +6114,7 @@
       "adaptations": [
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_catalogs.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_catalogs.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL catalog search path; qualified VGI catalog dispatch is covered by the preceding records.",
           "issue": null,
@@ -6099,7 +6123,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_catalogs.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_catalogs.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion does not implement DuckDB's mutable USE search path; the fully qualified call selects the same catalog implementation through DataFusion's existing catalog API.",
           "issue": null,
@@ -6108,7 +6132,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_catalogs.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_catalogs.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL catalog search path; qualified VGI catalog dispatch is covered by the preceding records.",
           "issue": null,
@@ -6117,7 +6141,7 @@
         },
         {
           "record": 12,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_catalogs.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_catalogs.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion does not implement DuckDB's mutable USE search path; the fully qualified call selects the same catalog implementation through DataFusion's existing catalog API.",
           "issue": null,
@@ -6126,7 +6150,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_catalogs.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_catalogs.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL catalog search path.",
           "issue": null,
@@ -6157,7 +6181,7 @@
       "adaptations": [
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_schemas.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_schemas.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL schema search path; qualified VGI schema dispatch is covered by the preceding records.",
           "issue": null,
@@ -6166,7 +6190,7 @@
         },
         {
           "record": 9,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_schemas.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_schemas.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion does not implement DuckDB's mutable USE search path; the fully qualified call selects the same schema implementation through DataFusion's existing catalog API.",
           "issue": null,
@@ -6175,7 +6199,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_schemas.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_schemas.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL schema search path; qualified VGI schema dispatch is covered by the preceding records.",
           "issue": null,
@@ -6184,7 +6208,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_schemas.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_schemas.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion does not implement DuckDB's mutable USE search path; the fully qualified call selects the same schema implementation through DataFusion's existing catalog API.",
           "issue": null,
@@ -6193,7 +6217,7 @@
         },
         {
           "record": 12,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/same_name_schemas.test.datafusion.json",
+          "mechanism": "overlay:scalar/same_name_schemas.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 does not implement the DuckDB USE statement or a mutable SQL schema search path.",
           "issue": null,
@@ -6245,7 +6269,7 @@
       "adaptations": [
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
+          "mechanism": "overlay:scalar/unnest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DuckDB overloads length for lists; DataFusion exposes the equivalent list cardinality operation as array_length.",
           "issue": null,
@@ -6254,7 +6278,7 @@
         },
         {
           "record": 7,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
+          "mechanism": "overlay:scalar/unnest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The corpus gives each file an isolated DataFusion session, so a session-lifetime table has the same scope as DuckDB's temporary table for this test.",
           "issue": null,
@@ -6263,7 +6287,7 @@
         },
         {
           "record": 8,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
+          "mechanism": "overlay:scalar/unnest_tensor.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This aggregate-to-scalar round trip requires a correlated UNNEST table input, which DataFusion 55 does not physically plan; literal 1D, 2D, sparse, and typed-null unnest_tensor calls remain covered.",
           "issue": null,
@@ -6272,7 +6296,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
+          "mechanism": "overlay:scalar/unnest_tensor.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This grouped aggregate-to-scalar round trip requires a correlated UNNEST table input, which DataFusion 55 does not physically plan.",
           "issue": null,
@@ -6281,7 +6305,7 @@
         },
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/unnest_tensor.test.datafusion.json",
+          "mechanism": "overlay:scalar/unnest_tensor.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion arrow_cast expresses the same named nested Arrow struct type as DuckDB's STRUCT/list cast syntax.",
           "issue": null,
@@ -6312,7 +6336,7 @@
       "adaptations": [
         {
           "record": 46,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/scalar/upper_case.test.datafusion.json",
+          "mechanism": "overlay:scalar/upper_case.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's existing async-UDF executor evaluates the remote upper_case call in a projection before the identical LENGTH and COUNT(DISTINCT) operations.",
           "issue": null,
@@ -6709,7 +6733,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/settings/struct_settings.test.datafusion.json",
+          "mechanism": "overlay:settings/struct_settings.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion ConfigExtension values are scalar strings; JSON preserves the worker's advertised Arrow Struct fields and types.",
           "issue": null,
@@ -6718,7 +6742,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/settings/struct_settings.test.datafusion.json",
+          "mechanism": "overlay:settings/struct_settings.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion ConfigExtension values are scalar strings; JSON preserves the worker's advertised Arrow Struct fields and types.",
           "issue": null,
@@ -6875,7 +6899,7 @@
       "adaptations": [
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/splits/cache_interaction.test.datafusion.json",
+          "mechanism": "overlay:splits/cache_interaction.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "Each SQLLogicTest file owns one isolated DataFusion SessionContext, so a session catalog table has the same lifetime and one-row snapshot semantics as DuckDB's temporary table here.",
           "issue": null,
@@ -6884,7 +6908,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/splits/cache_interaction.test.datafusion.json",
+          "mechanism": "overlay:splits/cache_interaction.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes the same retained adapter event rows through the duckdb_logs table function and names the completed VGI scan-planning RPC split_plan.complete.",
           "issue": null,
@@ -7410,16 +7434,16 @@
       "path": "table/comments.test",
       "area": "table_scans",
       "skipped": false,
-      "records": 12,
+      "records": 13,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 12,
+      "executed": 13,
       "failed": 0,
       "not_applicable": 0,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 9,
+        "exact": 10,
         "rendering_equivalent": 1,
         "different": 0,
         "unordered_subset": 0
@@ -7449,7 +7473,7 @@
       "adaptations": [
         {
           "record": 39,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DuckDB overloads LENGTH for lists; DataFusion exposes the identical list cardinality operation as array_length.",
           "issue": null,
@@ -7458,7 +7482,7 @@
         },
         {
           "record": 50,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's existing map function constructs the same empty Arrow Map<Utf8, Int32> value without DuckDB's MAP type-cast syntax.",
           "issue": null,
@@ -7467,7 +7491,7 @@
         },
         {
           "record": 65,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion expresses chained Arrow struct-field access with string subscripts; the selected nested field is identical.",
           "issue": null,
@@ -7476,7 +7500,7 @@
         },
         {
           "record": 66,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion expresses chained Arrow struct-field access with string subscripts; the selected nested field is identical.",
           "issue": null,
@@ -7485,7 +7509,7 @@
         },
         {
           "record": 70,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion uses a string subscript for the struct field after the same one-based list lookup.",
           "issue": null,
@@ -7494,7 +7518,7 @@
         },
         {
           "record": 71,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion uses a string subscript for the struct field after the same one-based list lookup.",
           "issue": null,
@@ -7503,7 +7527,7 @@
         },
         {
           "record": 82,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "String subscripts select DataFusion struct fields while integer subscripts retain the same one-based list indexing.",
           "issue": null,
@@ -7512,7 +7536,7 @@
         },
         {
           "record": 84,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "String subscripts select DataFusion struct fields while integer subscripts retain the same one-based list indexing.",
           "issue": null,
@@ -7521,7 +7545,7 @@
         },
         {
           "record": 125,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The assertion measures distinct returned struct values; DataFusion can hash the Arrow struct directly without DuckDB's display-string cast.",
           "issue": null,
@@ -7530,7 +7554,7 @@
         },
         {
           "record": 128,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This assertion is specifically about DuckDB's textual cast and ordering of an Arrow struct. DataFusion 55 does not cast nested structs to VARCHAR; the VGI multi-batch struct round-trip is covered by adjacent records.",
           "issue": null,
@@ -7561,7 +7585,7 @@
       "adaptations": [
         {
           "record": 12,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This maximum HUGEINT needs 39 decimal digits; DataFusion can carry the identical integer losslessly as Arrow Decimal256(39, 0).",
           "issue": null,
@@ -7570,7 +7594,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes the same Arrow UInt8 value through arrow_cast rather than DuckDB's UTINYINT spelling.",
           "issue": null,
@@ -7579,7 +7603,7 @@
         },
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same UInt8 scalar to the VGI vararg.",
           "issue": null,
@@ -7588,7 +7612,7 @@
         },
         {
           "record": 15,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes the same Arrow UInt16 value through arrow_cast rather than DuckDB's USMALLINT spelling.",
           "issue": null,
@@ -7597,7 +7621,7 @@
         },
         {
           "record": 16,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same UInt16 scalar to the VGI vararg.",
           "issue": null,
@@ -7606,7 +7630,7 @@
         },
         {
           "record": 17,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes the same Arrow UInt32 value through arrow_cast rather than DuckDB's UINTEGER spelling.",
           "issue": null,
@@ -7615,7 +7639,7 @@
         },
         {
           "record": 18,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same UInt32 scalar to the VGI vararg.",
           "issue": null,
@@ -7624,7 +7648,7 @@
         },
         {
           "record": 19,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion exposes the same Arrow UInt64 value through arrow_cast rather than DuckDB's UBIGINT spelling.",
           "issue": null,
@@ -7633,7 +7657,7 @@
         },
         {
           "record": 20,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same UInt64 scalar to the VGI vararg.",
           "issue": null,
@@ -7642,7 +7666,7 @@
         },
         {
           "record": 37,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion retains the Arrow second unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps.",
           "issue": null,
@@ -7651,7 +7675,7 @@
         },
         {
           "record": 38,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast constructs the same Arrow second-resolution timestamp sent by DuckDB TIMESTAMP_S.",
           "issue": null,
@@ -7660,7 +7684,7 @@
         },
         {
           "record": 39,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion retains the Arrow millisecond unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps.",
           "issue": null,
@@ -7669,7 +7693,7 @@
         },
         {
           "record": 40,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast constructs the same Arrow millisecond-resolution timestamp sent by DuckDB TIMESTAMP_MS.",
           "issue": null,
@@ -7678,7 +7702,7 @@
         },
         {
           "record": 41,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion retains the Arrow nanosecond unit but its DuckDB-compatible typeof surface intentionally reports the generic TIMESTAMP name for unzoned timestamps.",
           "issue": null,
@@ -7687,7 +7711,7 @@
         },
         {
           "record": 42,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's arrow_cast constructs the same Arrow nanosecond-resolution timestamp sent by DuckDB TIMESTAMP_NS.",
           "issue": null,
@@ -7714,7 +7738,7 @@
         },
         {
           "record": 53,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "Arrow has no UUID logical type and DataFusion 55 does not implement DuckDB's UUID SQL type; the wire value is covered by the following UTF-8 adaptation.",
           "issue": null,
@@ -7723,7 +7747,7 @@
         },
         {
           "record": 54,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This corpus assertion checks the UUID's canonical textual value, which DataFusion can send losslessly as Arrow UTF-8 even though it has no UUID SQL type.",
           "issue": null,
@@ -7732,7 +7756,7 @@
         },
         {
           "record": 55,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion has no session DDL for DuckDB enum types; VGI receives the enum's Arrow UTF-8 value, covered below.",
           "issue": null,
@@ -7741,7 +7765,7 @@
         },
         {
           "record": 56,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The upstream assertion expects VARCHAR because the DuckDB enum is intentionally reduced to Arrow UTF-8 across VGI.",
           "issue": null,
@@ -7750,7 +7774,7 @@
         },
         {
           "record": 57,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The VGI wire value is the same Arrow UTF-8 scalar after DuckDB removes enum identity.",
           "issue": null,
@@ -7759,7 +7783,7 @@
         },
         {
           "record": 58,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion has no corresponding session enum type to drop.",
           "issue": null,
@@ -7768,7 +7792,7 @@
         },
         {
           "record": 68,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/constant_columns_types.test.datafusion.json",
+          "mechanism": "overlay:table/constant_columns_types.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's existing map function constructs the same empty Arrow Map<Utf8, Int32> value without DuckDB's MAP type-cast syntax.",
           "issue": null,
@@ -7895,8 +7919,8 @@
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 13,
-        "rendering_equivalent": 0,
+        "exact": 12,
+        "rendering_equivalent": 1,
         "different": 4,
         "unordered_subset": 0
       },
@@ -8060,18 +8084,18 @@
       "path": "table/function_registration.test",
       "area": "table_scans",
       "skipped": false,
-      "records": 22,
+      "records": 23,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 22,
+      "executed": 23,
       "failed": 0,
       "not_applicable": 0,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 19,
+        "exact": 21,
         "rendering_equivalent": 0,
-        "different": 1,
+        "different": 0,
         "unordered_subset": 0
       },
       "failure_buckets": {},
@@ -8127,8 +8151,8 @@
       "expected_errors_ignored": 0,
       "adapted_records": 0,
       "executed": 4,
-      "failed": 2,
-      "not_applicable": 3,
+      "failed": 0,
+      "not_applicable": 5,
       "blocked": 0,
       "timed_out": 0,
       "values": {
@@ -8137,10 +8161,27 @@
         "different": 1,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 2
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 4,
+          "mechanism": "overlay:table/inlined_cardinality.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 exposes provider and physical cardinality through TableProvider::statistics and StatisticsContext, but its EXPLAIN formats do not render estimated cardinality; the focused cardinality test asserts Exact(10000) through both native APIs.",
+          "issue": null,
+          "original_sql": "EXPLAIN (FORMAT JSON) SELECT * FROM example.data.cardinality_inlined_table;",
+          "replacement_sql": null
+        },
+        {
+          "record": 8,
+          "mechanism": "overlay:table/inlined_cardinality.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 does not support DuckDB's EXPLAIN JSON format or render estimated cardinality in its other EXPLAIN formats; this is an engine presentation boundary, not a VGI protocol adaptation.",
+          "issue": null,
+          "original_sql": "EXPLAIN (FORMAT JSON) SELECT * FROM example.data.ten_thousand_table;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "table/inlined_scan_function.test",
@@ -8185,7 +8226,7 @@
       "adaptations": [
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/join_keys_pushdown.test.datafusion.json",
+          "mechanism": "overlay:table/join_keys_pushdown.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This assertion observes DuckDB's dynamic_or_filter_threshold mutation. DataFusion 55 chooses InList versus its existing hash-table lookup representation internally and exposes no equivalent mutable threshold setting.",
           "issue": null,
@@ -8243,7 +8284,7 @@
       "adaptations": [
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/late_materialization.test.datafusion.json",
+          "mechanism": "overlay:table/late_materialization.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion returns regular-expression capture groups as a list; selecting its one-based first capture preserves DuckDB regexp_extract(..., 1) for the worker's pushdown witness.",
           "issue": null,
@@ -8252,7 +8293,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/late_materialization.test.datafusion.json",
+          "mechanism": "overlay:table/late_materialization.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion returns regular-expression capture groups as a list; selecting its one-based first capture preserves DuckDB regexp_extract(..., 1) for the worker's pushdown witness.",
           "issue": null,
@@ -8261,7 +8302,7 @@
         },
         {
           "record": 15,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/late_materialization.test.datafusion.json",
+          "mechanism": "overlay:table/late_materialization.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion returns regular-expression capture groups as a list; selecting its one-based first capture preserves DuckDB regexp_extract(..., 1) for the worker's pushdown witness.",
           "issue": null,
@@ -8283,9 +8324,9 @@
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 1,
+        "exact": 3,
         "rendering_equivalent": 0,
-        "different": 7,
+        "different": 5,
         "unordered_subset": 0
       },
       "failure_buckets": {},
@@ -8341,20 +8382,30 @@
       "skipped": false,
       "records": 18,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
+      "adapted_records": 1,
       "executed": 18,
       "failed": 0,
       "not_applicable": 0,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 5,
-        "rendering_equivalent": 0,
-        "different": 11,
+        "exact": 6,
+        "rendering_equivalent": 9,
+        "different": 1,
         "unordered_subset": 1
       },
       "failure_buckets": {},
-      "adaptations": []
+      "adaptations": [
+        {
+          "record": 4,
+          "mechanism": "overlay:table/order_pushdown.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "DuckDB defaults DESC to NULLS LAST while DataFusion follows PostgreSQL-style NULLS FIRST; the explicit clause preserves the source corpus's intended null policy.",
+          "issue": null,
+          "original_sql": "SELECT * FROM example.order_echo(100) ORDER BY n DESC LIMIT 2;",
+          "replacement_sql": "SELECT * FROM example.order_echo(100) ORDER BY n DESC NULLS LAST LIMIT 2;"
+        }
+      ]
     },
     {
       "path": "table/partition_columns.test",
@@ -8527,7 +8578,7 @@
       "adaptations": [
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_basic.test.datafusion.json",
+          "mechanism": "overlay:table/required_filters_basic.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "TOP is a DataFusion SQL keyword; quoting preserves the catalog column name and predicate semantics.",
           "issue": null,
@@ -8642,7 +8693,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_prefix.test.datafusion.json",
+          "mechanism": "overlay:table/required_filters_prefix.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct constructor is equivalent to DuckDB's typed struct literal.",
           "issue": null,
@@ -8651,7 +8702,7 @@
         },
         {
           "record": 3,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_prefix.test.datafusion.json",
+          "mechanism": "overlay:table/required_filters_prefix.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion's named_struct constructor is equivalent to DuckDB's typed struct literal.",
           "issue": null,
@@ -8660,7 +8711,7 @@
         },
         {
           "record": 4,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_prefix.test.datafusion.json",
+          "mechanism": "overlay:table/required_filters_prefix.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "Nested DataFusion named_struct calls preserve the same nested Arrow Struct value.",
           "issue": null,
@@ -8691,7 +8742,7 @@
       "adaptations": [
         {
           "record": 2,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table/required_filters_rowid.test.datafusion.json",
+          "mechanism": "overlay:table/required_filters_rowid.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "This assertion targets DuckDB's hidden virtual rowid sentinel. DataFusion exposes only the worker's physical row_id column and has no equivalent virtual-rowid provider contract.",
           "issue": null,
@@ -8772,21 +8823,29 @@
       "records": 23,
       "expected_errors_ignored": 0,
       "adapted_records": 0,
-      "executed": 17,
-      "failed": 5,
-      "not_applicable": 1,
+      "executed": 21,
+      "failed": 0,
+      "not_applicable": 2,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 16,
+        "exact": 20,
         "rendering_equivalent": 0,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "other": 5
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 17,
+          "mechanism": "overlay:table/set_operations_and_subqueries.test.datafusion.json",
+          "kind": "out_of_scope",
+          "reason": "DataFusion 55 cannot lower the correlated ScalarSubquery expression containing the VGI aggregate into a physical plan. Uncorrelated scalar subqueries, IN/NOT IN/EXISTS, CTEs, set operations, and semi/anti joins use existing DataFusion plans and remain applicable.",
+          "issue": null,
+          "original_sql": "SELECT t.x, (SELECT example.main.vgi_sum(s.n) FROM example.main.sequence(5) s WHERE s.n <= t.x) AS partial_sum\nFROM (VALUES (0::BIGINT), (2::BIGINT), (4::BIGINT)) t(x)\nORDER BY t.x;",
+          "replacement_sql": null
+        }
+      ]
     },
     {
       "path": "table/table_function_statistics.test",
@@ -8815,22 +8874,84 @@
       "skipped": false,
       "records": 10,
       "expected_errors_ignored": 0,
-      "adapted_records": 0,
-      "executed": 3,
-      "failed": 7,
+      "adapted_records": 7,
+      "executed": 10,
+      "failed": 0,
       "not_applicable": 0,
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 1,
-        "rendering_equivalent": 0,
+        "exact": 7,
+        "rendering_equivalent": 1,
         "different": 0,
         "unordered_subset": 0
       },
-      "failure_buckets": {
-        "parse error (dialect)": 7
-      },
-      "adaptations": []
+      "failure_buckets": {},
+      "adaptations": [
+        {
+          "record": 3,
+          "mechanism": "overlay:table/tablesample.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "sqlparser spells the standard percentage unit as PERCENT; the VGI SYSTEM sampling hint is unchanged.",
+          "issue": null,
+          "original_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(10%);",
+          "replacement_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(10 PERCENT);"
+        },
+        {
+          "record": 4,
+          "mechanism": "overlay:table/tablesample.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "sqlparser spells the standard percentage unit as PERCENT; percentage and repeatable seed are unchanged.",
+          "issue": null,
+          "original_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(50%) REPEATABLE(42);",
+          "replacement_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(50 PERCENT) REPEATABLE(42);"
+        },
+        {
+          "record": 5,
+          "mechanism": "overlay:table/tablesample.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "sqlparser spells the standard percentage unit as PERCENT; 100-percent Bernoulli remains the identity and is not sent as a VGI hint.",
+          "issue": null,
+          "original_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE BERNOULLI(100%);",
+          "replacement_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE BERNOULLI(100 PERCENT);"
+        },
+        {
+          "record": 6,
+          "mechanism": "overlay:table/tablesample.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "sqlparser spells the standard percentage unit as PERCENT; the VGI SYSTEM sampling hint is unchanged.",
+          "issue": null,
+          "original_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(100%);",
+          "replacement_sql": "SELECT * FROM example.sample_echo(3) TABLESAMPLE SYSTEM(100 PERCENT);"
+        },
+        {
+          "record": 7,
+          "mechanism": "overlay:table/tablesample.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "sqlparser spells the standard percentage unit as PERCENT; sampling and filter semantics are unchanged.",
+          "issue": null,
+          "original_sql": "SELECT * FROM example.sample_echo(5) TABLESAMPLE SYSTEM(50%) WHERE n < 3;",
+          "replacement_sql": "SELECT * FROM example.sample_echo(5) TABLESAMPLE SYSTEM(50 PERCENT) WHERE n < 3;"
+        },
+        {
+          "record": 8,
+          "mechanism": "overlay:table/tablesample.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "sqlparser spells the standard percentage unit as PERCENT; sampling and projection semantics are unchanged.",
+          "issue": null,
+          "original_sql": "SELECT n, sample_percentage FROM example.sample_echo(3) TABLESAMPLE SYSTEM(25%);",
+          "replacement_sql": "SELECT n, sample_percentage FROM example.sample_echo(3) TABLESAMPLE SYSTEM(25 PERCENT);"
+        },
+        {
+          "record": 9,
+          "mechanism": "overlay:table/tablesample.test.datafusion.json",
+          "kind": "equivalent_sql",
+          "reason": "sqlparser spells the standard percentage unit as PERCENT; the sample is absorbed into the VGI scan with no local sampling operator.",
+          "issue": null,
+          "original_sql": "EXPLAIN SELECT * FROM example.sample_echo(10) TABLESAMPLE SYSTEM(10%);",
+          "replacement_sql": "EXPLAIN SELECT * FROM example.sample_echo(10) TABLESAMPLE SYSTEM(10 PERCENT);"
+        }
+      ]
     },
     {
       "path": "table/time_travel.test",
@@ -9179,7 +9300,7 @@
       "adaptations": [
         {
           "record": 5,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "This corpus assertion checks the UUID's canonical textual map key, which DataFusion can send losslessly as Arrow UTF-8 even though it has no UUID SQL type.",
           "issue": null,
@@ -9197,7 +9318,7 @@
         },
         {
           "record": 10,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion map and named_struct construct the same Arrow Map<Utf8, Struct<x: Int32, y: Utf8>> value without DuckDB map-cast syntax.",
           "issue": null,
@@ -9206,7 +9327,7 @@
         },
         {
           "record": 11,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "Nested DataFusion map calls construct the same Arrow map-of-map value without DuckDB nested MAP literal syntax.",
           "issue": null,
@@ -9215,7 +9336,7 @@
         },
         {
           "record": 13,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The unreachable typed map branch gives NULL the same Arrow Map<Utf8, Int32> type without DuckDB MAP type-cast syntax.",
           "issue": null,
@@ -9224,7 +9345,7 @@
         },
         {
           "record": 14,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion map over typed empty key/value lists constructs the same non-NULL empty Arrow Map<Utf8, Int32>.",
           "issue": null,
@@ -9233,7 +9354,7 @@
         },
         {
           "record": 19,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same Arrow FixedSizeList<Struct<x: Int32>, 3> value without DuckDB fixed-array cast syntax.",
           "issue": null,
@@ -9242,7 +9363,7 @@
         },
         {
           "record": 20,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs each inner Arrow FixedSizeList<Int32, 3>, preserving the outer variable List shape.",
           "issue": null,
@@ -9251,7 +9372,7 @@
         },
         {
           "record": 21,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast constructs the same outer Arrow FixedSizeList<List<Int32>, 3> value without DuckDB fixed-array cast syntax.",
           "issue": null,
@@ -9260,7 +9381,7 @@
         },
         {
           "record": 22,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no SQL expression that constructs an Arrow Union value; replacing it with a struct or scalar would stop testing the union protocol path. Adjacent non-union nested struct coverage remains executable below.",
           "issue": null,
@@ -9269,7 +9390,7 @@
         },
         {
           "record": 26,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting text or generic binary would not test the same wire value. Adjacent Arrow Binary key/value round-trips remain covered by records 8 and 48.",
           "issue": null,
@@ -9278,7 +9399,7 @@
         },
         {
           "record": 27,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting text or generic binary would not test the same multi-width wire values. Adjacent Arrow Binary round-trips remain covered by records 8 and 48.",
           "issue": null,
@@ -9287,7 +9408,7 @@
         },
         {
           "record": 28,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot construct BIT list elements because it has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting strings would not test the nested BIT protocol path. Adjacent ordinary Arrow list round-trips remain executable.",
           "issue": null,
@@ -9296,7 +9417,7 @@
         },
         {
           "record": 29,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 cannot construct a BIT struct child because it has no BIT SQL type or equivalent Arrow bit-vector constructor; substituting a string would not test the nested BIT protocol path. Adjacent ordinary Arrow struct round-trips remain executable.",
           "issue": null,
@@ -9305,7 +9426,7 @@
         },
         {
           "record": 30,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DuckDB JSON crosses Arrow IPC as UTF-8; the replacement sends the identical JSON bytes through echo without DataFusion-unsupported JSON syntax.",
           "issue": null,
@@ -9314,7 +9435,7 @@
         },
         {
           "record": 31,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DuckDB JSON list elements cross Arrow IPC as UTF-8, so the replacement preserves the identical Arrow List<Utf8> values.",
           "issue": null,
@@ -9323,7 +9444,7 @@
         },
         {
           "record": 32,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DuckDB JSON inside the struct crosses Arrow IPC as UTF-8, preserving the identical Struct<payload: Utf8, id: Int32> value.",
           "issue": null,
@@ -9332,7 +9453,7 @@
         },
         {
           "record": 33,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The unreachable named_struct branch gives NULL the same Arrow Struct<a: Int32, b: Utf8> type without DuckDB struct-cast syntax.",
           "issue": null,
@@ -9341,7 +9462,7 @@
         },
         {
           "record": 38,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "Typed NULL expressions construct the same Arrow List<Struct<x: Int32>> containing two NULL struct elements.",
           "issue": null,
@@ -9350,7 +9471,7 @@
         },
         {
           "record": 39,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "named_struct plus a typed NULL constructs the same Arrow List<Struct<a: Int32>> and retains the original round-trip EXCEPT assertion.",
           "issue": null,
@@ -9359,7 +9480,7 @@
         },
         {
           "record": 40,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The typed NULL expression produces the same 1,000-row Arrow Struct<a: Int32, b: Utf8> validity pattern.",
           "issue": null,
@@ -9368,7 +9489,7 @@
         },
         {
           "record": 41,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "The typed NULL expression preserves the same all-NULL Arrow struct column and distinct-count assertion.",
           "issue": null,
@@ -9377,7 +9498,7 @@
         },
         {
           "record": 42,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "named_struct and VALUES inference construct the same Arrow Struct<a: Int32, b: List<Int32>> rows, including top-level, field, and empty-list cases, while retaining the EXCEPT assertion.",
           "issue": null,
@@ -9395,7 +9516,7 @@
         },
         {
           "record": 51,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion-native constructors preserve the zero-row Arrow schema: Struct<i: Decimal128(38,0), d: Date32, b: Binary>.",
           "issue": null,
@@ -9404,7 +9525,7 @@
         },
         {
           "record": 52,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "DataFusion map and named_struct preserve the zero-row Arrow Map<Int64, Struct<a: Int32, b: Utf8>> schema.",
           "issue": null,
@@ -9413,7 +9534,7 @@
         },
         {
           "record": 55,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion has no session DDL for DuckDB enum types; the corresponding Arrow dictionary values are exercised by reviewed arrow_cast replacements below.",
           "issue": null,
@@ -9422,7 +9543,7 @@
         },
         {
           "record": 56,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum child inside the struct without DataFusion session enum DDL.",
           "issue": null,
@@ -9431,7 +9552,7 @@
         },
         {
           "record": 57,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum values inside the list.",
           "issue": null,
@@ -9440,7 +9561,7 @@
         },
         {
           "record": 58,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum map keys.",
           "issue": null,
@@ -9449,7 +9570,7 @@
         },
         {
           "record": 59,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum map values.",
           "issue": null,
@@ -9458,7 +9579,7 @@
         },
         {
           "record": 60,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same Arrow Dictionary<UInt8, Utf8> enum key and nested struct child.",
           "issue": null,
@@ -9467,7 +9588,7 @@
         },
         {
           "record": 61,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same mixed non-NULL/NULL Arrow Dictionary<UInt8, Utf8> column.",
           "issue": null,
@@ -9476,7 +9597,7 @@
         },
         {
           "record": 62,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast supplies the same top-level NULL Arrow Dictionary<UInt8, Utf8> value.",
           "issue": null,
@@ -9485,7 +9606,7 @@
         },
         {
           "record": 63,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion has no corresponding session enum type to drop; records 56-62 exercise the adjacent Arrow Dictionary<UInt8, Utf8> round-trips directly with arrow_cast.",
           "issue": null,
@@ -9494,7 +9615,7 @@
         },
         {
           "record": 64,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion has no session DDL for a query-defined DuckDB enum; the Int16 Arrow dictionary values are exercised below.",
           "issue": null,
@@ -9503,7 +9624,7 @@
         },
         {
           "record": 65,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast dictionary-encodes the 500 values with Int16 indices, preserving the large-enum Arrow wire shape and row count.",
           "issue": null,
@@ -9512,7 +9633,7 @@
         },
         {
           "record": 66,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "equivalent_sql",
           "reason": "arrow_cast dictionary-encodes the 500 values with Int16 indices, preserving the large-enum Arrow wire shape for distinct counting.",
           "issue": null,
@@ -9521,7 +9642,7 @@
         },
         {
           "record": 67,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion has no corresponding session enum type to drop; records 65-66 exercise the adjacent Arrow Dictionary<UInt16, Utf8> round-trips directly with arrow_cast.",
           "issue": null,
@@ -9530,7 +9651,7 @@
         },
         {
           "record": 68,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no SQL expression that constructs mixed-variant Arrow Union values; a scalar/struct substitute would hide the untested protocol path. Adjacent multi-row nested Arrow struct/map/list and dictionary round-trips remain executable.",
           "issue": null,
@@ -9539,7 +9660,7 @@
         },
         {
           "record": 69,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no SQL expression that constructs nullable mixed-variant Arrow Union values; a substitute would hide the untested protocol path. Adjacent nullable nested Arrow struct/list and dictionary round-trips remain executable.",
           "issue": null,
@@ -9548,7 +9669,7 @@
         },
         {
           "record": 70,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no SQL expression that constructs Arrow Union values with struct/list children; substitutes would not test the same wire type. The adjacent standalone Arrow struct/list combinations remain executable.",
           "issue": null,
@@ -9557,7 +9678,7 @@
         },
         {
           "record": 71,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no SQL expression that constructs an Arrow Union child inside a struct; a substitute would not test the same wire type. The adjacent standalone Arrow struct round-trips remain executable.",
           "issue": null,
@@ -9566,7 +9687,7 @@
         },
         {
           "record": 72,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no SQL expression that constructs Arrow Union values inside a map; a substitute would not test the same wire type. The adjacent non-union Arrow map-of-struct/list/map round-trips remain executable.",
           "issue": null,
@@ -9575,7 +9696,7 @@
         },
         {
           "record": 73,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no SQL expression that constructs three-variant Arrow Union values; scalar substitutes would not test the same wire type. Adjacent multi-row primitive and nested Arrow round-trips remain executable.",
           "issue": null,
@@ -9584,7 +9705,7 @@
         },
         {
           "record": 74,
-          "mechanism": "/home/ec2-user/Development/vgi-datafusion/corpus/overlays/table_in_out/echo/nested_type_combinations.test.datafusion.json",
+          "mechanism": "overlay:table_in_out/echo/nested_type_combinations.test.datafusion.json",
           "kind": "out_of_scope",
           "reason": "DataFusion 55 has no SQL expression that constructs even a zero-row Arrow Union schema, so this bind-only union path cannot be expressed equivalently. Adjacent zero-row Arrow struct and map schemas remain covered by records 51-52.",
           "issue": null,
@@ -9767,9 +9888,9 @@
       "blocked": 0,
       "timed_out": 0,
       "values": {
-        "exact": 3,
+        "exact": 5,
         "rendering_equivalent": 0,
-        "different": 5,
+        "different": 3,
         "unordered_subset": 0
       },
       "failure_buckets": {
