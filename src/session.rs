@@ -1798,7 +1798,21 @@ fn rewrite_vgi_sql(ctx: &SessionContext, statement: &mut DFStatement) -> DFResul
 
         fn post_visit_expr(&mut self, expr: &mut SQLExpr) -> ControlFlow<Self::Break> {
             match expand_scalar_macro(self.ctx, expr, &mut self.scalar_macros) {
-                Ok(Some(expanded)) => *expr = expanded,
+                Ok(Some(expanded)) => {
+                    *expr = expanded;
+                    // A post-visit replacement is not walked by sqlparser's
+                    // visitor. Revisit the installed body so table macros in
+                    // scalar subqueries are expanded and qualified through the
+                    // same adapter path as table macros written by the caller.
+                    // Nested scalar calls were already expanded (with cycle
+                    // detection) by `expand_scalar_macro` itself.
+                    if let ControlFlow::Break(error) = expr.visit(self) {
+                        return ControlFlow::Break(error);
+                    }
+                    // The nested visit also applied the nullary-aggregate row
+                    // witness where needed; do not process this root twice.
+                    return ControlFlow::Continue(());
+                }
                 Ok(None) => {}
                 Err(error) => return ControlFlow::Break(Box::new(error)),
             }
@@ -3539,6 +3553,34 @@ mod tests {
             )
             .await,
             4
+        );
+    }
+
+    #[tokio::test]
+    async fn scalar_macro_subqueries_expand_nested_table_macros() {
+        let ctx = SessionContext::new();
+        install_test_macro(
+            &ctx,
+            &["example.vgi_range_table", "example.main.vgi_range_table"],
+            SqlMacroKind::Table,
+            &["n"],
+            &[],
+            "SELECT * FROM range(n)",
+        );
+        install_test_macro(
+            &ctx,
+            &["example.vgi_clamp", "example.main.vgi_clamp"],
+            SqlMacroKind::Scalar,
+            &["val", "lo", "hi"],
+            &[("lo", 0), ("hi", 100)],
+            "(SELECT GREATEST(lo, LEAST(hi, val)) \
+             FROM example.main.vgi_range_table(1) LIMIT 1)",
+        );
+
+        assert_eq!(query_i64(&ctx, "SELECT example.vgi_clamp(125)").await, 100);
+        assert_eq!(
+            query_i64(&ctx, "SELECT example.main.vgi_clamp(-5, lo := 10)").await,
+            10
         );
     }
 

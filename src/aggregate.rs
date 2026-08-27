@@ -303,6 +303,7 @@ impl VgiAggregateUdf {
             use_window_callback,
             row_witness,
             buffered: Vec::new(),
+            window_worker: None,
         }))
     }
 }
@@ -426,6 +427,169 @@ struct VgiAccumulator {
     /// One buffer per argument; `buffered[i]` are the chunks seen for argument
     /// `i`, concatenated only when needed.
     buffered: Vec<Vec<ArrayRef>>,
+    /// A dedicated blocking thread retains one HTTP/stream connection and one
+    /// aggregate bind across every frame in this accumulator. DataFusion's
+    /// sliding-accumulator API invokes `evaluate` once per output row; opening
+    /// the complete VGI lifecycle for each invocation made a 5,000-row window
+    /// perform tens of thousands of avoidable HTTP requests.
+    window_worker: Option<WindowWorker>,
+}
+
+enum WindowCommand {
+    Evaluate {
+        batch: datafusion::arrow::record_batch::RecordBatch,
+        reply: std::sync::mpsc::SyncSender<DFResult<ScalarValue>>,
+    },
+    Stop,
+}
+
+struct WindowWorker {
+    commands: std::sync::mpsc::Sender<WindowCommand>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for WindowWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WindowWorker").finish_non_exhaustive()
+    }
+}
+
+impl WindowWorker {
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        conn: VgiConnection,
+        catalog: String,
+        schema_name: String,
+        function: String,
+        arguments: Arguments,
+        required_secrets: Vec<vgi_client::SecretLookupRequest>,
+        input_schema: Arc<datafusion::arrow::datatypes::Schema>,
+    ) -> DFResult<Self> {
+        use vgi_client::{BindSpec, FunctionType};
+
+        let (commands, receiver) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::Builder::new()
+            .name("vgi-window-rpc".to_string())
+            .spawn(move || {
+                let initialized = (|| {
+                    let mut client = conn.connect()?;
+                    let attached = conn.attach(&mut client, &catalog)?;
+                    let mut spec = BindSpec::table(&function).in_schema(&schema_name);
+                    spec.function_type = FunctionType::Aggregate;
+                    spec.arguments = arguments;
+                    let bound = aggregate_bind(
+                        &conn,
+                        &mut client,
+                        &attached,
+                        &spec,
+                        &input_schema,
+                        &required_secrets,
+                    )?;
+                    Ok::<_, DataFusionError>((client, attached, bound))
+                })();
+                let (mut client, attached, bound) = match initialized {
+                    Ok(session) => {
+                        if ready_tx.send(Ok(())).is_err() {
+                            return;
+                        }
+                        session
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+
+                let mut reusable = true;
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        WindowCommand::Evaluate { batch, reply } => {
+                            let result =
+                                evaluate_window_frame(&mut client, &bound, &function, &batch);
+                            reusable = result.is_ok();
+                            let failed = result.is_err();
+                            if failed {
+                                client.poison();
+                            }
+                            if reply.send(result).is_err() || failed {
+                                break;
+                            }
+                        }
+                        WindowCommand::Stop => break,
+                    }
+                }
+                if reusable {
+                    let _ = client.with(|client| client.aggregate_destroy(&attached, &bound, &[0]));
+                }
+            })
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+
+        ready_rx.recv().map_err(|_| {
+            DataFusionError::Execution(
+                "VGI window worker exited before initialization completed".to_string(),
+            )
+        })??;
+        Ok(Self {
+            commands,
+            thread: Some(thread),
+        })
+    }
+
+    fn evaluate(
+        &self,
+        batch: datafusion::arrow::record_batch::RecordBatch,
+    ) -> DFResult<ScalarValue> {
+        let (reply, result) = std::sync::mpsc::sync_channel(0);
+        self.commands
+            .send(WindowCommand::Evaluate { batch, reply })
+            .map_err(|_| {
+                DataFusionError::Execution("VGI window worker is no longer running".to_string())
+            })?;
+        result.recv().map_err(|_| {
+            DataFusionError::Execution(
+                "VGI window worker exited without returning a result".to_string(),
+            )
+        })?
+    }
+}
+
+impl Drop for WindowWorker {
+    fn drop(&mut self) {
+        let _ = self.commands.send(WindowCommand::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn evaluate_window_frame(
+    client: &mut vgi_client::PooledClient,
+    bound: &vgi_client::BoundAggregate,
+    function: &str,
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+) -> DFResult<ScalarValue> {
+    let rows = batch.num_rows() as i64;
+    let partition = client
+        .with(|client| client.window_init(bound, 0, batch))
+        .map_err(to_df)?;
+    let evaluated = client.with(|client| client.window_evaluate(&partition, 0, &[(0, rows)]));
+    let out = match evaluated {
+        Ok(out) => out,
+        Err(error) => return Err(to_df(error)),
+    };
+    client
+        .with(|client| client.window_destroy(&partition))
+        .map_err(to_df)?;
+
+    if out.num_rows() != 1 || out.num_columns() == 0 {
+        return Err(DataFusionError::Execution(format!(
+            "VGI window aggregate `{function}` evaluated to {} rows / {} columns; expected one value",
+            out.num_rows(),
+            out.num_columns()
+        )));
+    }
+    ScalarValue::try_from_array(out.column(0), 0)
 }
 
 impl VgiAccumulator {
@@ -569,13 +733,30 @@ impl Accumulator for VgiAccumulator {
         let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
             .with_row_count(Some(row_count));
         let batch = RecordBatch::try_new_with_options(schema.clone(), columns, &options)?;
+        if self.use_window_callback {
+            if self.window_worker.is_none() {
+                self.window_worker = Some(WindowWorker::start(
+                    self.conn.clone(),
+                    self.catalog.clone(),
+                    self.schema_name.clone(),
+                    self.function.clone(),
+                    self.arguments.clone(),
+                    self.required_secrets.clone(),
+                    schema,
+                )?);
+            }
+            return self
+                .window_worker
+                .as_ref()
+                .expect("window worker was initialized")
+                .evaluate(batch);
+        }
         let conn = self.conn.clone();
         let catalog = self.catalog.clone();
         let schema_name = self.schema_name.clone();
         let function = self.function.clone();
         let arguments = self.arguments.clone();
         let required_secrets = self.required_secrets.clone();
-        let use_window_callback = self.use_window_callback;
 
         // DataFusion invokes `Accumulator::evaluate` synchronously while
         // polling its async execution streams. HTTP uses reqwest::blocking,
@@ -597,32 +778,6 @@ impl Accumulator for VgiAccumulator {
                 &schema,
                 &required_secrets,
             )?;
-
-            if use_window_callback {
-                let rows = batch.num_rows() as i64;
-                let partition = match client.window_init(&bound, 0, &batch).map_err(to_df) {
-                    Ok(partition) => partition,
-                    Err(error) => {
-                        let _ = client.aggregate_destroy(&attached, &bound, &[0]);
-                        return Err(error);
-                    }
-                };
-                let evaluated = client
-                    .window_evaluate(&partition, 0, &[(0, rows)])
-                    .map_err(to_df);
-                let _ = client.window_destroy(&partition);
-                let _ = client.aggregate_destroy(&attached, &bound, &[0]);
-                let out = evaluated?;
-
-                if out.num_rows() != 1 || out.num_columns() == 0 {
-                    return Err(DataFusionError::Execution(format!(
-                        "VGI window aggregate `{function}` evaluated to {} rows / {} columns; expected one value",
-                        out.num_rows(),
-                        out.num_columns()
-                    )));
-                }
-                return ScalarValue::try_from_array(out.column(0), 0);
-            }
 
             // A single group: this accumulator *is* one group, and DataFusion
             // has already partitioned the rows for us.

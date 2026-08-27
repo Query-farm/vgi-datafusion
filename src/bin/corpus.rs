@@ -301,10 +301,11 @@ fn agrees_modulo_rendering(expected: &[String], got: &[String]) -> bool {
 /// Match DuckDB EXPLAIN assertions to the equivalent DataFusion node names.
 ///
 /// DuckDB emits only its physical row and calls the nodes `EMPTY_RESULT` and
-/// `VGI_TABLE_SCAN`; DataFusion emits logical plus physical rows and calls them
-/// `EmptyExec` and `VgiScanExec`. This intentionally recognizes only the exact
-/// corpus assertions below, so a scan where an empty result was expected still
-/// remains a genuine mismatch.
+/// `VGI_TABLE_SCAN`; DataFusion emits logical plus physical rows, calls them
+/// `EmptyExec` and `VgiScanExec`, and reports dynamic-filter consumers as a
+/// positive `dynamic_filters` count. This intentionally recognizes only the
+/// exact corpus assertions below, so a scan where an empty result was expected
+/// (or a scan with no dynamic filter) remains a genuine mismatch.
 fn explain_rows_agree(expected: &[String], got: &[String]) -> bool {
     let [expected] = expected else {
         return false;
@@ -326,6 +327,19 @@ fn explain_rows_agree(expected: &[String], got: &[String]) -> bool {
         "physical_plan\t<REGEX>:.*VGI_TABLE_SCAN.*" => {
             physical.iter().any(|plan| plan.contains("VgiScanExec"))
         }
+        "physical_plan\t<REGEX>:.*Dynamic Filter.*" => physical.iter().any(|plan| {
+            plan.split("dynamic_filters=")
+                .nth(1)
+                .and_then(|suffix| {
+                    suffix
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect::<String>()
+                        .parse::<usize>()
+                        .ok()
+                })
+                .is_some_and(|count| count > 0)
+        }),
         "physical_plan\t<!REGEX>:.*STREAMING_SAMPLE.*" => {
             physical.iter().all(|plan| !plan.contains("SampleExec"))
         }
@@ -336,7 +350,10 @@ fn explain_rows_agree(expected: &[String], got: &[String]) -> bool {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)] // Rendering tests stay beside their adapter seam.
 mod rendering_tests {
-    use super::{adapt_duckdb_binary_sql, agrees_modulo_rendering, cells_agree};
+    use super::{
+        adapt_duckdb_binary_sql, agrees_modulo_rendering, cells_agree, overlay_report_path,
+    };
+    use std::path::Path;
 
     #[test]
     fn matches_equivalent_datafusion_plan_nodes_without_masking_missing_pruning() {
@@ -373,6 +390,13 @@ mod rendering_tests {
             &["physical_plan\t<REGEX>:.*EMPTY_RESULT.*".into()],
             &scan,
         ));
+
+        let dynamic = vec!["physical_plan\tVgiScanExec: dynamic_filters=1, top_n=5".into()];
+        let no_dynamic = vec!["physical_plan\tVgiScanExec: dynamic_filters=0, top_n=5".into()];
+        let dynamic_expectation = ["physical_plan\t<REGEX>:.*Dynamic Filter.*".into()];
+        assert!(agrees_modulo_rendering(&dynamic_expectation, &dynamic));
+        assert!(!agrees_modulo_rendering(&dynamic_expectation, &no_dynamic));
+        assert!(!agrees_modulo_rendering(&dynamic_expectation, &scan));
     }
 
     #[test]
@@ -431,6 +455,29 @@ mod rendering_tests {
                 .expect("valid SQL")
                 .is_none(),
             "qualified application function must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn overlay_report_paths_do_not_depend_on_the_checkout() {
+        let relative = "table/example.test.datafusion.json";
+        assert_eq!(
+            overlay_report_path(
+                Path::new("/work/one/corpus/overlays"),
+                Path::new("/work/one/corpus/overlays")
+                    .join(relative)
+                    .as_path(),
+            ),
+            format!("overlay:{relative}")
+        );
+        assert_eq!(
+            overlay_report_path(
+                Path::new("/different/root/overlays"),
+                Path::new("/different/root/overlays")
+                    .join(relative)
+                    .as_path(),
+            ),
+            format!("overlay:{relative}")
         );
     }
 }
@@ -1068,6 +1115,10 @@ async fn run_file(path: &Path, tally: &mut Tally, overlays: Option<&[RecordOverl
             Err(_) => {
                 tally.timed_out += 1;
                 file.timed_out += 1;
+                eprintln!(
+                    "  TIMEOUT {file_label} record {record_number}: {}",
+                    first_line(&sql)
+                );
                 continue;
             }
             Ok(o) => o,
@@ -1247,6 +1298,13 @@ fn overlay_path(root: &Path, source: &Path) -> Option<PathBuf> {
     Some(root.join(format!("{}.datafusion.json", relative.display())))
 }
 
+fn overlay_report_path(root: &Path, path: &Path) -> String {
+    format!(
+        "overlay:{}",
+        path.strip_prefix(root).unwrap_or(path).display()
+    )
+}
+
 /// Load sparse DataFusion substitutions while keeping the upstream test as the
 /// sole source of record order and expected rows.
 ///
@@ -1363,7 +1421,10 @@ fn load_overlays(files: &[PathBuf], root: Option<&Path>) -> Result<OverlayMap, S
                     .get("issue")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
-                overlay_path: path.display().to_string(),
+                // Reports are committed and compared across machines and
+                // worktrees. Record the path within the selected overlay root
+                // rather than embedding the runner's absolute checkout path.
+                overlay_path: overlay_report_path(root, &path),
             };
             if by_record.insert(record, overlay).is_some() {
                 return Err(format!(
