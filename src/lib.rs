@@ -1097,16 +1097,24 @@ impl VgiTableProvider {
     /// Bind one function-backed arm of a VGI catalog table.
     ///
     /// Multi-branch metadata carries the same flat scan-argument encoding as
-    /// the legacy single-function response. The function may be declared in
-    /// either the table's schema or the attached catalog's default schema, so
-    /// resolve it with the same candidate order used by ordinary catalog
-    /// tables. The outer catalog provider owns reconciliation and constraints.
+    /// the legacy single-function response. Protocol 1.5.0 lets the worker
+    /// name the branch's own schema directly (`branch_schema_name`) — the
+    /// same name-can-be-registered-in-more-than-one-schema ambiguity that
+    /// motivates `ScanFunctionResult.schema_name` applies here too, so prefer
+    /// it when present. Fall back to the legacy candidate search (the table's
+    /// own schema, then the attached catalog's default schema) whenever it's
+    /// absent — not just for a pre-1.5.0 worker: the field is optional by
+    /// protocol design, and a fully-1.5.0 worker may legitimately not set it
+    /// (a hand-rolled branch response that never reverse-looks-up the
+    /// function's registry, for instance). The outer catalog provider owns
+    /// reconciliation and constraints.
     pub(crate) async fn bind_catalog_branch(
         conn: VgiConnection,
         catalog: impl Into<String>,
         table_schema: impl Into<String>,
         function: impl Into<String>,
         raw_arguments: vgi_client::Bytes,
+        branch_schema_name: Option<String>,
     ) -> DFResult<Arc<Self>> {
         let catalog = catalog.into();
         let table_schema = table_schema.into();
@@ -1126,10 +1134,17 @@ impl VgiTableProvider {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat)?;
                 let default_schema = attached.default_schema().to_string();
-                let mut candidates = vec![table_schema_for_bind];
-                if default_schema != candidates[0] {
-                    candidates.push(default_schema);
-                }
+                let candidates: Vec<String> = if let Some(schema) =
+                    branch_schema_name.filter(|s| !s.is_empty())
+                {
+                    vec![schema]
+                } else {
+                    let mut cands = vec![table_schema_for_bind];
+                    if default_schema != cands[0] {
+                        cands.push(default_schema);
+                    }
+                    cands
+                };
 
                 let mut last_error = None;
                 for schema in candidates {
@@ -1235,11 +1250,29 @@ impl VgiTableProvider {
             // the same way, and says so in `vgi_table_entry.cpp`. In the
             // reference worker, tables in `data` are scanned by functions in
             // `main`, which fails outright without this.
+            //
+            // Protocol 1.5.0 lets the worker say so directly via
+            // `scan.schema_name` — it already knows which schema its own
+            // returned `function_name` came from, so prefer that over
+            // guessing. Fall back to the old table-schema/default-schema
+            // candidate search whenever it's absent — not just for a
+            // pre-1.5.0 worker: the field is optional by protocol design, and
+            // a fully-1.5.0 worker may legitimately not set it (a hand-rolled
+            // scan-function response that never reverse-looks-up the
+            // function's registry, for instance), since the same function
+            // name can legitimately be registered in more than one schema and
+            // the heuristic below can't tell those apart.
             let default_schema = attached.default_schema().to_string();
-            let mut candidates = vec![info.schema_name.clone()];
-            if default_schema != info.schema_name {
-                candidates.push(default_schema);
-            }
+            let candidates: Vec<String> =
+                if let Some(schema) = scan.schema_name.clone().filter(|s| !s.is_empty()) {
+                    vec![schema]
+                } else {
+                    let mut c = vec![info.schema_name.clone()];
+                    if default_schema != info.schema_name {
+                        c.push(default_schema);
+                    }
+                    c
+                };
 
             let mut last_err = None;
             for schema in &candidates {

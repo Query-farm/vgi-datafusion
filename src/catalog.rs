@@ -582,6 +582,7 @@ mod native_format_tests {
                 format_name: None,
                 format_locations: None,
                 format_options: None,
+                schema_name: None,
             },
             provider,
             null_string: None,
@@ -658,6 +659,7 @@ mod native_format_tests {
             format_name: None,
             format_locations: None,
             format_options: None,
+            schema_name: None,
         };
         assert_eq!(
             catalog_table_spec(&branch).unwrap(),
@@ -802,6 +804,7 @@ mod native_format_tests {
                 format_name: None,
                 format_locations: None,
                 format_options: None,
+                schema_name: None,
             },
             provider: raw_provider,
             null_string: None,
@@ -1207,6 +1210,7 @@ impl VgiCatalogTableProvider {
                                     &self.schema_name,
                                     &branch.function_name,
                                     branch.arguments.clone(),
+                                    branch.schema_name.clone(),
                                 )
                                 .await?,
                                 None,
