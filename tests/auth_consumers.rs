@@ -19,7 +19,7 @@ use vgi_datafusion::{
     VgiTableProvider,
 };
 
-mod common;
+use crate::common;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Lookup {

@@ -8,7 +8,7 @@
 //! HTTP request/response boundaries for both streaming table input and stable
 //! scalar per-value exchanges.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;

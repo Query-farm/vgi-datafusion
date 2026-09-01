@@ -210,9 +210,7 @@ jobs:
           fi
 
           VGI_TEST_WORKER="unix://${socket}" \
-            cargo test --locked \
-              --test durable_producer_cache \
-              --test worker_log_forwarding \
+            cargo test --locked --test integration persistent_worker_ \
               -- --nocapture
 
       - name: Run persistent-worker tests (HTTP)
@@ -275,9 +273,7 @@ jobs:
           fi
 
           VGI_TEST_WORKER="http://127.0.0.1:${port}" \
-            cargo test --locked \
-              --test durable_producer_cache \
-              --test worker_log_forwarding \
+            cargo test --locked --test integration persistent_worker_ \
               -- --nocapture
 
       - name: Report compiler cache statistics

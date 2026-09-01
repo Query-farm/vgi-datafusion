@@ -7,7 +7,7 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionContext;
 use vgi_datafusion::VgiOrderPushdownSessionStateBuilderExt;
 
-mod common;
+use crate::common;
 
 fn context() -> SessionContext {
     let state = SessionStateBuilder::new()

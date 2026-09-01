@@ -2,7 +2,7 @@
 
 //! Suite-wide opt-in gate for worker-backed integration tests.
 
-mod common;
+use crate::common;
 
 #[test]
 fn required_release_fixture_exists() {

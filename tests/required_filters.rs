@@ -4,7 +4,7 @@
 
 use datafusion::prelude::SessionContext;
 
-mod common;
+use crate::common;
 
 async fn attach(ctx: &SessionContext, worker: &std::path::Path) -> datafusion::common::Result<()> {
     let location = common::sql_quote(&worker.to_string_lossy());

@@ -3,7 +3,7 @@
 //! `TABLESAMPLE SYSTEM` reaches VGI plan/init through DataFusion's relation
 //! planner extension point, while DataFusion-owned sampling stays local.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Float64Array, Int64Array};
 use datafusion::prelude::SessionContext;

@@ -2,7 +2,7 @@
 
 //! Structured observability for actual streaming table-input writes.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::prelude::SessionContext;

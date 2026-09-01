@@ -2,7 +2,7 @@
 
 //! End-to-end coverage for VGI settings through DataFusion's config extension.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
 use std::sync::Arc;

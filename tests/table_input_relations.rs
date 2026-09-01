@@ -2,7 +2,7 @@
 
 //! RelationPlanner coverage for VGI functions that consume a table.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Int64Array, StringArray};
 use datafusion::prelude::SessionContext;

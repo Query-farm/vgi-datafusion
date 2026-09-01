@@ -2,7 +2,7 @@
 
 //! DataFusion-native lifecycle coverage for worker-nominated global aliases.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, TimeUnit};

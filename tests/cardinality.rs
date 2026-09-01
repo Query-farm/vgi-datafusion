@@ -3,7 +3,7 @@
 //! Catalog-inlined VGI cardinality reaches DataFusion's existing logical and
 //! physical statistics APIs without a per-bind cardinality round trip.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

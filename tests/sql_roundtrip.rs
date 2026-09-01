@@ -17,7 +17,7 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use vgi_datafusion::{VgiConnection, VgiTableProvider};
 use vgi_datafusion::{VgiResolvedSecret, VgiRuntime, VgiSecretResolver, VgiSessionOptions};
 
-mod common;
+use crate::common;
 
 #[derive(Debug)]
 struct ExampleSecretResolver;

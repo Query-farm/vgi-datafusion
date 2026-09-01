@@ -2,7 +2,7 @@
 
 //! Result-cache identity follows worker capabilities, not local query shape.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Array, Int64Array, UInt64Array};
 use datafusion::prelude::{SessionConfig, SessionContext};

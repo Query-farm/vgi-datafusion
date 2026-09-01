@@ -2,7 +2,7 @@
 
 //! SQL control of the session-owned VGI result-cache bounds.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

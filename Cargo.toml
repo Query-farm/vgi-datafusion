@@ -2,6 +2,7 @@
 name = "vgi-datafusion"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 rust-version = "1.97"
 license = "Apache-2.0"
 description = "Apache DataFusion integration for the VGI protocol — attach a remote VGI catalog and query it with SQL"
@@ -31,3 +32,7 @@ futures = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

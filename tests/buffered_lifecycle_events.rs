@@ -2,7 +2,7 @@
 
 //! Structured adapter events for the buffered sink/combine/source lifecycle.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Array, StringArray};
 use datafusion::prelude::SessionContext;

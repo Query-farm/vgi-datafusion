@@ -2,7 +2,7 @@
 
 //! DataFusion-native spellings used by sparse scalar corpus overlays.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Array, Float64Array, Int64Array, StringArray, UInt16Array};
 use datafusion::prelude::SessionContext;

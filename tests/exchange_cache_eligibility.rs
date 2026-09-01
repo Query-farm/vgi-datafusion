@@ -2,7 +2,7 @@
 
 //! End-to-end boundaries for the streaming exchange result-cache tier.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

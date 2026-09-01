@@ -3,7 +3,7 @@
 //! EXPLAIN ANALYZE is the only execution shape that asks a worker for its
 //! post-execution `dynamic_to_string` diagnostics.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

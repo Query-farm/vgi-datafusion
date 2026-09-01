@@ -2,7 +2,7 @@
 
 //! Structured scalar worker-write observability.
 
-mod common;
+use crate::common;
 
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::prelude::SessionContext;
