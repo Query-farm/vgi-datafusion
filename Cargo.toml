@@ -13,8 +13,8 @@ keywords = ["vgi", "datafusion", "arrow", "sql", "federation"]
 categories = ["database", "api-bindings"]
 
 [dependencies]
-vgi-client = { version = "0.31.0", path = "../vgi-rust/vgi-client", features = ["unix", "launcher", "disk-cache"] }
-vgi-protocol = { version = "0.31.0", path = "../vgi-rust/vgi-protocol" }
+vgi-client = { version = "0.32.0", path = "../vgi-rust/vgi-client", features = ["unix", "launcher", "disk-cache"] }
+vgi-protocol = { version = "0.32.0", path = "../vgi-rust/vgi-protocol" }
 # Arrow comes from DataFusion's re-export rather than a direct dependency:
 # pinning it separately is how you end up with two incompatible `ArrayRef`
 # types that look identical in the error message.

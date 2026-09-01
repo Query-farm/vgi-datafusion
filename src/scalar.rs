@@ -23,6 +23,14 @@ use vgi_client::{ArgSpecs, ArgValue, Arguments};
 
 use crate::{to_df, VgiConnection};
 
+/// Translate VGI's null-handling contract to DataFusion's strict-UDF flag.
+///
+/// Missing metadata stays conservative for older workers. `SPECIAL` explicitly
+/// allows a worker to turn NULL input into a non-NULL result.
+pub(crate) fn null_handling_is_strict(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.eq_ignore_ascii_case("DEFAULT"))
+}
+
 /// A remote scalar function.
 #[derive(Debug, Clone)]
 pub struct VgiScalarUdf {
@@ -40,6 +48,13 @@ pub struct VgiScalarUdf {
     registered_name: String,
     signature: Signature,
     volatility: Volatility,
+    /// Whether every overload is NULL-propagating.
+    ///
+    /// DataFusion 55 uses this metadata when proving that a predicate rejects
+    /// NULLs, which can in turn eliminate an outer join. Keep this false unless
+    /// the worker explicitly advertises DEFAULT null handling for every
+    /// overload registered under this UDF.
+    strict: bool,
     /// A fixed return type, when the caller knows it.
     ///
     /// `None` means "ask the worker", which is the normal case: VGI resolves a
@@ -87,6 +102,7 @@ impl VgiScalarUdf {
             registered_name: name,
             signature,
             volatility,
+            strict: false,
             return_type: Some(return_type),
             overloads: vec![ArgSpecs::default()],
             resolved: Arc::new(Mutex::new(HashMap::new())),
@@ -182,6 +198,7 @@ impl VgiScalarUdf {
                 Signature::variadic_any(volatility)
             },
             volatility,
+            strict: false,
             return_type: None,
             overloads: if overloads.is_empty() {
                 vec![ArgSpecs::default()]
@@ -191,6 +208,17 @@ impl VgiScalarUdf {
             resolved: Arc::new(Mutex::new(HashMap::new())),
             batch_size: None,
         }
+    }
+
+    /// Declare that this function always returns NULL when any argument is
+    /// NULL.
+    ///
+    /// Catalog registration derives this from VGI's `null_handling` metadata.
+    /// The builder remains explicit so manually constructed functions stay
+    /// conservative by default.
+    pub fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
     }
 
     /// Split a call's arguments into bind constants and per-row columns.
@@ -568,6 +596,10 @@ impl ScalarUDFImpl for VgiScalarUdf {
 
     fn signature(&self) -> &Signature {
         &self.signature
+    }
+
+    fn is_strict(&self) -> bool {
+        self.strict
     }
 
     fn return_type(&self, args: &[DataType]) -> DFResult<DataType> {
@@ -1472,6 +1504,21 @@ mod overload_tests {
         let (selected, compatible) = udf.select_specs(&[DataType::Boolean, DataType::Boolean]);
         assert!(compatible);
         assert_eq!(selected, &any);
+    }
+
+    #[test]
+    fn strictness_is_explicit_and_conservative_by_default() {
+        let udf = udf(vec![varargs(DataType::Int64)]);
+        assert!(!udf.is_strict());
+        assert!(udf.with_strict(true).is_strict());
+    }
+
+    #[test]
+    fn only_explicit_default_null_handling_is_strict() {
+        assert!(null_handling_is_strict(Some("DEFAULT")));
+        assert!(null_handling_is_strict(Some("default")));
+        assert!(!null_handling_is_strict(Some("SPECIAL")));
+        assert!(!null_handling_is_strict(None));
     }
 
     #[test]

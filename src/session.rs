@@ -2371,7 +2371,7 @@ fn sql_catalog_namespace(provider: &VgiCatalogProvider) -> SqlCatalogNamespace {
                 schema
                     .scalars()
                     .iter()
-                    .map(|(name, _, _)| name.to_ascii_lowercase()),
+                    .map(|(name, _, _, _)| name.to_ascii_lowercase()),
             );
             namespace.expression_functions.extend(
                 schema
@@ -2459,6 +2459,12 @@ fn metadata_volatility(
     }
 }
 
+fn metadata_is_strict(info: &vgi_client::dtos::FunctionInfo) -> bool {
+    crate::scalar::null_handling_is_strict(
+        info.null_handling.as_ref().map(|value| value.0.as_str()),
+    )
+}
+
 fn metadata_secrets(info: &vgi_client::dtos::FunctionInfo) -> Vec<vgi_client::SecretLookupRequest> {
     info.required_secrets
         .iter()
@@ -2474,6 +2480,7 @@ enum PreparedGlobalKind {
     Scalar {
         overloads: Vec<vgi_client::ArgSpecs>,
         volatility: datafusion::logical_expr::Volatility,
+        strict: bool,
     },
     Aggregate {
         specs: vgi_client::ArgSpecs,
@@ -2518,12 +2525,14 @@ fn prepare_global_functions(
                 let PreparedGlobalKind::Scalar {
                     overloads,
                     volatility,
+                    strict,
                 } = &mut existing.kind
                 else {
                     unreachable!("scalar group predicate checked")
                 };
                 overloads.push(specs);
                 *volatility = most_volatile(*volatility, metadata_volatility(info));
+                *strict &= metadata_is_strict(info);
                 continue;
             }
             prepared.push(PreparedGlobalFunction {
@@ -2532,6 +2541,7 @@ fn prepare_global_functions(
                 kind: PreparedGlobalKind::Scalar {
                     overloads: vec![specs],
                     volatility: metadata_volatility(info),
+                    strict: metadata_is_strict(info),
                 },
             });
             continue;
@@ -2589,6 +2599,7 @@ fn register_global_functions(
             PreparedGlobalKind::Scalar {
                 overloads,
                 volatility,
+                strict,
             } => {
                 let udf = AsyncScalarUDF::new(Arc::new(
                     VgiScalarUdf::discovered_overloads_with_volatility(
@@ -2599,7 +2610,8 @@ fn register_global_functions(
                         name,
                         overloads.clone(),
                         *volatility,
-                    ),
+                    )
+                    .with_strict(*strict),
                 ))
                 .into_scalar_udf();
                 register_scalar_if_absent(ctx, &spec.alias, name.clone(), udf)
@@ -3044,7 +3056,7 @@ fn register_scalar_functions(
     provider: &VgiCatalogProvider,
 ) {
     for (schema_name, schema) in provider.vgi_schemas() {
-        for (function, overloads, volatility) in schema.scalars() {
+        for (function, overloads, volatility, strict) in schema.scalars() {
             let register = |name: String| {
                 let udf = VgiScalarUdf::discovered_overloads_with_volatility(
                     conn.clone(),
@@ -3054,7 +3066,8 @@ fn register_scalar_functions(
                     &name,
                     overloads.clone(),
                     *volatility,
-                );
+                )
+                .with_strict(*strict);
                 register_scalar_if_absent(
                     ctx,
                     &spec.alias,

@@ -20,7 +20,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    execution_plan::{Boundedness, EmissionType},
+    execution_plan::{Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions},
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
 use futures::StreamExt;
@@ -130,9 +130,10 @@ impl ExecutionPlan for VgiLimitedTableInputExec {
         vec![&self.input]
     }
 
-    fn with_new_children(
+    fn replace_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
+        _options: ReplaceChildrenOptions,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         let [input] = children.as_slice() else {
             return Err(DataFusionError::Internal(format!(
@@ -142,6 +143,16 @@ impl ExecutionPlan for VgiLimitedTableInputExec {
             )));
         };
         Ok(Arc::new(self.with_input(Arc::clone(input))?))
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
     }
 
     fn apply_expressions(

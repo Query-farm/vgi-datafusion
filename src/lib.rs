@@ -74,7 +74,7 @@ use datafusion::physical_plan::metrics::{
 };
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    execution_plan::{Boundedness, EmissionType},
+    execution_plan::{Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions},
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, StatisticsArgs,
 };
 use futures::StreamExt;
@@ -1134,17 +1134,16 @@ impl VgiTableProvider {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat)?;
                 let default_schema = attached.default_schema().to_string();
-                let candidates: Vec<String> = if let Some(schema) =
-                    branch_schema_name.filter(|s| !s.is_empty())
-                {
-                    vec![schema]
-                } else {
-                    let mut cands = vec![table_schema_for_bind];
-                    if default_schema != cands[0] {
-                        cands.push(default_schema);
-                    }
-                    cands
-                };
+                let candidates: Vec<String> =
+                    if let Some(schema) = branch_schema_name.filter(|s| !s.is_empty()) {
+                        vec![schema]
+                    } else {
+                        let mut cands = vec![table_schema_for_bind];
+                        if default_schema != cands[0] {
+                            cands.push(default_schema);
+                        }
+                        cands
+                    };
 
                 let mut last_error = None;
                 for schema in candidates {
@@ -4297,11 +4296,29 @@ impl ExecutionPlan for VgiScanExec {
         vec![]
     }
 
+    fn replace_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+        _options: ReplaceChildrenOptions,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        if !children.is_empty() {
+            return Err(DataFusionError::Internal(format!(
+                "{} expected no children, got {}",
+                self.name(),
+                children.len()
+            )));
+        }
+        Ok(self)
+    }
+
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        Ok(self)
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
     }
 
     fn apply_expressions(

@@ -1743,7 +1743,7 @@ pub struct VgiSchemaProvider {
     ///
     /// The specs travel with the name because a call cannot be built without
     /// them: a const parameter belongs in the bind, not the input batch.
-    scalars: Vec<(String, Vec<vgi_client::ArgSpecs>, Volatility)>,
+    scalars: Vec<(String, Vec<vgi_client::ArgSpecs>, Volatility, bool)>,
     /// Aggregate functions in this schema, published into DataFusion's
     /// aggregate registry at attach time.
     aggregates: Vec<(
@@ -1858,20 +1858,31 @@ impl VgiSchemaProvider {
                 // complete overload set so the UDF can choose the right const
                 // layout for each call instead of whichever overload happened
                 // to be registered first.
-                let mut scalar_overloads: HashMap<String, (Vec<vgi_client::ArgSpecs>, Volatility)> =
-                    HashMap::new();
+                let mut scalar_overloads: HashMap<
+                    String,
+                    (Vec<vgi_client::ArgSpecs>, Volatility, bool),
+                > = HashMap::new();
                 for f in &scalar_infos {
                     let specs = vgi_client::ArgSpecs::parse(&f.arguments.0).map_err(to_df)?;
                     let declared = volatility(f.stability.as_ref().map(|v| v.0.as_str()));
+                    let strict = crate::scalar::null_handling_is_strict(
+                        f.null_handling.as_ref().map(|value| value.0.as_str()),
+                    );
                     let entry = scalar_overloads
                         .entry(f.name.clone())
-                        .or_insert_with(|| (Vec::new(), declared));
+                        .or_insert_with(|| (Vec::new(), declared, strict));
                     entry.0.push(specs);
                     entry.1 = most_volatile(entry.1, declared);
+                    // One DataFusion UDF owns every VGI overload for this name.
+                    // It is safe to call the UDF strict only when every possible
+                    // dispatch target is strict.
+                    entry.2 &= strict;
                 }
                 let scalars = scalar_overloads
                     .into_iter()
-                    .map(|(name, (overloads, volatility))| (name, overloads, volatility))
+                    .map(|(name, (overloads, volatility, strict))| {
+                        (name, overloads, volatility, strict)
+                    })
                     .collect::<Vec<_>>();
                 let functions = table_infos
                     .into_iter()
@@ -1933,7 +1944,7 @@ impl VgiSchemaProvider {
     }
 
     /// Scalar functions this schema advertises, with their parameter specs.
-    pub fn scalars(&self) -> &[(String, Vec<vgi_client::ArgSpecs>, Volatility)] {
+    pub fn scalars(&self) -> &[(String, Vec<vgi_client::ArgSpecs>, Volatility, bool)] {
         &self.scalars
     }
 
