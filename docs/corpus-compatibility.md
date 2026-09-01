@@ -157,7 +157,7 @@ transport equivalence is itself part of completion.
 
 ## Current promoted baseline — 2026-08-27
 
-The canonical EC2 Unix-socket run of the 328-file normal corpus contains 4,198
+The canonical EC2 Unix-socket run of the 328-file normal corpus contains 4,155
 measured positive records. The historical `subprocess.json` filename is kept
 for tooling compatibility. This baseline includes the DataFusion-native
 `typeof`, result-cache diagnostic aliases, `duckdb_logs()`,
@@ -170,16 +170,16 @@ statistics also feed DataFusion's existing pruning API.
 | Metric | Initial | Current |
 |---|---:|---:|
 | Files run / skipped by missing environment | 278 / 49 | 279 / 49 |
-| Records executed | 2,473 / 4,114 (60.1%) | 3,725 / 4,198 (88.7%) |
-| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,568 / 2,737 (93.8%) |
-| Exact results | 1,567 | 2,422 |
-| Rendering-equivalent results | 37 | 146 |
-| Genuine value differences | 149 | 169 |
-| Not-applicable records reported separately | 607 | 550 |
+| Records executed | 2,473 / 4,114 (60.1%) | 3,580 / 4,155 (86.2%) |
+| Comparable results agreeing | 1,604 / 1,753 (91.5%) | 2,440 / 2,595 (94.0%) |
+| Exact results | 1,567 | 2,301 |
+| Rendering-equivalent results | 37 | 139 |
+| Genuine value differences | 149 | 155 |
+| Not-applicable records reported separately | 607 | 593 |
 | Timeouts | 0 | 0 |
 
-The HTTP run executes the same 3,725 records with 2,422 exact, 146
-rendering-equivalent, and 169 different results. Both transports have zero
+The HTTP run executes the same 3,580 records with 2,301 exact, 139
+rendering-equivalent, and 155 different results. Both transports have zero
 timeouts and byte-identical reports. `cache/basic.test` is fully
 executable with all 14 value checks
 exact. The settings slice is 42/42 with 14/14 exact, while reviewed
