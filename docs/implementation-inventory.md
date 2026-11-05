@@ -217,7 +217,9 @@ replay remains physically present until release and a later reap.
   The protocol log message does not carry request/function correlation; worker
   access logs and subprocess stderr remain separate operator-facing channels.
 - `VgiLocalityHook` exposes planned split locations to an embedding scheduler.
-  The adapter does not invent DataFusion hash partitioning from VGI transforms.
+  Protocol 3.1 exact ranges reach DataFusion `RangePartitioning` for validated,
+  top-level `vgi.identity/1` keys; other transforms remain unknown. The adapter
+  does not invent DataFusion hash partitioning from VGI transforms.
 - `VgiSessionOptions` configures cache bounds, event history, and an optional
   RPC timeout. HTTP, Unix, and TCP clients honor that timeout; subprocess
   response reads do as well, killing and poisoning a child when the deadline
