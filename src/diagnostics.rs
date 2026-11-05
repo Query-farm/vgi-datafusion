@@ -84,7 +84,7 @@ impl TableFunctionImpl for TableStatistics {
             .tables
             .iter()
             .find(|info| {
-                info.schema_name.eq_ignore_ascii_case(&schema)
+                crate::protocol_v3::schema_leaf(&info.schema_path).eq_ignore_ascii_case(&schema)
                     && info.name.eq_ignore_ascii_case(&table)
             })
             .cloned()
@@ -105,7 +105,10 @@ impl TableFunctionImpl for TableStatistics {
         } else {
             let connection = metadata.connection;
             let worker_catalog = metadata.worker_catalog;
-            let rpc_schema = table_info.schema_name.clone();
+            let rpc_schema = crate::protocol_v3::require_flat_schema_path(
+                &table_info.schema_path,
+                "table statistics target",
+            )?;
             let rpc_table = table_info.name.clone();
             crate::run_blocking_planner_call(move || {
                 let mut client = connection.connect()?;
@@ -1267,7 +1270,7 @@ fn function_row(
     };
     Ok(DuckDbFunctionRow {
         database_name,
-        schema_name: info.schema_name.clone(),
+        schema_name: crate::protocol_v3::schema_leaf(&info.schema_path).to_string(),
         function_name,
         function_type,
         parameters,
@@ -1380,7 +1383,7 @@ fn vgi_global_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
                     global_name,
                     alias.clone(),
                     info.name.clone(),
-                    info.schema_name.clone(),
+                    crate::protocol_v3::schema_leaf(&info.schema_path).to_string(),
                     info.function_type.0.to_ascii_lowercase(),
                     metadata.connection.label().to_string(),
                 ));
@@ -1432,22 +1435,28 @@ fn duckdb_functions(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             rows.push(function_row(alias.clone(), info.name.clone(), info)?);
         }
         for info in &metadata.macros {
-            let is_table = info.macro_type.0.eq_ignore_ascii_case("table_macro")
-                || info.macro_type.0.eq_ignore_ascii_case("table");
-            rows.push(DuckDbFunctionRow {
-                database_name: alias.clone(),
-                schema_name: info.schema_name.clone(),
-                function_name: info.name.clone(),
-                function_type: if is_table { "table_macro" } else { "macro" }.to_string(),
-                parameters: info.parameters.clone(),
-                parameter_types: Vec::new(),
-                return_type: None,
-                stability: None,
-                description: info.comment.clone().unwrap_or_default(),
-                varargs: None,
-                categories: Vec::new(),
-                tags: info.tags.clone(),
-            });
+            for overload in &info.overloads {
+                let is_table = overload.macro_type.eq_ignore_ascii_case("table_macro")
+                    || overload.macro_type.eq_ignore_ascii_case("table");
+                rows.push(DuckDbFunctionRow {
+                    database_name: alias.clone(),
+                    schema_name: crate::protocol_v3::schema_leaf(&info.schema_path).to_string(),
+                    function_name: info.name.clone(),
+                    function_type: if is_table { "table_macro" } else { "macro" }.to_string(),
+                    parameters: overload
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect(),
+                    parameter_types: Vec::new(),
+                    return_type: None,
+                    stability: None,
+                    description: info.comment.clone().unwrap_or_default(),
+                    varargs: None,
+                    categories: Vec::new(),
+                    tags: info.tags.clone(),
+                });
+            }
         }
         let mut seen_globals = std::collections::HashSet::new();
         for info in &metadata.global_functions {
@@ -1634,9 +1643,9 @@ fn duckdb_schemas(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|(alias, _)| alias.as_str()),
             )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|(_, schema)| schema.name.as_str()),
-            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(
+                |(_, schema)| crate::protocol_v3::schema_leaf(&schema.path),
+            ))),
             optional_strings(&rows, |(_, schema)| schema.comment.as_deref()),
             string_map_array(&tags)?,
         ],
@@ -1677,9 +1686,9 @@ fn duckdb_tables(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|(alias, _)| alias.as_str()),
             )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|(_, table)| table.schema_name.as_str()),
-            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(
+                |(_, table)| crate::protocol_v3::schema_leaf(&table.schema_path),
+            ))),
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|(_, table)| table.name.as_str()),
             )),
@@ -1716,9 +1725,9 @@ fn duckdb_views(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|(alias, _)| alias.as_str()),
             )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|(_, view)| view.schema_name.as_str()),
-            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(
+                |(_, view)| crate::protocol_v3::schema_leaf(&view.schema_path),
+            ))),
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|(_, view)| view.name.as_str()),
             )),
@@ -1756,7 +1765,7 @@ fn duckdb_columns(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
                     .or_else(|| field.metadata().get("default").cloned());
                 rows.push(DuckDbColumnRow {
                     database_name: alias.clone(),
-                    schema_name: table.schema_name.clone(),
+                    schema_name: crate::protocol_v3::schema_leaf(&table.schema_path).to_string(),
                     table_name: table.name.clone(),
                     column_name: field.name().clone(),
                     column_default,
@@ -1776,7 +1785,7 @@ fn duckdb_columns(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             for column in columns {
                 rows.push(DuckDbColumnRow {
                     database_name: alias.clone(),
-                    schema_name: view.schema_name.clone(),
+                    schema_name: crate::protocol_v3::schema_leaf(&view.schema_path).to_string(),
                     table_name: view.name.clone(),
                     comment: comments.get(&column).cloned(),
                     column_name: column,
@@ -1825,68 +1834,6 @@ struct DuckDbConstraintRow {
     referenced_columns: Option<Vec<String>>,
 }
 
-fn column_names(schema: &Schema, indices: &[i32]) -> DFResult<Vec<String>> {
-    indices
-        .iter()
-        .map(|index| {
-            usize::try_from(*index)
-                .ok()
-                .and_then(|index| schema.fields().get(index))
-                .map(|field| field.name().clone())
-                .ok_or_else(|| {
-                    datafusion::common::plan_datafusion_err!(
-                        "VGI constraint column index {index} is outside the table schema"
-                    )
-                })
-        })
-        .collect()
-}
-
-fn string_list_column(batch: &RecordBatch, name: &str) -> DFResult<Vec<String>> {
-    let list = batch
-        .column_by_name(name)
-        .and_then(|array| array.as_any().downcast_ref::<ListArray>())
-        .ok_or_else(|| {
-            datafusion::common::plan_datafusion_err!(
-                "VGI foreign key is missing list field `{name}`"
-            )
-        })?;
-    if list.is_null(0) {
-        return Ok(Vec::new());
-    }
-    let values = list.value(0);
-    let strings = values
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            datafusion::common::plan_datafusion_err!(
-                "VGI foreign key field `{name}` does not contain UTF-8 values"
-            )
-        })?;
-    Ok(strings.iter().flatten().map(str::to_string).collect())
-}
-
-fn foreign_key(bytes: &[u8]) -> DFResult<(Vec<String>, String, Vec<String>)> {
-    let batch = vgi_protocol::ipc::read_batch(bytes).map_err(vgi_error)?;
-    if batch.num_rows() != 1 {
-        return plan_err!("VGI foreign key metadata must contain exactly one row");
-    }
-    let referenced_table = batch
-        .column_by_name("referenced_table")
-        .and_then(|array| array.as_any().downcast_ref::<StringArray>())
-        .and_then(|array| array.is_valid(0).then(|| array.value(0).to_string()))
-        .ok_or_else(|| {
-            datafusion::common::plan_datafusion_err!(
-                "VGI foreign key is missing `referenced_table`"
-            )
-        })?;
-    Ok((
-        string_list_column(&batch, "fk_columns")?,
-        referenced_table,
-        string_list_column(&batch, "pk_columns")?,
-    ))
-}
-
 fn optional_string_list_array(rows: &[Option<Vec<String>>]) -> ArrayRef {
     let mut builder = ListBuilder::new(StringBuilder::new());
     for row in rows {
@@ -1903,59 +1850,91 @@ fn optional_string_list_array(rows: &[Option<Vec<String>>]) -> ArrayRef {
 }
 
 fn duckdb_constraints(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
+    use vgi_protocol::generated::protocol_types::{
+        CatalogObjectRef, ConstraintDefinition, ConstraintInfo, ForeignKeyDefinition, SqlExpression,
+    };
+
     let mut rows = Vec::new();
     for (alias, metadata) in runtime.catalog_metadata() {
         for table in metadata.tables {
-            let schema = vgi_protocol::ipc::read_schema(&table.columns.0).map_err(vgi_error)?;
-            {
-                let mut push = |kind: &str, text: String, columns: Vec<String>| {
-                    rows.push(DuckDbConstraintRow {
-                        database_name: alias.clone(),
-                        schema_name: table.schema_name.clone(),
-                        table_name: table.name.clone(),
-                        constraint_type: kind.to_string(),
-                        constraint_text: text,
-                        columns,
-                        referenced_table: None,
-                        referenced_columns: None,
-                    });
+            for bytes in &table.constraints {
+                let batch = vgi_protocol::ipc::read_batch(&bytes.0).map_err(vgi_error)?;
+                let info: ConstraintInfo =
+                    vgi_protocol::wire::from_batch(&batch).map_err(vgi_error)?;
+                let batch = vgi_protocol::ipc::read_batch(&info.definition.0).map_err(vgi_error)?;
+                let definition: ConstraintDefinition =
+                    vgi_protocol::wire::from_batch(&batch).map_err(vgi_error)?;
+                let columns = definition
+                    .column_paths
+                    .iter()
+                    .map(|path| crate::protocol_v3::display_column_path(path))
+                    .collect::<Vec<_>>();
+                let kind = definition.kind.0.replace('_', " ");
+                let mut referenced_table = None;
+                let mut referenced_columns = None;
+                let text = match definition.kind.0.as_str() {
+                    "NOT_NULL" => "NOT NULL".to_string(),
+                    "PRIMARY_KEY" => format!("PRIMARY KEY({})", columns.join(", ")),
+                    "UNIQUE" => format!("UNIQUE({})", columns.join(", ")),
+                    "CHECK" => {
+                        let expression = definition.check_expression.as_ref().ok_or_else(|| {
+                            datafusion::common::plan_datafusion_err!(
+                                "VGI CHECK constraint is missing its expression"
+                            )
+                        })?;
+                        let batch =
+                            vgi_protocol::ipc::read_batch(&expression.0).map_err(vgi_error)?;
+                        let expression: SqlExpression =
+                            vgi_protocol::wire::from_batch(&batch).map_err(vgi_error)?;
+                        format!("CHECK(({}))", expression.sql)
+                    }
+                    "FOREIGN_KEY" => {
+                        let foreign = definition.foreign_key.as_ref().ok_or_else(|| {
+                            datafusion::common::plan_datafusion_err!(
+                                "VGI FOREIGN KEY constraint is missing its target"
+                            )
+                        })?;
+                        let batch = vgi_protocol::ipc::read_batch(&foreign.0).map_err(vgi_error)?;
+                        let foreign: ForeignKeyDefinition =
+                            vgi_protocol::wire::from_batch(&batch).map_err(vgi_error)?;
+                        let batch = vgi_protocol::ipc::read_batch(&foreign.referenced_table.0)
+                            .map_err(vgi_error)?;
+                        let target: CatalogObjectRef =
+                            vgi_protocol::wire::from_batch(&batch).map_err(vgi_error)?;
+                        let target_display = if target.schema_path.is_empty() {
+                            target.name.clone()
+                        } else {
+                            format!(
+                                "{}/{}",
+                                crate::protocol_v3::display_schema_path(&target.schema_path),
+                                target.name
+                            )
+                        };
+                        let target_columns = foreign
+                            .referenced_column_paths
+                            .iter()
+                            .map(|path| crate::protocol_v3::display_column_path(path))
+                            .collect::<Vec<_>>();
+                        referenced_table = Some(target.name);
+                        referenced_columns = Some(target_columns.clone());
+                        format!(
+                            "FOREIGN KEY ({}) REFERENCES {}({})",
+                            columns.join(", "),
+                            target_display,
+                            target_columns.join(", ")
+                        )
+                    }
+                    _ => kind.clone(),
                 };
-                for index in &table.not_null_constraints {
-                    let columns = column_names(&schema, &[*index])?;
-                    push("NOT NULL", "NOT NULL".to_string(), columns);
-                }
-                for indices in &table.primary_key_constraints {
-                    let columns = column_names(&schema, indices)?;
-                    push(
-                        "PRIMARY KEY",
-                        format!("PRIMARY KEY({})", columns.join(", ")),
-                        columns,
-                    );
-                }
-                for indices in &table.unique_constraints {
-                    let columns = column_names(&schema, indices)?;
-                    push("UNIQUE", format!("UNIQUE({})", columns.join(", ")), columns);
-                }
-                for expression in &table.check_constraints {
-                    push("CHECK", format!("CHECK(({expression}))"), Vec::new());
-                }
-            }
-            for bytes in &table.foreign_key_constraints {
-                let (columns, referenced_table, referenced_columns) = foreign_key(&bytes.0)?;
                 rows.push(DuckDbConstraintRow {
                     database_name: alias.clone(),
-                    schema_name: table.schema_name.clone(),
+                    schema_name: crate::protocol_v3::schema_leaf(&table.schema_path).to_string(),
                     table_name: table.name.clone(),
-                    constraint_type: "FOREIGN KEY".to_string(),
-                    constraint_text: format!(
-                        "FOREIGN KEY ({}) REFERENCES {}({})",
-                        columns.join(", "),
-                        referenced_table,
-                        referenced_columns.join(", ")
-                    ),
+                    constraint_type: kind,
+                    constraint_text: text,
                     columns,
-                    referenced_table: Some(referenced_table),
-                    referenced_columns: Some(referenced_columns),
+                    referenced_table,
+                    referenced_columns,
                 });
             }
         }
@@ -2104,37 +2083,66 @@ fn vgi_function_arguments(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             append_argument_rows(
                 &mut rows,
                 &alias,
-                &info.schema_name,
+                crate::protocol_v3::schema_leaf(&info.schema_path),
                 &info.name,
                 &info.function_type.0.to_ascii_lowercase(),
                 &schema,
             );
         }
         for info in &metadata.macros {
-            let macro_type = if info.macro_type.0.to_ascii_lowercase().contains("table") {
-                "table_macro"
-            } else {
-                "scalar_macro"
-            };
-            let schema = match &info.arguments_schema {
-                Some(arguments) if !arguments.0.is_empty() => {
-                    vgi_protocol::ipc::read_schema(&arguments.0).map_err(crate::to_df)?
-                }
-                _ => Arc::new(Schema::new(
-                    info.parameters
-                        .iter()
-                        .map(|name| Field::new(name, DataType::Null, true))
-                        .collect::<Vec<_>>(),
-                )),
-            };
-            append_argument_rows(
-                &mut rows,
-                &alias,
-                &info.schema_name,
-                &info.name,
-                macro_type,
-                &schema,
-            );
+            for overload in &info.overloads {
+                let macro_type = if overload.macro_type.to_ascii_lowercase().contains("table") {
+                    "table_macro"
+                } else {
+                    "scalar_macro"
+                };
+                let fields = overload
+                    .parameters
+                    .iter()
+                    .map(|parameter| {
+                        let data_type = parameter
+                            .declared_type
+                            .as_ref()
+                            .filter(|bytes| !bytes.0.is_empty())
+                            .map(|bytes| {
+                                vgi_protocol::ipc::read_schema(&bytes.0)
+                                    .map_err(crate::to_df)
+                                    .and_then(|schema| {
+                                        schema.fields().first().map(|field| field.data_type().clone()).ok_or_else(|| {
+                                            datafusion::common::plan_datafusion_err!(
+                                                "VGI macro parameter `{}` has an empty declared type",
+                                                parameter.name
+                                            )
+                                        })
+                                    })
+                            })
+                            .transpose()?
+                            .unwrap_or(DataType::Null);
+                        let mut metadata = std::collections::HashMap::new();
+                        if let Some(documentation) = &parameter.documentation {
+                            metadata.insert("vgi_doc".to_string(), documentation.clone());
+                        }
+                        if let Some(expression) = &parameter.default_expression {
+                            let batch = vgi_protocol::ipc::read_batch(&expression.0)
+                                .map_err(vgi_error)?;
+                            let expression: vgi_protocol::generated::protocol_types::SqlExpression =
+                                vgi_protocol::wire::from_batch(&batch).map_err(vgi_error)?;
+                            metadata.insert("vgi_default".to_string(), expression.sql);
+                        } else if parameter.default_value.is_some() {
+                            metadata.insert("vgi_default".to_string(), "<literal>".to_string());
+                        }
+                        Ok(Field::new(&parameter.name, data_type, true).with_metadata(metadata))
+                    })
+                    .collect::<DFResult<Vec<_>>>()?;
+                append_argument_rows(
+                    &mut rows,
+                    &alias,
+                    crate::protocol_v3::schema_leaf(&info.schema_path),
+                    &info.name,
+                    macro_type,
+                    &Schema::new(fields),
+                );
+            }
         }
     }
 
@@ -2278,7 +2286,7 @@ fn vgi_table_branches(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             .iter()
             .filter(|table| {
                 !metadata.table_branches.contains_key(&(
-                    table.schema_name.to_ascii_lowercase(),
+                    crate::protocol_v3::schema_leaf(&table.schema_path).to_ascii_lowercase(),
                     table.name.to_ascii_lowercase(),
                 ))
             })
@@ -2306,16 +2314,21 @@ fn vgi_table_branches(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
         let mut resolved_by_table = metadata.table_branches.clone();
         for (table, branches) in fetched {
             let key = (
-                table.schema_name.to_ascii_lowercase(),
+                crate::protocol_v3::schema_leaf(&table.schema_path).to_ascii_lowercase(),
                 table.name.to_ascii_lowercase(),
             );
-            runtime.set_table_branches(&alias, &table.schema_name, &table.name, branches.clone());
+            runtime.set_table_branches(
+                &alias,
+                crate::protocol_v3::schema_leaf(&table.schema_path),
+                &table.name,
+                branches.clone(),
+            );
             resolved_by_table.insert(key, branches);
         }
 
         for table in &metadata.tables {
             let key = (
-                table.schema_name.to_ascii_lowercase(),
+                crate::protocol_v3::schema_leaf(&table.schema_path).to_ascii_lowercase(),
                 table.name.to_ascii_lowercase(),
             );
             let Some(resolved) = resolved_by_table.get(&key).cloned() else {
@@ -2324,7 +2337,7 @@ fn vgi_table_branches(runtime: &VgiRuntime) -> DFResult<RecordBatch> {
             for (index, branch) in resolved.branches.into_iter().enumerate() {
                 rows.push(Row {
                     catalog: alias.clone(),
-                    schema: table.schema_name.clone(),
+                    schema: crate::protocol_v3::schema_leaf(&table.schema_path).to_string(),
                     table: table.name.clone(),
                     index: index as i64,
                     function: branch.function_name,

@@ -61,7 +61,7 @@ use datafusion::physical_plan::projection::{ProjectionExec, ProjectionExpr};
 use datafusion::physical_plan::union::UnionExec;
 use datafusion::physical_plan::ExecutionPlan;
 
-use crate::{datafusion_constraints, to_df, VgiConnection, VgiTableProvider};
+use crate::{to_df, VgiConnection, VgiTableProvider};
 
 type CachedTable = Result<Arc<dyn TableProvider>, String>;
 
@@ -94,7 +94,7 @@ struct CatalogTableSpec {
 /// variadic `get_field(s, 'a', ...)` UDF. Record that as the precise dotted
 /// path and skip its children: also recording the base `s` would incorrectly
 /// satisfy every required descendant of the struct.
-fn filtered_catalog_paths(filters: &[Expr]) -> DFResult<HashSet<String>> {
+fn filtered_catalog_paths(filters: &[Expr]) -> DFResult<HashSet<Vec<String>>> {
     let mut present = HashSet::new();
     for filter in filters {
         filter.apply(|expr| {
@@ -107,7 +107,7 @@ fn filtered_catalog_paths(filters: &[Expr]) -> DFResult<HashSet<String>> {
                 }
             }
             if let Expr::Column(column) = expr {
-                present.insert(column.name.clone());
+                present.insert(vec![column.name.clone()]);
             }
             Ok(TreeNodeRecursion::Continue)
         })?;
@@ -115,9 +115,9 @@ fn filtered_catalog_paths(filters: &[Expr]) -> DFResult<HashSet<String>> {
     Ok(present)
 }
 
-fn static_get_field_path(expr: &Expr) -> Option<String> {
+fn static_get_field_path(expr: &Expr) -> Option<Vec<String>> {
     match expr {
-        Expr::Column(column) => Some(column.name.clone()),
+        Expr::Column(column) => Some(vec![column.name.clone()]),
         Expr::ScalarFunction(function)
             if function.name() == "get_field" && function.args.len() >= 2 =>
         {
@@ -129,8 +129,7 @@ fn static_get_field_path(expr: &Expr) -> Option<String> {
                     | Expr::Literal(ScalarValue::LargeUtf8(Some(name)), _) => name,
                     _ => return None,
                 };
-                path.push('.');
-                path.push_str(name);
+                path.push(name.clone());
             }
             Some(path)
         }
@@ -138,28 +137,49 @@ fn static_get_field_path(expr: &Expr) -> Option<String> {
     }
 }
 
-fn required_path_is_present(required: &str, present: &HashSet<String>) -> bool {
-    let mut candidate = required;
-    loop {
-        if present.contains(candidate) {
+fn required_path_is_present(required: &[String], present: &HashSet<Vec<String>>) -> bool {
+    for length in (1..=required.len()).rev() {
+        if present.contains(&required[..length]) {
             return true;
         }
-        let Some((parent, _)) = candidate.rsplit_once('.') else {
-            return false;
-        };
-        candidate = parent;
     }
+    false
 }
 
-fn render_required_filter_group(group: &[String]) -> String {
+fn render_required_path(path: &[String]) -> String {
+    path.iter()
+        .map(|part| {
+            if part
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                part.clone()
+            } else {
+                format!("{part:?}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn render_required_filter_group(group: &[Vec<String>]) -> String {
     if group.len() == 1 {
-        group[0].clone()
+        render_required_path(&group[0])
     } else {
-        format!("one of ({})", group.join(", "))
+        format!(
+            "one of ({})",
+            group
+                .iter()
+                .map(|path| render_required_path(path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 
-fn render_required_filter_groups<'a>(groups: impl IntoIterator<Item = &'a Vec<String>>) -> String {
+fn render_required_filter_groups<'a>(
+    groups: impl IntoIterator<Item = &'a Vec<Vec<String>>>,
+) -> String {
     groups
         .into_iter()
         .map(|group| render_required_filter_group(group))
@@ -205,18 +225,18 @@ fn catalog_table_spec(branch: &vgi_client::ScanBranch) -> DFResult<Option<Catalo
                 "VGI catalog-table branch for source table {table:?} has no source_catalog"
             ))
         })?;
-    let schema = branch
-        .source_schema
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            DataFusionError::Plan(format!(
-                "VGI catalog-table branch for source table {table:?} has no source_schema"
-            ))
-        })?;
+    let schema_path = branch.source_schema_path.as_deref().ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "VGI catalog-table branch for source table {table:?} has no source_schema_path"
+        ))
+    })?;
+    let schema = crate::protocol_v3::require_flat_schema_path(
+        schema_path,
+        &format!("catalog-table branch for {table:?}"),
+    )?;
     Ok(Some(CatalogTableSpec {
         catalog: catalog.to_string(),
-        schema: schema.to_string(),
+        schema,
         table: table.to_string(),
     }))
 }
@@ -491,25 +511,40 @@ mod required_filter_tests {
             get_field_path(col("wrapper"), vec![lit("mid"), lit("leaf")]).is_not_null(),
         ];
         let present = filtered_catalog_paths(&filters).unwrap();
-        assert!(present.contains("top"));
-        assert!(present.contains("s.a"));
-        assert!(present.contains("wrapper.mid.leaf"));
-        assert!(!present.contains("s"));
-        assert!(!present.contains("wrapper"));
+        assert!(present.contains(&vec!["top".into()]));
+        assert!(present.contains(&vec!["s".into(), "a".into()]));
+        assert!(present.contains(&vec!["wrapper".into(), "mid".into(), "leaf".into()]));
+        assert!(!present.contains(&vec!["s".into()]));
+        assert!(!present.contains(&vec!["wrapper".into()]));
     }
 
     #[test]
     fn only_present_parent_paths_satisfy_required_descendants() {
-        let present = HashSet::from(["bbox".to_string(), "ticker.symbol".to_string()]);
-        assert!(required_path_is_present("bbox.xmin", &present));
-        assert!(required_path_is_present("ticker.symbol", &present));
-        assert!(!required_path_is_present("ticker", &present));
-        assert!(!required_path_is_present("bbox2.xmin", &present));
+        let present = HashSet::from([
+            vec!["bbox".to_string()],
+            vec!["ticker".to_string(), "symbol".to_string()],
+        ]);
+        assert!(required_path_is_present(
+            &["bbox".into(), "xmin".into()],
+            &present
+        ));
+        assert!(required_path_is_present(
+            &["ticker".into(), "symbol".into()],
+            &present
+        ));
+        assert!(!required_path_is_present(&["ticker".into()], &present));
+        assert!(!required_path_is_present(
+            &["bbox2".into(), "xmin".into()],
+            &present
+        ));
     }
 
     #[test]
     fn cnf_groups_render_with_or_members() {
-        let required = vec![vec!["ticker".into(), "cik".into()], vec!["date".into()]];
+        let required = vec![
+            vec![vec!["ticker".into()], vec!["cik".into()]],
+            vec![vec!["date".into()]],
+        ];
         assert_eq!(
             render_required_filter_groups(&required),
             "one of (ticker, cik), date"
@@ -532,17 +567,11 @@ mod native_format_tests {
             comment: None,
             tags: Vec::new(),
             name: name.into(),
-            schema_name: "main".into(),
+            schema_path: vec!["main".into()],
             columns: vgi_protocol::ipc::write_schema(&schema).unwrap().into(),
-            not_null_constraints: Vec::new(),
-            unique_constraints: Vec::new(),
-            check_constraints: Vec::new(),
-            primary_key_constraints: Vec::new(),
-            foreign_key_constraints: Vec::new(),
-            supports_insert: false,
-            supports_update: false,
-            supports_delete: false,
-            supports_returning: false,
+            constraints: Vec::new(),
+            definition_revision: None,
+            write_result_modes: Vec::new(),
             supports_column_statistics: false,
             scan_function: None,
             insert_function: None,
@@ -553,6 +582,8 @@ mod native_format_tests {
             column_statistics: None,
             bind_result: None,
             required_filters: Vec::new(),
+            options: None,
+            layout: None,
         };
         VgiCatalogTableProvider::new(
             VgiConnection::subprocess(["/bin/false"]),
@@ -577,12 +608,12 @@ mod native_format_tests {
                 branch_filter: None,
                 writable: false,
                 source_catalog: Some("source".into()),
-                source_schema: Some("main".into()),
+                source_schema_path: Some(vec!["main".into()]),
                 source_table: Some("events".into()),
                 format_name: None,
                 format_locations: None,
                 format_options: None,
-                schema_name: None,
+                schema_path: None,
             },
             provider,
             null_string: None,
@@ -654,12 +685,12 @@ mod native_format_tests {
             branch_filter: None,
             writable: false,
             source_catalog: Some("lake".into()),
-            source_schema: Some("main".into()),
+            source_schema_path: Some(vec!["main".into()]),
             source_table: Some("events".into()),
             format_name: None,
             format_locations: None,
             format_options: None,
-            schema_name: None,
+            schema_path: None,
         };
         assert_eq!(
             catalog_table_spec(&branch).unwrap(),
@@ -671,9 +702,9 @@ mod native_format_tests {
         );
 
         let mut missing_schema = branch;
-        missing_schema.source_schema = None;
+        missing_schema.source_schema_path = None;
         let error = catalog_table_spec(&missing_schema).unwrap_err();
-        assert!(error.to_string().contains("no source_schema"));
+        assert!(error.to_string().contains("no source_schema_path"));
     }
 
     #[test]
@@ -799,12 +830,12 @@ mod native_format_tests {
                 branch_filter: Some("id >= 2".into()),
                 writable: false,
                 source_catalog: Some("datafusion".into()),
-                source_schema: Some("public".into()),
+                source_schema_path: Some(vec!["public".into()]),
                 source_table: Some("source_events".into()),
                 format_name: None,
                 format_locations: None,
                 format_options: None,
-                schema_name: None,
+                schema_path: None,
             },
             provider: raw_provider,
             null_string: None,
@@ -873,11 +904,7 @@ impl VgiCatalogTableProvider {
                 .collect::<Vec<_>>(),
             output_schema.metadata().clone(),
         ));
-        let constraints = datafusion_constraints(
-            info.primary_key_constraints.clone(),
-            info.unique_constraints.clone(),
-            output_schema.fields().len(),
-        )?;
+        let constraints = crate::datafusion_constraints_v3(&info.constraints, &output_schema)?;
         Ok(Arc::new(Self {
             conn,
             mount_alias: mount_alias.into(),
@@ -1210,7 +1237,16 @@ impl VgiCatalogTableProvider {
                                     &self.schema_name,
                                     &branch.function_name,
                                     branch.arguments.clone(),
-                                    branch.schema_name.clone(),
+                                    branch
+                                        .schema_path
+                                        .as_deref()
+                                        .map(|path| {
+                                            crate::protocol_v3::require_flat_schema_path(
+                                                path,
+                                                "scan function branch",
+                                            )
+                                        })
+                                        .transpose()?,
                                 )
                                 .await?,
                                 None,
@@ -1380,7 +1416,13 @@ impl VgiCatalogTableProvider {
                         format!(
                             "catalog table {}.{}.{}",
                             branch.info.source_catalog.as_deref().unwrap_or("?"),
-                            branch.info.source_schema.as_deref().unwrap_or("?"),
+                            branch
+                                .info
+                                .source_schema_path
+                                .as_deref()
+                                .map(crate::protocol_v3::display_schema_path)
+                                .as_deref()
+                                .unwrap_or("?"),
                             table
                         )
                     })
@@ -1492,7 +1534,10 @@ impl VgiCatalogTableProvider {
                 } else {
                     let connection = self.conn.clone();
                     let catalog = self.catalog.clone();
-                    let schema = self.info.schema_name.clone();
+                    let schema = crate::protocol_v3::require_flat_schema_path(
+                        &self.info.schema_path,
+                        "catalog table",
+                    )?;
                     let table = self.info.name.clone();
                     tokio::task::spawn_blocking(move || {
                         let mut client = connection.connect()?;
@@ -2232,10 +2277,16 @@ impl VgiCatalogProvider {
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
 
         let mut schemas: HashMap<String, Arc<VgiSchemaProvider>> = HashMap::new();
-        for name in schema_infos.iter().map(|schema| schema.name.clone()) {
+        for schema in &schema_infos {
+            let name =
+                crate::protocol_v3::require_flat_schema_path(&schema.path, "catalog schema")?;
             let sp = VgiSchemaProvider::discover(conn.clone(), mount_alias, catalog, &name).await?;
             schemas.insert(name, sp);
         }
+        let default_schema = default_schema
+            .filter(|name| schemas.contains_key(name))
+            .or_else(|| schemas.keys().min().cloned())
+            .unwrap_or_default();
         Ok(Arc::new(Self {
             schemas,
             comment,

@@ -90,6 +90,7 @@ mod diagnostics;
 mod filters;
 mod order_pushdown;
 mod profiling;
+mod protocol_v3;
 mod runtime;
 mod sampling;
 mod scalar;
@@ -1133,14 +1134,16 @@ impl VgiTableProvider {
             tokio::task::spawn_blocking(move || {
                 let mut client = c.connect()?;
                 let attached = c.attach(&mut client, &cat)?;
-                let default_schema = attached.default_schema().to_string();
+                let default_schema = attached.default_schema().map(str::to_owned);
                 let candidates: Vec<String> =
                     if let Some(schema) = branch_schema_name.filter(|s| !s.is_empty()) {
                         vec![schema]
                     } else {
                         let mut cands = vec![table_schema_for_bind];
-                        if default_schema != cands[0] {
-                            cands.push(default_schema);
+                        if let Some(default_schema) = default_schema {
+                            if default_schema != cands[0] {
+                                cands.push(default_schema);
+                            }
                         }
                         cands
                     };
@@ -1214,8 +1217,9 @@ impl VgiTableProvider {
         let c = conn.clone();
         let cat2 = catalog.clone();
         let bind_at = at.clone();
-        let primary_keys = info.primary_key_constraints.clone();
-        let unique_keys = info.unique_constraints.clone();
+        let encoded_constraints = info.constraints.clone();
+        let table_schema =
+            crate::protocol_v3::require_flat_schema_path(&info.schema_path, "catalog table")?;
         let cardinality_estimate = at
             .is_none()
             .then_some(info.cardinality_estimate.0)
@@ -1261,17 +1265,21 @@ impl VgiTableProvider {
             // function's registry, for instance), since the same function
             // name can legitimately be registered in more than one schema and
             // the heuristic below can't tell those apart.
-            let default_schema = attached.default_schema().to_string();
-            let candidates: Vec<String> =
-                if let Some(schema) = scan.schema_name.clone().filter(|s| !s.is_empty()) {
-                    vec![schema]
-                } else {
-                    let mut c = vec![info.schema_name.clone()];
-                    if default_schema != info.schema_name {
+            let default_schema = attached.default_schema().map(str::to_owned);
+            let candidates: Vec<String> = if let Some(schema) = scan.schema_path.as_deref() {
+                vec![crate::protocol_v3::require_flat_schema_path(
+                    schema,
+                    "scan function",
+                )?]
+            } else {
+                let mut c = vec![table_schema];
+                if let Some(default_schema) = default_schema {
+                    if default_schema != c[0] {
                         c.push(default_schema);
                     }
-                    c
-                };
+                }
+                c
+            };
 
             let mut last_err = None;
             for schema in &candidates {
@@ -1305,10 +1313,9 @@ impl VgiTableProvider {
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))??;
         let output_schema = statistics_bind.output_schema().clone();
-        let constraints = Some(datafusion_constraints(
-            primary_keys,
-            unique_keys,
-            output_schema.fields().len(),
+        let constraints = Some(datafusion_constraints_v3(
+            &encoded_constraints,
+            &output_schema,
         )?);
 
         Ok(Arc::new(Self {
@@ -1929,36 +1936,55 @@ fn split_byte_count<'a>(splits: impl Iterator<Item = &'a ScanSplitInfo>) -> Prec
     Precision::Inexact(total)
 }
 
-pub(crate) fn datafusion_constraints(
-    primary_keys: Vec<Vec<i32>>,
-    unique_keys: Vec<Vec<i32>>,
-    column_count: usize,
+/// Translate VGI 3.0's canonical, name-based constraint records into the
+/// top-level ordinal constraints DataFusion can represent.
+pub(crate) fn datafusion_constraints_v3(
+    encoded: &[vgi_client::Bytes],
+    schema: &datafusion::arrow::datatypes::Schema,
 ) -> DFResult<Constraints> {
-    fn indices(values: Vec<i32>, column_count: usize) -> DFResult<Vec<usize>> {
-        values
-            .into_iter()
-            .map(|value| {
-                let index = usize::try_from(value).map_err(|_| {
-                    DataFusionError::Plan(format!(
-                        "VGI table constraint contains negative column index {value}"
-                    ))
-                })?;
-                if index >= column_count {
-                    return Err(DataFusionError::Plan(format!(
-                        "VGI table constraint column index {index} exceeds schema width {column_count}"
-                    )));
-                }
-                Ok(index)
-            })
-            .collect()
-    }
+    use vgi_protocol::generated::protocol_types::{ConstraintDefinition, ConstraintInfo};
 
-    let mut constraints = Vec::with_capacity(primary_keys.len() + unique_keys.len());
-    for key in primary_keys {
-        constraints.push(Constraint::PrimaryKey(indices(key, column_count)?));
-    }
-    for key in unique_keys {
-        constraints.push(Constraint::Unique(indices(key, column_count)?));
+    let mut constraints = Vec::new();
+    for bytes in encoded {
+        let batch = vgi_protocol::ipc::read_batch(&bytes.0).map_err(to_df)?;
+        let info: ConstraintInfo = vgi_protocol::wire::from_batch(&batch).map_err(to_df)?;
+        // An optimization property must describe the existing rows and be
+        // enforced. Metadata-only or future/unvalidated declarations remain
+        // visible in diagnostics but cannot justify shuffle/sort elimination.
+        if info.enforcement.0 != "ENFORCED" || info.validation.0 != "ALL_ROWS" {
+            continue;
+        }
+        let batch = vgi_protocol::ipc::read_batch(&info.definition.0).map_err(to_df)?;
+        let definition: ConstraintDefinition =
+            vgi_protocol::wire::from_batch(&batch).map_err(to_df)?;
+        let kind = definition.kind.0.as_str();
+        if kind != "PRIMARY_KEY" && kind != "UNIQUE" {
+            continue;
+        }
+
+        let mut indices = Vec::with_capacity(definition.column_paths.len());
+        let mut representable = true;
+        for path in &definition.column_paths {
+            let [name] = path.as_slice() else {
+                representable = false;
+                break;
+            };
+            let index = schema.index_of(name).map_err(|_| {
+                DataFusionError::Plan(format!(
+                    "VGI {kind} constraint references missing column path {}",
+                    crate::protocol_v3::display_schema_path(path)
+                ))
+            })?;
+            indices.push(index);
+        }
+        if !representable || indices.is_empty() {
+            continue;
+        }
+        constraints.push(if kind == "PRIMARY_KEY" {
+            Constraint::PrimaryKey(indices)
+        } else {
+            Constraint::Unique(indices)
+        });
     }
     Ok(Constraints::new_unverified(constraints))
 }

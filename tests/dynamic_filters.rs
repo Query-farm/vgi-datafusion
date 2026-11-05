@@ -74,14 +74,17 @@ async fn filter_echo_schema(connection: &VgiConnection) -> Option<String> {
             .attach("example", vgi_client::AttachOptions::default())
             .ok()?;
         for schema in client.schemas(&catalog).ok()? {
+            let [schema_name] = schema.path.as_slice() else {
+                continue;
+            };
             let functions = client
-                .functions(&catalog, &schema.name, vgi_client::FunctionKind::Table)
+                .functions(&catalog, schema_name, vgi_client::FunctionKind::Table)
                 .ok()?;
             if functions
                 .iter()
                 .any(|function| function.name == "filter_echo_table_scan")
             {
-                return Some(schema.name);
+                return Some(schema_name.clone());
             }
         }
         None

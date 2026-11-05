@@ -1219,11 +1219,14 @@ async fn filter_echo_schema(conn: &VgiConnection) -> Option<String> {
             .attach("example", vgi_client::AttachOptions::default())
             .ok()?;
         for s in client.schemas(&cat).ok()? {
+            let [schema] = s.path.as_slice() else {
+                continue;
+            };
             let fns = client
-                .functions(&cat, &s.name, vgi_client::FunctionKind::Table)
+                .functions(&cat, schema, vgi_client::FunctionKind::Table)
                 .ok()?;
             if fns.iter().any(|f| f.name == "filter_echo_table_scan") {
-                return Some(s.name);
+                return Some(schema.clone());
             }
         }
         None

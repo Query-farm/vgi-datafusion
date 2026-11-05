@@ -135,7 +135,8 @@ struct SqlCatalogNamespace {
     schemas: HashMap<String, SqlMacroNamespace>,
 }
 
-type SessionMacros = HashMap<String, HashMap<String, Arc<SqlMacro>>>;
+type SqlMacroFamily = Vec<SqlMacro>;
+type SessionMacros = HashMap<String, HashMap<String, Arc<SqlMacroFamily>>>;
 
 fn macro_registry() -> &'static Mutex<SessionMacros> {
     static REGISTRY: OnceLock<Mutex<SessionMacros>> = OnceLock::new();
@@ -367,7 +368,7 @@ fn macro_key(name: &ObjectName) -> Option<String> {
     Some(path.join(".").to_ascii_lowercase())
 }
 
-fn lookup_macro(ctx: &SessionContext, name: &ObjectName) -> Option<Arc<SqlMacro>> {
+fn lookup_macro(ctx: &SessionContext, name: &ObjectName) -> Option<Arc<SqlMacroFamily>> {
     let key = macro_key(name)?;
     macro_registry()
         .lock()
@@ -493,6 +494,48 @@ fn bind_macro_arguments(
     Ok(actual.into_iter().map(Option::unwrap).collect())
 }
 
+fn bind_macro_overload<'a>(
+    name: &ObjectName,
+    family: &'a [SqlMacro],
+    kind: SqlMacroKind,
+    arguments: &[FunctionArg],
+) -> DFResult<(&'a SqlMacro, Vec<Expr>)> {
+    let candidates = family
+        .iter()
+        .filter(|overload| overload.kind == kind)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        let other = if kind == SqlMacroKind::Scalar {
+            "table"
+        } else {
+            "scalar"
+        };
+        return plan_err!("VGI {other} macro `{name}` cannot be used in this context");
+    }
+
+    let mut matches = Vec::new();
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        match bind_macro_arguments(name, candidate, arguments) {
+            Ok(actual) => matches.push((candidate, actual)),
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.pop().expect("length checked")),
+        0 if family.len() == 1 => Err(datafusion::common::DataFusionError::Plan(
+            failures.pop().unwrap_or_else(|| format!("VGI macro `{name}` has no usable overload")),
+        )),
+        0 => plan_err!(
+            "VGI macro `{name}` has no overload matching these arguments ({})",
+            failures.join("; ")
+        ),
+        count => plan_err!(
+            "VGI macro `{name}` call is ambiguous across {count} overloads; DataFusion cannot dispatch macro overloads by declared parameter type before expression planning"
+        ),
+    }
+}
+
 fn substitute_macro<T: VisitMut>(template: &mut T, parameters: &[String], actual: &[Expr]) {
     struct Substitute<'a> {
         parameters: &'a [String],
@@ -526,22 +569,8 @@ fn expand_scalar_macro(
     let Expr::Function(function) = expr else {
         return Ok(None);
     };
-    let Some(info) = lookup_macro(ctx, &function.name) else {
+    let Some(family) = lookup_macro(ctx, &function.name) else {
         return Ok(None);
-    };
-    if info.kind != SqlMacroKind::Scalar {
-        return plan_err!(
-            "VGI table macro `{}` cannot be used as a scalar",
-            function.name
-        );
-    }
-    let SqlMacroBody::Scalar(template) = &info.body else {
-        return match &info.body {
-            SqlMacroBody::Invalid(error) => {
-                plan_err!("invalid VGI macro `{}`: {error}", function.name)
-            }
-            _ => plan_err!("VGI macro `{}` has an invalid scalar body", function.name),
-        };
     };
     let FunctionArguments::List(arguments) = &function.args else {
         return plan_err!(
@@ -562,7 +591,20 @@ fn expand_scalar_macro(
             function.name
         );
     }
-    let actual = bind_macro_arguments(&function.name, &info, &arguments.args)?;
+    let (info, actual) = bind_macro_overload(
+        &function.name,
+        family.as_slice(),
+        SqlMacroKind::Scalar,
+        &arguments.args,
+    )?;
+    let SqlMacroBody::Scalar(template) = &info.body else {
+        return match &info.body {
+            SqlMacroBody::Invalid(error) => {
+                plan_err!("invalid VGI macro `{}`: {error}", function.name)
+            }
+            _ => plan_err!("VGI macro `{}` has an invalid scalar body", function.name),
+        };
+    };
     let key = macro_key(&function.name).expect("a registered macro has a qualified key");
     if let Some(cycle_start) = active.iter().position(|candidate| candidate == &key) {
         let mut cycle = active[cycle_start..].to_vec();
@@ -618,12 +660,9 @@ fn expand_table_macro(ctx: &SessionContext, factor: &TableFactor) -> DFResult<Op
     else {
         return Ok(None);
     };
-    let Some(info) = lookup_macro(ctx, name) else {
+    let Some(family) = lookup_macro(ctx, name) else {
         return Ok(None);
     };
-    if info.kind != SqlMacroKind::Table {
-        return plan_err!("VGI scalar macro `{name}` cannot be used as a relation");
-    }
     if arguments.settings.is_some()
         || !with_hints.is_empty()
         || version.is_some()
@@ -636,13 +675,18 @@ fn expand_table_macro(ctx: &SessionContext, factor: &TableFactor) -> DFResult<Op
             "VGI table macro `{name}` does not accept SETTINGS, hints, versions, ordinality, partitions, JSON paths, or index hints"
         );
     }
+    let (info, actual) = bind_macro_overload(
+        name,
+        family.as_slice(),
+        SqlMacroKind::Table,
+        &arguments.args,
+    )?;
     let SqlMacroBody::Table(template) = &info.body else {
         return match &info.body {
             SqlMacroBody::Invalid(error) => plan_err!("invalid VGI macro `{name}`: {error}"),
             _ => plan_err!("VGI macro `{name}` has an invalid table body"),
         };
     };
-    let actual = bind_macro_arguments(name, &info, &arguments.args)?;
     let mut subquery = template.clone();
     substitute_macro(subquery.as_mut(), &info.parameters, &actual);
     Ok(Some(TableFactor::Derived {
@@ -2516,10 +2560,8 @@ fn prepare_global_functions(
             if let Some(existing) = prepared.iter_mut().find(|candidate| {
                 candidate.name == name
                     && candidate.info.name.eq_ignore_ascii_case(&info.name)
-                    && candidate
-                        .info
-                        .schema_name
-                        .eq_ignore_ascii_case(&info.schema_name)
+                    && crate::protocol_v3::schema_leaf(&candidate.info.schema_path)
+                        .eq_ignore_ascii_case(crate::protocol_v3::schema_leaf(&info.schema_path))
                     && matches!(&candidate.kind, PreparedGlobalKind::Scalar { .. })
             }) {
                 let PreparedGlobalKind::Scalar {
@@ -2605,7 +2647,7 @@ fn register_global_functions(
                     VgiScalarUdf::discovered_overloads_with_volatility(
                         conn.clone(),
                         &spec.catalog,
-                        &info.schema_name,
+                        crate::protocol_v3::schema_leaf(&info.schema_path),
                         &info.name,
                         name,
                         overloads.clone(),
@@ -2621,7 +2663,7 @@ fn register_global_functions(
                     VgiAggregateUdf::new_with_volatility(
                         conn.clone(),
                         &spec.catalog,
-                        &info.schema_name,
+                        crate::protocol_v3::schema_leaf(&info.schema_path),
                         &info.name,
                         name,
                         metadata_volatility(info),
@@ -2637,7 +2679,7 @@ fn register_global_functions(
                 let table = Arc::new(VgiTableFunction::new(
                     conn.clone(),
                     &spec.catalog,
-                    &info.schema_name,
+                    crate::protocol_v3::schema_leaf(&info.schema_path),
                     &info.name,
                     Some(metadata.clone()),
                 ));
@@ -2886,35 +2928,68 @@ fn register_macros(ctx: &SessionContext, spec: &AttachSpec, provider: &VgiCatalo
     let alias_prefix = format!("{}.", spec.alias.to_ascii_lowercase());
     macros.retain(|name, _| !name.starts_with(&alias_prefix));
     for info in provider.metadata_macros() {
-        let (kind, mut body) = match sql_macro_kind(&info.macro_type.0) {
-            Ok(kind) => (kind, parse_macro_body(kind, &info.definition)),
-            Err(error) => (SqlMacroKind::Scalar, SqlMacroBody::Invalid(error)),
-        };
-        qualify_macro_body(&mut body, &spec.alias, &info.schema_name, &namespace);
-        let defaults = match vgi_client::decode_macro_defaults(info) {
-            Ok(defaults) => defaults
-                .into_iter()
-                .map(|(name, value)| (name.to_ascii_lowercase(), value))
-                .collect(),
-            Err(error) => {
-                body = SqlMacroBody::Invalid(format!("invalid parameter defaults: {error}"));
-                HashMap::new()
-            }
-        };
-        let registered = Arc::new(SqlMacro {
-            kind,
-            parameters: info.parameters.clone(),
-            defaults,
-            body,
-        });
+        let family_schema = crate::protocol_v3::schema_leaf(&info.schema_path).to_string();
+        let mut family = Vec::with_capacity(info.overloads.len().max(1));
+        for overload in &info.overloads {
+            let kind = match sql_macro_kind(&overload.macro_type) {
+                Ok(kind) => kind,
+                Err(error) => {
+                    family.push(SqlMacro {
+                        kind: SqlMacroKind::Scalar,
+                        parameters: Vec::new(),
+                        defaults: HashMap::new(),
+                        body: SqlMacroBody::Invalid(error),
+                    });
+                    continue;
+                }
+            };
+            let mut body = parse_macro_body(kind, &overload.definition);
+            let schema_name = match crate::protocol_v3::require_flat_schema_path(
+                &overload.schema_path,
+                "macro overload",
+            ) {
+                Ok(schema) => schema,
+                Err(error) => {
+                    body = SqlMacroBody::Invalid(error.to_string());
+                    family_schema.clone()
+                }
+            };
+            let defaults = match vgi_client::decode_macro_defaults(overload) {
+                Ok(defaults) => defaults
+                    .into_iter()
+                    .map(|(name, value)| (name.to_ascii_lowercase(), value))
+                    .collect(),
+                Err(error) => {
+                    body = SqlMacroBody::Invalid(format!("invalid parameter defaults: {error}"));
+                    HashMap::new()
+                }
+            };
+            qualify_macro_body(&mut body, &spec.alias, &schema_name, &namespace);
+            family.push(SqlMacro {
+                kind,
+                parameters: overload
+                    .parameters
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect(),
+                defaults,
+                body,
+            });
+        }
+        if family.is_empty() {
+            family.push(SqlMacro {
+                kind: SqlMacroKind::Scalar,
+                parameters: Vec::new(),
+                defaults: HashMap::new(),
+                body: SqlMacroBody::Invalid("macro declares no overloads".to_string()),
+            });
+        }
+        let registered = Arc::new(family);
         macros.insert(
-            format!("{}.{}.{}", spec.alias, info.schema_name, info.name).to_ascii_lowercase(),
+            format!("{}.{}.{}", spec.alias, family_schema, info.name).to_ascii_lowercase(),
             Arc::clone(&registered),
         );
-        if info
-            .schema_name
-            .eq_ignore_ascii_case(provider.default_schema())
-        {
+        if family_schema.eq_ignore_ascii_case(provider.default_schema()) {
             macros.insert(
                 format!("{}.{}", spec.alias, info.name).to_ascii_lowercase(),
                 registered,
@@ -3169,7 +3244,7 @@ mod tests {
         defaults: &[(&str, i64)],
         definition: &str,
     ) {
-        let registered = Arc::new(SqlMacro {
+        let registered = Arc::new(vec![SqlMacro {
             kind,
             parameters: parameters.iter().map(|value| value.to_string()).collect(),
             defaults: defaults
@@ -3183,7 +3258,7 @@ mod tests {
                 })
                 .collect(),
             body: parse_macro_body(kind, definition),
-        });
+        }]);
         let mut sessions = macro_registry().lock().unwrap();
         let macros = sessions.entry(ctx.session_id()).or_default();
         for name in names {
@@ -3561,6 +3636,34 @@ mod tests {
             query_i64(&ctx, "SELECT example.vgi_clamp(50, hi := 25)").await,
             25
         );
+    }
+
+    #[tokio::test]
+    async fn scalar_macro_overloads_dispatch_by_arguments() {
+        let ctx = SessionContext::new();
+        let family = Arc::new(vec![
+            SqlMacro {
+                kind: SqlMacroKind::Scalar,
+                parameters: vec!["x".to_string()],
+                defaults: HashMap::new(),
+                body: parse_macro_body(SqlMacroKind::Scalar, "x + 1"),
+            },
+            SqlMacro {
+                kind: SqlMacroKind::Scalar,
+                parameters: vec!["x".to_string(), "y".to_string()],
+                defaults: HashMap::new(),
+                body: parse_macro_body(SqlMacroKind::Scalar, "x + y"),
+            },
+        ]);
+        macro_registry()
+            .lock()
+            .unwrap()
+            .entry(ctx.session_id())
+            .or_default()
+            .insert("ex.main.overloaded".to_string(), family);
+
+        assert_eq!(query_i64(&ctx, "SELECT ex.main.overloaded(5)").await, 6);
+        assert_eq!(query_i64(&ctx, "SELECT ex.main.overloaded(4, 5)").await, 9);
     }
 
     #[tokio::test]
