@@ -2797,7 +2797,14 @@ impl VgiScanExec {
         };
         let output_partitioning = split_groups
             .as_ref()
-            .and_then(|planned| split_range_partitioning(&schema, planned))
+            .and_then(|planned| {
+                split_range_partitioning(
+                    &schema,
+                    &remote_bind_schema,
+                    column_mapping.as_deref(),
+                    planned,
+                )
+            })
             .unwrap_or_else(|| Partitioning::UnknownPartitioning(partitions.max(1)));
         let properties = Arc::new(PlanProperties::new(
             equivalence,
@@ -2842,6 +2849,13 @@ impl VgiScanExec {
         };
         let mut cache_ineligible_reason = result_cache_ineligible
             .or_else(|| conn.cache_environment_ineligible_reason(&catalog))
+            // Cache replay currently emits a whole cached result from physical
+            // partition zero. That is correct for ordinary scans, but it would
+            // violate an advertised exact range partitioning contract.
+            .or(split_groups
+                .as_ref()
+                .is_some_and(|planned| planned.plan.range_partitioning.is_some())
+                .then_some(crate::runtime::CacheIneligibleReason::RangePartitioned))
             .or((!cache_preserves_ordering)
                 .then_some(crate::runtime::CacheIneligibleReason::OrderedSplit));
         let cache_key = if cache_ineligible_reason.is_none() {
@@ -3241,13 +3255,18 @@ mod scan_cache_contract_tests {
         let key = vgi_client::Bytes(
             vgi_protocol::ipc::write_batch(&vgi_protocol::wire::to_batch(key).unwrap()).unwrap(),
         );
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let remote_schema = Arc::new(Schema::new(vec![Field::new(
             "event_time",
             DataType::Int64,
             true,
         )]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "timestamp",
+            DataType::Int64,
+            true,
+        )]));
         let points = RecordBatch::try_new(
-            Arc::clone(&schema),
+            Arc::clone(&remote_schema),
             vec![Arc::new(Int64Array::from(vec![10, 20]))],
         )
         .unwrap();
@@ -3282,7 +3301,10 @@ mod scan_cache_contract_tests {
         assert_eq!(planned.groups[0].tokens, vec![vec![1]]);
         assert_eq!(planned.groups[1].tokens, vec![vec![2], vec![4]]);
         assert_eq!(planned.groups[2].tokens, vec![vec![3]]);
-        let partitioning = split_range_partitioning(&schema, &planned).unwrap();
+        let mapping =
+            std::collections::HashMap::from([("timestamp".to_string(), "event_time".to_string())]);
+        let partitioning =
+            split_range_partitioning(&schema, &remote_schema, Some(&mapping), &planned).unwrap();
         let Partitioning::Range(range) = partitioning else {
             panic!("expected range partitioning")
         };
@@ -4065,7 +4087,12 @@ fn split_ordering(schema: &SchemaRef, planned: &PlannedSplits) -> Option<Vec<Phy
 /// Other registry transforms deliberately remain unknown until this adapter
 /// implements their normative evaluation semantics. A false range claim can
 /// silently produce incorrect partitioned joins.
-fn split_range_partitioning(schema: &SchemaRef, planned: &PlannedSplits) -> Option<Partitioning> {
+fn split_range_partitioning(
+    schema: &SchemaRef,
+    remote_bind_schema: &SchemaRef,
+    column_mapping: Option<&HashMap<String, String>>,
+    planned: &PlannedSplits,
+) -> Option<Partitioning> {
     if !planned.range_grouped {
         return None;
     }
@@ -4097,9 +4124,25 @@ fn split_range_partitioning(schema: &SchemaRef, planned: &PlannedSplits) -> Opti
         if path.components.len() != 1 {
             return None;
         }
-        let name = &path.components[0];
-        let column_index = schema.index_of(name).ok()?;
-        if split_points.column(index).data_type() != schema.field(column_index).data_type() {
+        let remote_name = &path.components[0];
+        let remote_index = remote_bind_schema.index_of(remote_name).ok()?;
+        let public_name = match column_mapping {
+            Some(mapping) => {
+                let mut matches = mapping
+                    .iter()
+                    .filter_map(|(public, worker)| (worker == remote_name).then_some(public));
+                let name = matches.next()?;
+                if matches.next().is_some() {
+                    return None;
+                }
+                name
+            }
+            None => remote_name,
+        };
+        let column_index = schema.index_of(public_name).ok()?;
+        let remote_type = remote_bind_schema.field(remote_index).data_type();
+        let public_type = schema.field(column_index).data_type();
+        if remote_type != public_type || split_points.column(index).data_type() != remote_type {
             return None;
         }
         let options = datafusion::arrow::compute::SortOptions {
@@ -4115,7 +4158,7 @@ fn split_range_partitioning(schema: &SchemaRef, planned: &PlannedSplits) -> Opti
             },
         };
         ordering.push(PhysicalSortExpr::new(
-            Arc::new(Column::new(name, column_index)),
+            Arc::new(Column::new(public_name, column_index)),
             options,
         ));
     }
