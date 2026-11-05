@@ -267,13 +267,17 @@ pipe writer still cannot interrupt a request write that has already blocked.
 - **Streaming positions.** A split that names a start position without an end
   now declares `Boundedness::Unbounded`. Checkpoint/resume policy, reconnect,
   backpressure, and long-running soak coverage still need production hardening.
-- **Partitioning and locality.** Catalog-inlined cardinality, partition bounds,
-  and column statistics feed DataFusion's provider and physical statistics APIs,
-  and within-split ordering is advertised when a physical partition contains
-  exactly one split. VGI partition transforms are not mapped
-  blindly to DataFusion hash partitioning because their hash and partition-number
-  semantics differ. A host locality hook receives worker location hints, but the
-  standalone DataFusion CLI has no distributed scheduler-affinity implementation.
+- **Partitioning and locality.** Protocol 3.1 exact range metadata is mapped to
+  DataFusion 55 `RangePartitioning` for top-level `vgi.identity/1` keys when the
+  split-point types and ordering validate and one output partition can be kept
+  per range. Unsupported transforms or inconsistent metadata remain
+  `UnknownPartitioning`; VGI transforms are never guessed to be DataFusion hash
+  partitioning because hash and partition-number semantics differ. Catalog-inlined
+  cardinality, column bounds, and column statistics feed DataFusion's provider and
+  physical statistics APIs, and within-split ordering is advertised when a physical
+  partition contains exactly one split. A host locality hook receives worker
+  location hints, but the standalone DataFusion CLI has no distributed
+  scheduler-affinity implementation.
 - **Cache breadth.** Complete, worker-opted producer and split results have a
   safe bounded memory tier with conditional revalidation and per-key
   single-flight for concurrent misses. Stateless streaming table-in/out calls

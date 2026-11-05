@@ -54,14 +54,14 @@ use datafusion::common::pruning::PrunableStatistics;
 use datafusion::common::stats::Precision;
 use datafusion::common::{
     ColumnStatistics, Constraint, Constraints, DFSchema, DataFusionError, Result as DFResult,
-    ScalarValue, Statistics,
+    ScalarValue, SplitPoint, Statistics,
 };
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_expr::{
     expressions::{Column, DynamicFilterPhysicalExpr},
-    EquivalenceProperties, PhysicalExpr, PhysicalSortExpr,
+    EquivalenceProperties, LexOrdering, PhysicalExpr, PhysicalSortExpr, RangePartitioning,
 };
 use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion::physical_plan::empty::EmptyExec;
@@ -1810,6 +1810,9 @@ struct PlannedSplits {
     /// The complete VGI plan is retained so every redemption echoes its
     /// execution context and optimizer metadata remains available.
     plan: ScanPlan,
+    /// True when groups are in exact `range_index` order and may be exposed as
+    /// DataFusion range partitioning.
+    range_grouped: bool,
     /// A start position without an end frontier is a live, unbounded stream.
     unbounded: bool,
 }
@@ -1836,6 +1839,51 @@ fn pack_splits(plan: ScanPlan, target_partitions: usize) -> PlannedSplits {
             .iter()
             .any(|split| split.start_position.is_some() && split.end_position.is_none());
     let splits = &plan.splits;
+    let max_workers = match plan.max_workers {
+        Some(m) if m > 0 => (m as usize).min(target_partitions),
+        _ => target_partitions,
+    };
+    let range_count = plan.range_partitioning.as_ref().and_then(|range| {
+        vgi_protocol::ipc::read_batch(&range.split_points.0)
+            .ok()
+            .map(|points| points.num_rows().saturating_add(1))
+    });
+    if let Some(range_count) = range_count.filter(|count| *count > 0 && *count <= max_workers) {
+        let mut group_indices: Vec<Vec<usize>> = vec![Vec::new(); range_count];
+        let mut valid = true;
+        for (index, split) in splits.iter().enumerate() {
+            let Some(range) = split
+                .range_index
+                .and_then(|range| usize::try_from(range).ok())
+                .filter(|range| *range < range_count)
+            else {
+                valid = false;
+                break;
+            };
+            group_indices[range].push(index);
+        }
+        if valid {
+            let num_rows = split_row_count(splits.iter());
+            let total_byte_size = split_byte_count(splits.iter());
+            let groups = group_indices
+                .into_iter()
+                .map(|indices| SplitGroup {
+                    num_rows: split_row_count(indices.iter().map(|&i| &splits[i])),
+                    total_byte_size: split_byte_count(indices.iter().map(|&i| &splits[i])),
+                    tokens: indices.iter().map(|&i| splits[i].token.clone()).collect(),
+                    split_indices: indices,
+                })
+                .collect();
+            return PlannedSplits {
+                groups,
+                num_rows,
+                total_byte_size,
+                plan,
+                range_grouped: true,
+                unbounded,
+            };
+        }
+    }
     if splits.is_empty() {
         return PlannedSplits {
             groups: Vec::new(),
@@ -1843,14 +1891,11 @@ fn pack_splits(plan: ScanPlan, target_partitions: usize) -> PlannedSplits {
             num_rows: Precision::Exact(0),
             total_byte_size: Precision::Exact(0),
             plan,
+            range_grouped: false,
             unbounded,
         };
     }
-    let cap = match plan.max_workers {
-        Some(m) if m > 0 => (m as usize).min(target_partitions),
-        _ => target_partitions,
-    };
-    let n = cap.min(splits.len()).max(1);
+    let n = max_workers.min(splits.len()).max(1);
 
     // Longest-processing-time-first: sort descending by weight, then hand each
     // split to whichever bin is currently lightest.
@@ -1889,6 +1934,7 @@ fn pack_splits(plan: ScanPlan, target_partitions: usize) -> PlannedSplits {
         num_rows,
         total_byte_size,
         plan,
+        range_grouped: false,
         unbounded,
     }
 }
@@ -2749,12 +2795,13 @@ impl VgiScanExec {
         } else {
             Boundedness::Bounded
         };
+        let output_partitioning = split_groups
+            .as_ref()
+            .and_then(|planned| split_range_partitioning(&schema, planned))
+            .unwrap_or_else(|| Partitioning::UnknownPartitioning(partitions.max(1)));
         let properties = Arc::new(PlanProperties::new(
             equivalence,
-            // One partition per connection the worker will accept. VGI hands
-            // each connection a disjoint slice, so the partitions really are
-            // independent.
-            Partitioning::UnknownPartitioning(partitions.max(1)),
+            output_partitioning,
             EmissionType::Incremental,
             boundedness,
         ));
@@ -3114,10 +3161,14 @@ fn scan_cache_storage_control(
 mod scan_cache_contract_tests {
     use super::{
         completed_scan_cache_control, declared_secret_dependency, executed_cache_substreams,
-        pack_splits, scan_cache_storage_control, worker_log_event, ExecutionObservation,
-        ScanCachePartitionOutcome, VgiConnection,
+        pack_splits, scan_cache_storage_control, split_range_partitioning, worker_log_event,
+        ExecutionObservation, ScanCachePartitionOutcome, VgiConnection,
     };
+    use datafusion::arrow::array::{Int64Array, RecordBatch};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::common::ScalarValue;
     use datafusion::execution::TaskContext;
+    use datafusion::physical_plan::Partitioning;
     use std::sync::Arc;
 
     #[test]
@@ -3149,6 +3200,9 @@ mod scan_cache_contract_tests {
                     estimated_rows: None,
                     rows_exact: false,
                     estimated_bytes: None,
+                    key_value: None,
+                    range_index: None,
+                    column_bounds: None,
                     partition_bounds: None,
                     column_statistics: None,
                     location_ids: None,
@@ -3160,6 +3214,83 @@ mod scan_cache_contract_tests {
             1,
         );
         assert!(split_unbounded.unbounded);
+    }
+
+    #[test]
+    fn exact_range_metadata_groups_splits_by_range_and_reaches_datafusion() {
+        let path = vgi_protocol::protocol::dtos::FieldPath {
+            components: vec!["event_time".to_string()],
+        };
+        let path = vgi_client::Bytes(
+            vgi_protocol::ipc::write_batch(&vgi_protocol::wire::to_batch(path).unwrap()).unwrap(),
+        );
+        let transform = vgi_protocol::protocol::dtos::TransformSpec {
+            id: "vgi.identity/1".to_string(),
+            inputs: vec![path],
+            parameters: None,
+        };
+        let transform = vgi_client::Bytes(
+            vgi_protocol::ipc::write_batch(&vgi_protocol::wire::to_batch(transform).unwrap())
+                .unwrap(),
+        );
+        let key = vgi_protocol::protocol::dtos::RangeKey {
+            transform,
+            direction: "ASC".to_string().into(),
+            null_order: "NULLS_LAST".to_string().into(),
+        };
+        let key = vgi_client::Bytes(
+            vgi_protocol::ipc::write_batch(&vgi_protocol::wire::to_batch(key).unwrap()).unwrap(),
+        );
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "event_time",
+            DataType::Int64,
+            true,
+        )]));
+        let points = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![10, 20]))],
+        )
+        .unwrap();
+        let range = vgi_protocol::protocol::dtos::RangePartitioning {
+            keys: vec![key],
+            split_points: vgi_client::Bytes(vgi_protocol::ipc::write_batch(&points).unwrap()),
+        };
+        let split = |token: u8, range_index: i64| vgi_client::ScanSplitInfo {
+            token: vec![token],
+            estimated_rows: Some(1),
+            rows_exact: true,
+            estimated_bytes: Some(1),
+            key_value: None,
+            range_index: Some(range_index),
+            column_bounds: None,
+            partition_bounds: None,
+            column_statistics: None,
+            location_ids: None,
+            start_position: None,
+            end_position: None,
+        };
+        let planned = pack_splits(
+            vgi_client::ScanPlan {
+                splits: vec![split(2, 1), split(1, 0), split(3, 2), split(4, 1)],
+                range_partitioning: Some(range),
+                ..Default::default()
+            },
+            3,
+        );
+
+        assert!(planned.range_grouped);
+        assert_eq!(planned.groups[0].tokens, vec![vec![1]]);
+        assert_eq!(planned.groups[1].tokens, vec![vec![2], vec![4]]);
+        assert_eq!(planned.groups[2].tokens, vec![vec![3]]);
+        let partitioning = split_range_partitioning(&schema, &planned).unwrap();
+        let Partitioning::Range(range) = partitioning else {
+            panic!("expected range partitioning")
+        };
+        assert_eq!(range.partition_count(), 3);
+        assert_eq!(
+            range.split_points()[0].values(),
+            &[ScalarValue::Int64(Some(10))]
+        );
     }
 
     #[test]
@@ -3928,6 +4059,81 @@ fn split_ordering(schema: &SchemaRef, planned: &PlannedSplits) -> Option<Vec<Phy
         .collect()
 }
 
+/// Translate the conservative protocol-3 identity-transform profile into
+/// DataFusion 55's exact physical range contract.
+///
+/// Other registry transforms deliberately remain unknown until this adapter
+/// implements their normative evaluation semantics. A false range claim can
+/// silently produce incorrect partitioned joins.
+fn split_range_partitioning(schema: &SchemaRef, planned: &PlannedSplits) -> Option<Partitioning> {
+    if !planned.range_grouped {
+        return None;
+    }
+    let range = planned.plan.range_partitioning.as_ref()?;
+    let split_points = vgi_protocol::ipc::read_batch(&range.split_points.0).ok()?;
+    if split_points.num_columns() != range.keys.len()
+        || split_points.num_rows().saturating_add(1) != planned.groups.len()
+    {
+        return None;
+    }
+
+    let mut ordering = Vec::with_capacity(range.keys.len());
+    for (index, encoded_key) in range.keys.iter().enumerate() {
+        let key_batch = vgi_protocol::ipc::read_batch(&encoded_key.0).ok()?;
+        let key: vgi_protocol::protocol::dtos::RangeKey =
+            vgi_protocol::wire::from_batch(&key_batch).ok()?;
+        let transform_batch = vgi_protocol::ipc::read_batch(&key.transform.0).ok()?;
+        let transform: vgi_protocol::protocol::dtos::TransformSpec =
+            vgi_protocol::wire::from_batch(&transform_batch).ok()?;
+        if transform.id != "vgi.identity/1"
+            || transform.inputs.len() != 1
+            || transform.parameters.is_some()
+        {
+            return None;
+        }
+        let path_batch = vgi_protocol::ipc::read_batch(&transform.inputs[0].0).ok()?;
+        let path: vgi_protocol::protocol::dtos::FieldPath =
+            vgi_protocol::wire::from_batch(&path_batch).ok()?;
+        if path.components.len() != 1 {
+            return None;
+        }
+        let name = &path.components[0];
+        let column_index = schema.index_of(name).ok()?;
+        if split_points.column(index).data_type() != schema.field(column_index).data_type() {
+            return None;
+        }
+        let options = datafusion::arrow::compute::SortOptions {
+            descending: match key.direction.0.as_str() {
+                "ASC" => false,
+                "DESC" => true,
+                _ => return None,
+            },
+            nulls_first: match key.null_order.0.as_str() {
+                "NULLS_FIRST" => true,
+                "NULLS_LAST" => false,
+                _ => return None,
+            },
+        };
+        ordering.push(PhysicalSortExpr::new(
+            Arc::new(Column::new(name, column_index)),
+            options,
+        ));
+    }
+    let ordering = LexOrdering::new(ordering)?;
+    let points = (0..split_points.num_rows())
+        .map(|row| {
+            let values = split_points
+                .columns()
+                .iter()
+                .map(|column| ScalarValue::try_from_array(column.as_ref(), row).ok())
+                .collect::<Option<Vec<_>>>()?;
+            Some(SplitPoint::new(values))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let range = RangePartitioning::try_new(ordering, points).ok()?;
+    Some(Partitioning::Range(range))
+}
+
 fn statistics_with_estimates(
     schema: &SchemaRef,
     num_rows: Precision<usize>,
@@ -4038,7 +4244,11 @@ fn statistics_for_split(schema: &SchemaRef, split: &ScanSplitInfo) -> Statistics
         }
     }
 
-    if let Some(bounds) = &split.partition_bounds {
+    if let Some(bounds) = split
+        .column_bounds
+        .as_ref()
+        .or(split.partition_bounds.as_ref())
+    {
         for field in bounds.schema().fields() {
             let Some(output) = schema.field_with_name(field.name()).ok() else {
                 continue;
