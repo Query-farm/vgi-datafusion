@@ -12,7 +12,7 @@ use datafusion::arrow::array::Array;
 use datafusion::catalog::TableProvider;
 use datafusion::common::stats::Precision;
 use datafusion::common::ScalarValue;
-use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
+use datafusion::physical_plan::{Partitioning, StatisticsArgs, StatisticsContext};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use vgi_datafusion::{VgiConnection, VgiTableProvider};
 use vgi_datafusion::{VgiResolvedSecret, VgiRuntime, VgiSecretResolver, VgiSessionOptions};
@@ -1632,6 +1632,22 @@ async fn split_optimizer_metadata_reaches_datafusion() -> datafusion::error::Res
     assert!(
         plan.properties().output_ordering().is_some(),
         "one VGI split per DataFusion partition preserves within-split ordering"
+    );
+    let Partitioning::Range(range) = plan.properties().output_partitioning() else {
+        panic!("the worker's exact Protocol 3.1 range claim did not reach DataFusion")
+    };
+    assert_eq!(range.partition_count(), 4);
+    assert_eq!(
+        range
+            .split_points()
+            .iter()
+            .map(|point| point.values()[0].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ScalarValue::Utf8(Some("DE".to_string())),
+            ScalarValue::Utf8(Some("JP".to_string())),
+            ScalarValue::Utf8(Some("US".to_string())),
+        ]
     );
 
     let first = StatisticsContext::new().compute(
