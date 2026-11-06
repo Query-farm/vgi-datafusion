@@ -2738,6 +2738,7 @@ async fn build_attach_options(
         options: None,
         data_version_spec: string("data_version_spec")?,
         implementation_version: string("implementation_version")?,
+        ..Default::default()
     };
     let worker_values = spec
         .options
