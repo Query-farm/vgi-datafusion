@@ -4,11 +4,11 @@
 //!
 //! # The wire shape
 //!
-//! An Arrow IPC batch where column 0 is a one-row string holding a JSON array of
-//! filter specs — its field carries `vgi_filter_version` metadata — and columns
-//! 1.. carry the constants, so a spec's `value_ref: N` names column `N + 1` and
-//! reads row 0. IN sets travel as VGI v2 side join-key batches, referenced by a
-//! `join_keys` spec. Top-level specs combine with AND.
+//! An Arrow IPC batch where column 0 is a one-row string holding a
+//! `vgi.filters.v2` snapshot or delta document. Schema metadata identifies the
+//! encoding and evaluation context; columns 1.. carry typed literals, so a
+//! `value_ref: N` names column `N + 1` and reads row 0. Large IN sets travel as
+//! side join-key batches referenced by an external-set expression.
 //!
 //! # Why every filter is reported `Inexact`
 //!
@@ -161,13 +161,19 @@ impl<'a> Builder<'a> {
             return None;
         }
         let (remote_name, index) = self.remote_column(&name)?;
+        let batch_index = self.join_keys.len();
         let keys = join_keys_ipc(&remote_name, values).ok()?;
         self.join_keys.push(keys);
         Some(serde_json::json!({
-            "type": "join_keys",
-            "column_name": remote_name,
-            "column_index": index,
-            "keys_column": remote_name,
+            "node": "in",
+            "expression": column_ref(&remote_name, index),
+            "set": {
+                "kind": "external",
+                "batch_index": batch_index,
+                "column_index": 0,
+                "column_name": remote_name,
+            },
+            "negated": false,
         }))
     }
 
@@ -205,18 +211,18 @@ impl<'a> Builder<'a> {
                 let name = column_name(inner, self.schema)?;
                 let (remote_name, index) = self.remote_column(&name)?;
                 Some(serde_json::json!({
-                    "type": "is_null",
-                    "column_name": remote_name,
-                    "column_index": index,
+                    "node": "is_null",
+                    "expression": column_ref(&remote_name, index),
+                    "negated": false,
                 }))
             }
             Expr::IsNotNull(inner) => {
                 let name = column_name(inner, self.schema)?;
                 let (remote_name, index) = self.remote_column(&name)?;
                 Some(serde_json::json!({
-                    "type": "is_not_null",
-                    "column_name": remote_name,
-                    "column_index": index,
+                    "node": "is_null",
+                    "expression": column_ref(&remote_name, index),
+                    "negated": true,
                 }))
             }
             Expr::InList(list) => {
@@ -251,18 +257,18 @@ impl<'a> Builder<'a> {
             let name = physical_column_name(is_null.arg().as_ref(), self.schema)?;
             let (remote_name, index) = self.remote_column(&name)?;
             return Some(serde_json::json!({
-                "type": "is_null",
-                "column_name": remote_name,
-                "column_index": index,
+                "node": "is_null",
+                "expression": column_ref(&remote_name, index),
+                "negated": false,
             }));
         }
         if let Some(is_not_null) = expr.downcast_ref::<IsNotNullExpr>() {
             let name = physical_column_name(is_not_null.arg().as_ref(), self.schema)?;
             let (remote_name, index) = self.remote_column(&name)?;
             return Some(serde_json::json!({
-                "type": "is_not_null",
-                "column_name": remote_name,
-                "column_index": index,
+                "node": "is_null",
+                "expression": column_ref(&remote_name, index),
+                "negated": true,
             }));
         }
         if let Some(list) = expr.downcast_ref::<InListExpr>() {
@@ -423,52 +429,22 @@ impl<'a> Builder<'a> {
         let token = op_token(op)?;
         let value_ref = self.add_constant(Constant::from_scalar(&value)?);
         Some(serde_json::json!({
-            "type": "constant",
-            "column_name": remote_name,
-            "column_index": index,
+            "node": "comparison",
             "op": token,
-            "value_ref": value_ref,
+            "left": column_ref(&remote_name, index),
+            "right": {"node": "literal", "value_ref": value_ref},
         }))
     }
 
-    /// Build an `and`/`or` node over two already-translated children.
-    ///
-    /// # Every node carries a column, conjunctions included
-    ///
-    /// The worker reads `column_name` and `column_index` off *every* spec
-    /// before it looks at the type (`table_filter_pushdown.py`), so a
-    /// conjunction that omits them is a hard parse failure — a `KeyError`
-    /// surfacing as `FilterDeserializationError: 'column_name'`, which is what
-    /// `WHERE n > 2 OR n < 1` produced.
-    ///
-    /// The value to carry is the children's own column, because the protocol
-    /// models a conjunction as a filter *on one column* — DuckDB's
-    /// `CONJUNCTION_OR` is exactly that, and the extension passes the parent's
-    /// column through to its children.
-    ///
-    /// So a conjunction spanning two different columns has no representation
-    /// here and is not pushed down. For `AND` that costs nothing: the caller
-    /// already keeps whichever side translates, and a superset is safe under
-    /// `Inexact`. For `OR` it must be all-or-nothing, so a cross-column `OR`
-    /// stays with DataFusion.
+    /// Build a Filter Encoding v2 `and`/`or` node over translated children.
     fn conjunction(
         &mut self,
         kind: &str,
         left: serde_json::Value,
         right: serde_json::Value,
     ) -> Option<serde_json::Value> {
-        let name = left.get("column_name")?.as_str()?.to_string();
-        if right.get("column_name")?.as_str()? != name {
-            return None;
-        }
-        let index = left.get("column_index")?.as_i64()?;
-        if right.get("column_index")?.as_i64()? != index {
-            return None;
-        }
         Some(serde_json::json!({
-            "type": kind,
-            "column_name": name,
-            "column_index": index,
+            "node": kind,
             "children": [left, right],
         }))
     }
@@ -516,19 +492,26 @@ impl<'a> Builder<'a> {
         let token = op_token(op)?;
         let value_ref = self.add_constant(Constant::from_scalar(&value)?);
         Some(serde_json::json!({
-            "type": "constant",
-            "column_name": remote_name,
-            "column_index": index,
+            "node": "comparison",
             "op": token,
-            "value_ref": value_ref,
+            "left": column_ref(&remote_name, index),
+            "right": {"node": "literal", "value_ref": value_ref},
         }))
     }
+}
+
+fn column_ref(name: &str, index: i64) -> serde_json::Value {
+    serde_json::json!({
+        "node": "column_ref",
+        "column_index": index,
+        "column_name": name,
+    })
 }
 
 fn contains_join_keys(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(object) => {
-            object.get("type").and_then(serde_json::Value::as_str) == Some("join_keys")
+            object.get("kind").and_then(serde_json::Value::as_str) == Some("external")
                 || object.values().any(contains_join_keys)
         }
         serde_json::Value::Array(values) => values.iter().any(contains_join_keys),
@@ -738,6 +721,9 @@ pub(crate) struct Pushdown {
     pub columns: Vec<i64>,
     /// VGI v2 single-column IPC batches referenced by `join_keys` specs.
     pub join_keys: Vec<Vec<u8>>,
+    /// Number of live predicates in this payload's logical state. Runtime
+    /// delta generation uses it to tombstone IDs that disappear.
+    pub predicate_count: usize,
 }
 
 impl Pushdown {
@@ -775,7 +761,7 @@ pub(crate) fn serialize(exprs: &[Expr], schema: &SchemaRef) -> DFResult<Pushdown
     if specs.is_empty() {
         return Ok(Pushdown::default());
     }
-    let mut pushdown = finish_pushdown(specs, b.constants, b.referenced_columns)?;
+    let mut pushdown = finish_snapshot(specs, b.constants, b.referenced_columns, "query", "query")?;
     pushdown.join_keys = b.join_keys;
     Ok(pushdown)
 }
@@ -815,30 +801,81 @@ pub(crate) fn serialize_physical_for_remote(
     for expr in exprs {
         b.build_physical_top(expr.as_ref(), side_join_keys, &mut specs);
     }
-    let mut pushdown = finish_pushdown(specs, b.constants, b.referenced_columns)?;
+    let mut pushdown = finish_snapshot(specs, b.constants, b.referenced_columns, "join", "join")?;
     pushdown.join_keys = b.join_keys;
     Ok(pushdown)
 }
 
-fn finish_pushdown(
+/// Serialize a runtime-filter update as a Filter Encoding v2 delta.
+///
+/// Runtime IDs are stable by expression position and revisions advance for
+/// the whole snapshot generation. Predicates no longer present are removed so
+/// an older, wider or narrower pruning hint cannot remain active accidentally.
+pub(crate) fn serialize_physical_delta_for_remote(
+    exprs: &[Arc<dyn PhysicalExpr>],
+    schema: &SchemaRef,
+    remote_schema: &SchemaRef,
+    revision: u64,
+    previous_count: usize,
+) -> DFResult<Pushdown> {
+    let mut b = Builder {
+        schema,
+        remote_schema,
+        constants: Vec::new(),
+        referenced_columns: Vec::new(),
+        join_keys: Vec::new(),
+    };
+    let mut specs = Vec::new();
+    for expr in exprs {
+        // Tick metadata cannot carry the external side batches used by IN.
+        b.build_physical_top(expr.as_ref(), false, &mut specs);
+    }
+    finish_delta(
+        specs,
+        b.constants,
+        b.referenced_columns,
+        revision,
+        previous_count,
+    )
+}
+
+fn finish_snapshot(
     specs: Vec<serde_json::Value>,
     constants: Vec<Constant>,
     referenced_columns: Vec<i64>,
+    source: &str,
+    id_prefix: &str,
 ) -> DFResult<Pushdown> {
-    if specs.is_empty() {
+    if specs.is_empty() && source != "join" {
         return Ok(Pushdown::default());
     }
-    let json = serde_json::Value::Array(specs).to_string();
+    let predicates = specs
+        .into_iter()
+        .enumerate()
+        .map(|(index, expression)| {
+            serde_json::json!({
+                "id": format!("{id_prefix}:{index}"),
+                "revision": 0,
+                // DataFusion keeps every pushed predicate as an Inexact
+                // residual, so the remote predicate is advisory.
+                "mode": "advisory",
+                "source": source,
+                "expression": expression,
+            })
+        })
+        .collect::<Vec<_>>();
+    let predicate_count = predicates.len();
+    let json = serde_json::json!({
+        "encoding": "vgi.filters.v2",
+        "semantics": "vgi.duckdb.standard.v1",
+        "kind": "snapshot",
+        "predicates": predicates,
+    })
+    .to_string();
 
-    // Column 0 is the spec JSON, and its field carries the version metadata the
-    // worker looks for. Columns 1.. are the constants in `value_ref` order.
-    let mut fields = vec![
-        Field::new("filter_spec", DataType::Utf8, false).with_metadata(
-            [("vgi_filter_version".to_string(), "1".to_string())]
-                .into_iter()
-                .collect(),
-        ),
-    ];
+    // Column 0 is the document JSON. Columns 1.. are the constants in
+    // `value_ref` order; the encoding marker belongs to the schema.
+    let mut fields = vec![Field::new("filter_spec", DataType::Utf8, false)];
     let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![json]))];
     for (i, c) in constants.iter().enumerate() {
         let arr = c.to_array()?;
@@ -850,7 +887,8 @@ fn finish_pushdown(
         columns.push(arr);
     }
 
-    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
+    let schema = Schema::new(fields).with_metadata(filter_metadata());
+    let batch = RecordBatch::try_new(Arc::new(schema), columns)?;
     let mut buf: Vec<u8> = Vec::new();
     {
         let mut w =
@@ -862,7 +900,96 @@ fn finish_pushdown(
         blob: Some(buf),
         columns: referenced_columns,
         join_keys: Vec::new(),
+        predicate_count,
     })
+}
+
+fn finish_delta(
+    specs: Vec<serde_json::Value>,
+    constants: Vec<Constant>,
+    referenced_columns: Vec<i64>,
+    revision: u64,
+    previous_count: usize,
+) -> DFResult<Pushdown> {
+    let predicate_count = specs.len();
+    let mut updates = specs
+        .into_iter()
+        .enumerate()
+        .map(|(index, expression)| {
+            serde_json::json!({
+                "operation": "upsert",
+                "id": format!("join:{index}"),
+                "revision": revision,
+                "mode": "advisory",
+                "source": "join",
+                "expression": expression,
+            })
+        })
+        .collect::<Vec<_>>();
+    for index in predicate_count..previous_count {
+        updates.push(serde_json::json!({
+            "operation": "remove",
+            "id": format!("join:{index}"),
+            "revision": revision,
+        }));
+    }
+    if updates.is_empty() {
+        return Ok(Pushdown {
+            predicate_count,
+            ..Default::default()
+        });
+    }
+    let json = serde_json::json!({
+        "encoding": "vgi.filters.v2",
+        "semantics": "vgi.duckdb.standard.v1",
+        "kind": "delta",
+        "updates": updates,
+    })
+    .to_string();
+    let mut fields = vec![Field::new("filter_spec", DataType::Utf8, false)];
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![json]))];
+    for (index, constant) in constants.iter().enumerate() {
+        let array = constant.to_array()?;
+        fields.push(Field::new(
+            format!("value_{index}"),
+            array.data_type().clone(),
+            true,
+        ));
+        columns.push(array);
+    }
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(fields).with_metadata(filter_metadata())),
+        columns,
+    )?;
+    let mut bytes = Vec::new();
+    {
+        let mut writer =
+            datafusion::arrow::ipc::writer::StreamWriter::try_new(&mut bytes, &batch.schema())?;
+        writer.write(&batch)?;
+        writer.finish()?;
+    }
+    Ok(Pushdown {
+        blob: Some(bytes),
+        columns: referenced_columns,
+        join_keys: Vec::new(),
+        predicate_count,
+    })
+}
+
+fn filter_metadata() -> std::collections::HashMap<String, String> {
+    [
+        (
+            "vgi_filter_encoding".to_string(),
+            "vgi.filters.v2".to_string(),
+        ),
+        ("vgi_filter_version".to_string(), "2".to_string()),
+        (
+            "vgi_evaluation_context".to_string(),
+            "vgi.none.v1".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect()
 }
 
 fn join_keys_ipc(column: &str, values: Vec<ScalarValue>) -> DFResult<Vec<u8>> {
@@ -900,10 +1027,11 @@ pub(crate) fn merge(left: &Pushdown, right: &Pushdown) -> DFResult<Pushdown> {
     let left_batch = read_pushdown(left.blob.as_deref().expect("checked"))?;
     let right_batch = read_pushdown(right.blob.as_deref().expect("checked"))?;
     let left_constants = left_batch.num_columns() - 1;
-    let mut merged_specs = parse_specs(&left_batch)?;
-    let mut right_specs = parse_specs(&right_batch)?;
+    let mut merged_specs = parse_predicates(&left_batch)?;
+    let mut right_specs = parse_predicates(&right_batch)?;
     for spec in &mut right_specs {
         shift_value_refs(spec, left_constants);
+        shift_external_batch_refs(spec, left.join_keys.len());
     }
     merged_specs.extend(right_specs);
 
@@ -919,11 +1047,17 @@ pub(crate) fn merge(left: &Pushdown, right: &Pushdown) -> DFResult<Pushdown> {
             columns.push(batch.column(index).clone());
         }
     }
-    columns[0] = Arc::new(StringArray::from(vec![serde_json::Value::Array(
-        merged_specs,
-    )
+    columns[0] = Arc::new(StringArray::from(vec![serde_json::json!({
+        "encoding": "vgi.filters.v2",
+        "semantics": "vgi.duckdb.standard.v1",
+        "kind": "snapshot",
+        "predicates": merged_specs,
+    })
     .to_string()]));
-    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(fields).with_metadata(filter_metadata())),
+        columns,
+    )?;
     let mut out = Vec::new();
     {
         let mut writer =
@@ -946,6 +1080,7 @@ pub(crate) fn merge(left: &Pushdown, right: &Pushdown) -> DFResult<Pushdown> {
             .chain(&right.join_keys)
             .cloned()
             .collect(),
+        predicate_count: left.predicate_count + right.predicate_count,
     })
 }
 
@@ -957,7 +1092,7 @@ fn read_pushdown(bytes: &[u8]) -> DFResult<RecordBatch> {
     })
 }
 
-fn parse_specs(batch: &RecordBatch) -> DFResult<Vec<serde_json::Value>> {
+fn parse_document(batch: &RecordBatch) -> DFResult<serde_json::Value> {
     let json = batch
         .column(0)
         .as_any()
@@ -968,6 +1103,19 @@ fn parse_specs(batch: &RecordBatch) -> DFResult<Vec<serde_json::Value>> {
     serde_json::from_str(json.value(0)).map_err(|error| {
         datafusion::common::DataFusionError::Execution(format!("invalid VGI filter JSON: {error}"))
     })
+}
+
+fn parse_predicates(batch: &RecordBatch) -> DFResult<Vec<serde_json::Value>> {
+    let mut document = parse_document(batch)?;
+    document
+        .get_mut("predicates")
+        .and_then(serde_json::Value::as_array_mut)
+        .map(std::mem::take)
+        .ok_or_else(|| {
+            datafusion::common::DataFusionError::Execution(
+                "VGI filter snapshot has no predicates array".into(),
+            )
+        })
 }
 
 fn shift_value_refs(value: &mut serde_json::Value, offset: usize) {
@@ -992,6 +1140,29 @@ fn shift_value_refs(value: &mut serde_json::Value, offset: usize) {
         serde_json::Value::Array(values) => {
             for child in values {
                 shift_value_refs(child, offset);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shift_external_batch_refs(value: &mut serde_json::Value, offset: usize) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("kind").and_then(serde_json::Value::as_str) == Some("external") {
+                if let Some(reference) = object.get_mut("batch_index") {
+                    if let Some(index) = reference.as_u64() {
+                        *reference = serde_json::json!(index + offset as u64);
+                    }
+                }
+            }
+            for child in object.values_mut() {
+                shift_external_batch_refs(child, offset);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                shift_external_batch_refs(child, offset);
             }
         }
         _ => {}
@@ -1038,7 +1209,7 @@ mod tests {
         ]))
     }
 
-    /// Decode a serialized blob back into (specs JSON, constant columns).
+    /// Decode a serialized snapshot back into (expression nodes, payload columns).
     fn decode(bytes: &[u8]) -> (serde_json::Value, RecordBatch) {
         let mut r = datafusion::arrow::ipc::reader::StreamReader::try_new(
             std::io::Cursor::new(bytes),
@@ -1053,7 +1224,14 @@ mod tests {
             .unwrap()
             .value(0)
             .to_string();
-        (serde_json::from_str(&json).unwrap(), batch)
+        let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let expressions = document["predicates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|predicate| predicate["expression"].clone())
+            .collect::<Vec<_>>();
+        (serde_json::Value::Array(expressions), batch)
     }
 
     #[test]
@@ -1062,13 +1240,13 @@ mod tests {
         let bytes = serialize(&[e], &schema()).unwrap().blob.expect("pushable");
         let (specs, batch) = decode(&bytes);
 
-        assert_eq!(specs[0]["type"], "constant");
-        assert_eq!(specs[0]["column_name"], "n");
+        assert_eq!(specs[0]["node"], "comparison");
+        assert_eq!(specs[0]["left"]["column_name"], "n");
         assert_eq!(specs[0]["op"], "gt");
-        assert_eq!(specs[0]["column_index"], 0);
+        assert_eq!(specs[0]["left"]["column_index"], 0);
 
         // value_ref 0 -> column 1, scalar at row 0.
-        let vr = specs[0]["value_ref"].as_u64().unwrap() as usize;
+        let vr = specs[0]["right"]["value_ref"].as_u64().unwrap() as usize;
         let v = batch.column(vr + 1);
         assert_eq!(v.len(), 1);
         assert_eq!(v.as_any().downcast_ref::<Int64Array>().unwrap().value(0), 5);
@@ -1176,7 +1354,8 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(pushdown.blob.is_none());
+        let (specs, _) = decode(pushdown.blob.as_deref().unwrap());
+        assert!(specs.as_array().unwrap().is_empty());
         assert!(pushdown.join_keys.is_empty());
         assert!(pushdown.columns.is_empty());
     }
@@ -1204,9 +1383,9 @@ mod tests {
         )
         .unwrap();
         let (specs, _) = decode(pushdown.blob.as_deref().unwrap());
-        assert_eq!(specs[0]["column_name"], "worker_name");
-        assert_eq!(specs[0]["column_index"], 1);
-        assert_eq!(specs[0]["keys_column"], "worker_name");
+        assert_eq!(specs[0]["expression"]["column_name"], "worker_name");
+        assert_eq!(specs[0]["expression"]["column_index"], 1);
+        assert_eq!(specs[0]["set"]["column_name"], "worker_name");
         assert_eq!(pushdown.columns, vec![1]);
 
         let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
@@ -1236,7 +1415,7 @@ mod tests {
     }
 
     #[test]
-    fn the_version_metadata_rides_on_field_zero() {
+    fn the_v2_markers_are_schema_metadata() {
         // The worker looks for this to know it can read the blob at all.
         let bytes = serialize(&[col("n").eq(lit(1i64))], &schema())
             .unwrap()
@@ -1244,8 +1423,16 @@ mod tests {
             .unwrap();
         let (_, batch) = decode(&bytes);
         assert_eq!(
-            batch.schema().field(0).metadata().get("vgi_filter_version"),
-            Some(&"1".to_string())
+            batch.schema().metadata().get("vgi_filter_encoding"),
+            Some(&"vgi.filters.v2".to_string())
+        );
+        assert_eq!(
+            batch.schema().metadata().get("vgi_filter_version"),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            batch.schema().metadata().get("vgi_evaluation_context"),
+            Some(&"vgi.none.v1".to_string())
         );
     }
 
@@ -1258,7 +1445,7 @@ mod tests {
             .blob
             .unwrap();
         let (specs, _) = decode(&bytes);
-        assert_eq!(specs[0]["column_name"], "n");
+        assert_eq!(specs[0]["left"]["column_name"], "n");
         assert_eq!(specs[0]["op"], "gt");
     }
 
@@ -1285,7 +1472,8 @@ mod tests {
             .blob
             .unwrap();
         let (specs, batch) = decode(&bytes);
-        assert_eq!(specs[0]["type"], "is_null");
+        assert_eq!(specs[0]["node"], "is_null");
+        assert_eq!(specs[0]["negated"], false);
         assert_eq!(batch.num_columns(), 1, "no value columns for a null check");
 
         let bytes = serialize(&[col("n").is_not_null()], &schema())
@@ -1293,7 +1481,8 @@ mod tests {
             .blob
             .unwrap();
         let (specs, _) = decode(&bytes);
-        assert_eq!(specs[0]["type"], "is_not_null");
+        assert_eq!(specs[0]["node"], "is_null");
+        assert_eq!(specs[0]["negated"], true);
     }
 
     #[test]
@@ -1302,8 +1491,8 @@ mod tests {
         let pushdown = serialize(&[e], &schema()).unwrap();
         let bytes = pushdown.blob.unwrap();
         let (specs, batch) = decode(&bytes);
-        assert_eq!(specs[0]["type"], "join_keys");
-        assert_eq!(specs[0]["keys_column"], "n");
+        assert_eq!(specs[0]["node"], "in");
+        assert_eq!(specs[0]["set"]["column_name"], "n");
         assert!(specs[0].get("value_ref").is_none());
         assert_eq!(batch.num_columns(), 1, "values ride in the side batch");
         assert_eq!(pushdown.join_keys.len(), 1);
@@ -1345,7 +1534,7 @@ mod tests {
             .or(col("n").eq(lit(5_i64)));
         let pushdown = serialize(&[expression], &schema()).unwrap();
         let (specs, batch) = decode(pushdown.blob.as_deref().unwrap());
-        assert_eq!(specs[0]["type"], "join_keys");
+        assert_eq!(specs[0]["node"], "in");
         assert_eq!(batch.num_columns(), 1);
         assert_eq!(pushdown.join_keys.len(), 1);
 
@@ -1364,10 +1553,13 @@ mod tests {
     }
 
     #[test]
-    fn equality_or_on_different_columns_is_not_tuple_membership() {
+    fn equality_or_on_different_columns_uses_a_v2_or_expression() {
         let expression = col("n").eq(lit(1_i64)).or(col("name").eq(lit("one")));
         let pushdown = serialize(&[expression], &schema()).unwrap();
-        assert!(pushdown.blob.is_none());
+        let (specs, _) = decode(pushdown.blob.as_deref().unwrap());
+        assert_eq!(specs[0]["node"], "or");
+        assert_eq!(specs[0]["children"][0]["left"]["column_name"], "n");
+        assert_eq!(specs[0]["children"][1]["left"]["column_name"], "name");
         assert!(pushdown.join_keys.is_empty());
     }
 
@@ -1413,7 +1605,7 @@ mod tests {
             .blob
             .expect("the pushable half survives");
         let (specs, _) = decode(&bytes);
-        assert_eq!(specs[0]["type"], "constant");
+        assert_eq!(specs[0]["node"], "comparison");
         assert_eq!(specs[0]["op"], "gt");
     }
 
@@ -1432,7 +1624,7 @@ mod tests {
         // Both sides expressible: pushed as an or.
         let both = col("n").gt(lit(5i64)).or(col("n").lt(lit(0i64)));
         let (specs, _) = decode(&serialize(&[both], &schema()).unwrap().blob.unwrap());
-        assert_eq!(specs[0]["type"], "or");
+        assert_eq!(specs[0]["node"], "or");
         assert_eq!(specs[0]["children"].as_array().unwrap().len(), 2);
     }
 
@@ -1473,7 +1665,10 @@ mod tests {
             "top level ANDs on the worker"
         );
         assert_eq!(batch.num_columns(), 3);
-        assert_eq!(specs[1]["column_index"], 1, "name is the second column");
+        assert_eq!(
+            specs[1]["left"]["column_index"], 1,
+            "name is the second column"
+        );
     }
 
     #[test]
@@ -1546,8 +1741,8 @@ mod tests {
             serialize_physical(&[Arc::new(list) as Arc<dyn PhysicalExpr>], &schema(), true)
                 .unwrap();
         let (specs, batch) = decode(dynamic.blob.as_deref().unwrap());
-        assert_eq!(specs[0]["type"], "join_keys");
-        assert_eq!(specs[0]["keys_column"], "n");
+        assert_eq!(specs[0]["node"], "in");
+        assert_eq!(specs[0]["set"]["column_name"], "n");
         assert_eq!(batch.num_columns(), 1, "values ride in the side batch");
         assert_eq!(dynamic.join_keys.len(), 1);
 
@@ -1610,10 +1805,10 @@ mod tests {
                 .unwrap();
         let (specs, batch) = decode(dynamic.blob.as_deref().unwrap());
         assert_eq!(specs.as_array().unwrap().len(), 2);
-        assert_eq!(specs[0]["type"], "join_keys");
-        assert_eq!(specs[0]["column_name"], "n");
-        assert_eq!(specs[1]["type"], "join_keys");
-        assert_eq!(specs[1]["column_name"], "name");
+        assert_eq!(specs[0]["node"], "in");
+        assert_eq!(specs[0]["expression"]["column_name"], "n");
+        assert_eq!(specs[1]["node"], "in");
+        assert_eq!(specs[1]["expression"]["column_name"], "name");
         assert_eq!(batch.num_columns(), 1, "all values use side batches");
         assert_eq!(dynamic.columns, vec![0, 1]);
         assert_eq!(dynamic.join_keys.len(), 2);
@@ -1683,7 +1878,8 @@ mod tests {
         let dynamic =
             serialize_physical(&[Arc::new(list) as Arc<dyn PhysicalExpr>], &schema(), true)
                 .unwrap();
-        assert!(dynamic.blob.is_none());
+        let (specs, _) = decode(dynamic.blob.as_deref().unwrap());
+        assert!(specs.as_array().unwrap().is_empty());
         assert!(dynamic.columns.is_empty());
         assert!(dynamic.join_keys.is_empty());
     }
@@ -1708,7 +1904,7 @@ mod tests {
         )) as Arc<dyn PhysicalExpr>;
         let dynamic = serialize_physical(&[expression], &schema(), true).unwrap();
         let (specs, _) = decode(dynamic.blob.as_deref().unwrap());
-        assert_eq!(specs[0]["type"], "join_keys");
+        assert_eq!(specs[0]["node"], "in");
         assert_eq!(dynamic.join_keys.len(), 1);
 
         let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
@@ -1734,10 +1930,45 @@ mod tests {
         )) as Arc<dyn PhysicalExpr>;
         let dynamic = serialize_physical(&[expression], &schema(), false).unwrap();
         let (specs, batch) = decode(dynamic.blob.as_deref().unwrap());
-        assert_eq!(specs[0]["type"], "constant");
+        assert_eq!(specs[0]["node"], "comparison");
         assert_eq!(specs[0]["op"], "gt");
         assert_eq!(batch.num_columns(), 2);
         assert!(dynamic.join_keys.is_empty());
+    }
+
+    #[test]
+    fn runtime_updates_are_advisory_v2_deltas_with_stable_ids() {
+        let expression = Arc::new(PhysicalBinaryExpr::new(
+            physical_col("n", &schema()).unwrap(),
+            Operator::Gt,
+            physical_lit(20_i64),
+        )) as Arc<dyn PhysicalExpr>;
+        let delta =
+            serialize_physical_delta_for_remote(&[expression], &schema(), &schema(), 3, 1).unwrap();
+        let batch = read_pushdown(delta.blob.as_deref().unwrap()).unwrap();
+        let document = parse_document(&batch).unwrap();
+        assert_eq!(document["kind"], "delta");
+        assert_eq!(document["updates"][0]["operation"], "upsert");
+        assert_eq!(document["updates"][0]["id"], "join:0");
+        assert_eq!(document["updates"][0]["revision"], 3);
+        assert_eq!(document["updates"][0]["mode"], "advisory");
+        assert_eq!(document["updates"][0]["source"], "join");
+        assert_eq!(
+            batch.schema().metadata().get("vgi_filter_encoding"),
+            Some(&"vgi.filters.v2".to_string())
+        );
+    }
+
+    #[test]
+    fn runtime_delta_tombstones_predicates_that_disappear() {
+        let delta = serialize_physical_delta_for_remote(&[], &schema(), &schema(), 4, 2).unwrap();
+        let batch = read_pushdown(delta.blob.as_deref().unwrap()).unwrap();
+        let document = parse_document(&batch).unwrap();
+        assert_eq!(document["updates"].as_array().unwrap().len(), 2);
+        assert_eq!(document["updates"][0]["operation"], "remove");
+        assert_eq!(document["updates"][0]["id"], "join:0");
+        assert_eq!(document["updates"][1]["id"], "join:1");
+        assert_eq!(delta.predicate_count, 0);
     }
 
     #[test]
@@ -1753,7 +1984,8 @@ mod tests {
         let dynamic =
             serialize_physical(&[Arc::new(list) as Arc<dyn PhysicalExpr>], &schema(), false)
                 .unwrap();
-        assert!(dynamic.blob.is_none());
+        let (specs, _) = decode(dynamic.blob.as_deref().unwrap());
+        assert!(specs.as_array().unwrap().is_empty());
         assert!(dynamic.columns.is_empty());
         assert!(dynamic.join_keys.is_empty());
     }
@@ -1770,8 +2002,8 @@ mod tests {
         let merged = merge(&static_filter, &runtime).unwrap();
         let (specs, batch) = decode(merged.blob.as_deref().unwrap());
         assert_eq!(specs.as_array().unwrap().len(), 2);
-        assert_eq!(specs[0]["value_ref"], 0);
-        assert_eq!(specs[1]["value_ref"], 1);
+        assert_eq!(specs[0]["right"]["value_ref"], 0);
+        assert_eq!(specs[1]["right"]["value_ref"], 1);
         assert_eq!(batch.num_columns(), 3);
     }
 
@@ -1786,7 +2018,34 @@ mod tests {
         let merged = merge(&membership, &bound).unwrap();
         assert_eq!(merged.join_keys.len(), 1);
         let (specs, _) = decode(merged.blob.as_deref().unwrap());
-        assert_eq!(specs[0]["type"], "join_keys");
-        assert_eq!(specs[1]["type"], "constant");
+        assert_eq!(specs[0]["node"], "in");
+        assert_eq!(specs[1]["node"], "comparison");
+    }
+
+    #[test]
+    fn merging_pushdowns_rebases_external_batch_references() {
+        let static_membership = serialize(
+            &[col("n").in_list(vec![lit(1_i64), lit(3_i64)], false)],
+            &schema(),
+        )
+        .unwrap();
+        let runtime_list = InListExpr::try_new(
+            physical_col("name", &schema()).unwrap(),
+            vec![physical_lit("one"), physical_lit("three")],
+            false,
+            &schema(),
+        )
+        .unwrap();
+        let runtime_membership = serialize_physical(
+            &[Arc::new(runtime_list) as Arc<dyn PhysicalExpr>],
+            &schema(),
+            true,
+        )
+        .unwrap();
+        let merged = merge(&static_membership, &runtime_membership).unwrap();
+        let (specs, _) = decode(merged.blob.as_deref().unwrap());
+        assert_eq!(specs[0]["set"]["batch_index"], 0);
+        assert_eq!(specs[1]["set"]["batch_index"], 1);
+        assert_eq!(merged.join_keys.len(), 2);
     }
 }

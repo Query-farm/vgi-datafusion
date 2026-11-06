@@ -15,15 +15,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CARGO_BUILD_JOBS: "3"
+  CARGO_BUILD_JOBS: "12"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
   # Keep the sibling source reviewable and reproducible. Update this hash only
   # with the vgi-datafusion compatibility change that has been reviewed against it.
-  VGI_RUST_REVISION: "074ae2239a353bf8297a405b18c5bb0fefe9c032"
-  VGI_RUST_REGISTRY_VERSION: "0.31.0"
+  VGI_RUST_REVISION: "0442cdb9c298c6cb2b84b717d7d588910016d696"
+  VGI_RUST_REGISTRY_VERSION: "0.49.1"
 
 jobs:
   quality:
@@ -42,8 +42,8 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Query-farm/vgi-rust
-          ref: 074ae2239a353bf8297a405b18c5bb0fefe9c032 # Released v0.31.0 integration and timeout fixtures.
-          path: vgi-rust
+          ref: 0442cdb9c298c6cb2b84b717d7d588910016d696 # VGI 0.49.1 / protocol 3.1.
+          path: vgi-rust-release-v3
           persist-credentials: false
 
       - name: Check out Apache DataFusion 55
@@ -70,13 +70,13 @@ jobs:
           rustc --version
           cargo --version
           printf 'vgi-datafusion %s\n' "$(git -C vgi-datafusion rev-parse HEAD)"
-          vgi_rust_revision="$(git -C vgi-rust rev-parse HEAD)"
+          vgi_rust_revision="$(git -C vgi-rust-release-v3 rev-parse HEAD)"
           printf 'vgi-rust       %s (expected %s)\n' "$vgi_rust_revision" "$VGI_RUST_REVISION"
           test "$vgi_rust_revision" = "$VGI_RUST_REVISION"
           printf 'datafusion     %s\n' "$(git -C datafusion rev-parse HEAD)"
 
       - name: Build VGI example worker fixture
-        working-directory: vgi-rust
+        working-directory: vgi-rust-release-v3
         run: |
           cargo generate-lockfile
           cargo build --locked --package vgi-example-worker
@@ -158,7 +158,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          worker=../vgi-rust/target/debug/vgi-example-worker
+          worker=../vgi-rust-release-v3/target/debug/vgi-example-worker
           socket="${RUNNER_TEMP}/vgi-durable-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.sock"
           log="${RUNNER_TEMP}/vgi-durable-cache-unix-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
           worker_pid=""
@@ -218,7 +218,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          worker=../vgi-rust/target/debug/vgi-example-worker
+          worker=../vgi-rust-release-v3/target/debug/vgi-example-worker
           log="${RUNNER_TEMP}/vgi-durable-cache-http-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
           worker_pid=""
           port=""

@@ -4845,12 +4845,9 @@ impl ExecutionPlan for VgiScanExec {
                     &remote_bind_schema,
                     true,
                 )?;
+                let mut dynamic_predicate_count = initial_dynamic.predicate_count;
+                let mut dynamic_revision = 0_u64;
                 let initial_pushdown = filters::merge(&pushdown, &initial_dynamic)?;
-                // Join-key side IPC is init-only. If either the SQL predicate
-                // or the first runtime snapshot contains membership keys, keep
-                // that complete initial predicate active rather than replacing
-                // it with continuation metadata that cannot carry the keys.
-                let can_refine_on_continuation = initial_pushdown.join_keys.is_empty();
 
                 // An EMPTY projection is `count(*)`: DataFusion wants row counts
                 // and no columns. `[]` cannot be sent as-is — "no columns" reads
@@ -5071,17 +5068,16 @@ impl ExecutionPlan for VgiScanExec {
                     if generation != dynamic_generation {
                         let (stable_generation, snapshots) =
                             snapshot_dynamic_filters(&dynamic_filters)?;
-                        if can_refine_on_continuation {
-                            let dynamic = filters::serialize_physical_for_remote(
-                                &snapshots,
-                                &filter_schema,
-                                &remote_bind_schema,
-                                false,
-                            )?;
-                            tick_pushdown = Some(filters::merge(&pushdown, &dynamic)?);
-                        } else {
-                            tick_pushdown = None;
-                        }
+                        dynamic_revision = dynamic_revision.saturating_add(1);
+                        let dynamic = filters::serialize_physical_delta_for_remote(
+                            &snapshots,
+                            &filter_schema,
+                            &remote_bind_schema,
+                            dynamic_revision,
+                            dynamic_predicate_count,
+                        )?;
+                        dynamic_predicate_count = dynamic.predicate_count;
+                        tick_pushdown = dynamic.blob.is_some().then_some(dynamic);
                         dynamic_generation = stable_generation;
                     }
                     let next = match scan.next_batch_with_pushdown_filters(

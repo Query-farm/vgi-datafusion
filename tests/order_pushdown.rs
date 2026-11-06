@@ -88,8 +88,8 @@ async fn corpus_order_top_n_hints_are_safe_and_host_verified() -> datafusion::er
         ),
         &[99, 98],
         "n",
-        "desc",
-        "nulls_last",
+        "DESC",
+        "NULLS_LAST",
         2,
     )
     .await?;
@@ -101,8 +101,8 @@ async fn corpus_order_top_n_hints_are_safe_and_host_verified() -> datafusion::er
         ),
         &[0, 1],
         "s",
-        "asc",
-        "nulls_first",
+        "ASC",
+        "NULLS_FIRST",
         2,
     )
     .await?;
@@ -114,8 +114,8 @@ async fn corpus_order_top_n_hints_are_safe_and_host_verified() -> datafusion::er
         ),
         &[2, 3, 4],
         "n",
-        "asc",
-        "nulls_last",
+        "ASC",
+        "NULLS_LAST",
         5,
     )
     .await?;
@@ -130,8 +130,8 @@ async fn corpus_order_top_n_hints_are_safe_and_host_verified() -> datafusion::er
         ),
         &[0, 1],
         "n",
-        "asc",
-        "nulls_last",
+        "ASC",
+        "NULLS_LAST",
         -1,
     )
     .await?;
@@ -146,8 +146,8 @@ async fn corpus_order_top_n_hints_are_safe_and_host_verified() -> datafusion::er
         ),
         &[0, 1, 2],
         "n",
-        "asc",
-        "nulls_last",
+        "ASC",
+        "NULLS_LAST",
         -1,
     )
     .await?;
